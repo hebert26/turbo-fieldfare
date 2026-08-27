@@ -28,9 +28,14 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     /// vision runtime. Sampled per event so Keep Ready is visible while a run
     /// is happening, not only in its final diagnostics.
     private let towerBytes: @Sendable () -> UInt64?
+    /// Nil outside conversation mode, so a one-shot turn reports no gauge
+    /// rather than a misleading zero.
+    private let conversationTokens: @Sendable () -> Int?
 
     init(generationID: UUID,
-         towerBytes: @escaping @Sendable () -> UInt64? = { nil }) {
+         towerBytes: @escaping @Sendable () -> UInt64? = { nil },
+         conversationTokens: @escaping @Sendable () -> Int? = { nil }) {
+        self.conversationTokens = conversationTokens
         self.generationID = generationID
         self.towerBytes = towerBytes
         memorySampler.resetPeak()
@@ -61,8 +66,15 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             }
         case .failed(let error, let diagnostics):
             if !state.terminalCommitted {
+                // A broken lineage is not the same terminal state as a failed
+                // turn. The turn can be retried; the conversation cannot, and
+                // the app has to clear it rather than offer a retry that would
+                // fail identically forever.
+                let kind: DecodeServiceEventKind
+                if case .conversationLineageLost = error { kind = .lineageLost }
+                else { kind = .failed }
                 state.terminal = terminal(
-                    .failed, diagnostics: diagnostics, error: error.userMessage)
+                    kind, diagnostics: diagnostics, error: error.userMessage)
                 state.terminalCommitted = true
             }
         }
@@ -158,6 +170,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             kind: kind, generationID: generationID,
             tokenCount: diagnostics?.generatedTokens ?? 0,
             promptTokenCount: diagnostics?.promptTokenCount,
+            computedPrefillTokens: diagnostics?.computedPrefillTokens,
             prefillSeconds: diagnostics?.prefillSeconds,
             timeToFirstTokenSeconds: diagnostics?.timeToFirstTokenSeconds,
             decodeSeconds: diagnostics?.decodeSeconds ?? 0,
@@ -167,6 +180,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             currentMemoryBytes: memorySampler.sample(),
             peakMemoryBytes: memorySampler.peakBytes,
             visionTowerMappedBytes: diagnostics?.visionTowerMappedBytes,
+            cachedPromptTokens: diagnostics?.cachedPromptTokens,
+            conversationTokenCount: conversationTokens(),
             prefill: diagnostics?.prefill.map(Self.prefillDiagnostics),
             runner: diagnostics?.runner.map(Self.runnerDiagnostics))
     }
