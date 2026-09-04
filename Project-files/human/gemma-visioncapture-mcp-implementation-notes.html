@@ -1,0 +1,702 @@
+<!-- Styles adapted from "Know your unknowns" — Copyright 2026 Anthropic PBC · SPDX-License-Identifier: Apache-2.0
+     Source: https://thariqs.github.io/html-effectiveness/unknowns/09-implementation-notes.html -->
+<!-- implementation-notes-template: v1 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gemma to VisionCapture MCP proof — Implementation notes</title>
+<style>
+  :root {
+    --ivory:  #FAF9F5;
+    --paper:  #FFFFFF;
+    --slate:  #141413;
+    --clay:   #D97757;
+    --clay-d: #B85C3E;
+    --oat:    #E3DACC;
+    --olive:  #788C5D;
+    --g100:   #F0EEE6;
+    --g200:   #E6E3DA;
+    --g300:   #D1CFC5;
+    --g500:   #87867F;
+    --g700:   #3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", Times, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px 100px; }
+
+  /* ── header ── */
+  header.page { padding: 56px 0 8px; position: relative; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--g500);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .eyebrow::before { content: ""; width: 24px; height: 1.5px; background: var(--clay); flex: none; }
+  a.back {
+    position: absolute;
+    top: 60px; right: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    text-decoration: none;
+  }
+  a.back:hover { color: var(--clay-d); }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 10px;
+  }
+  .lede { font-size: 16.5px; color: var(--g700); max-width: 640px; margin: 0 0 30px; }
+
+  /* ── scope box ── */
+  .promptcard {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 22px 26px 24px;
+    position: relative;
+  }
+  .promptcard .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 12px;
+  }
+  .promptcard blockquote {
+    margin: 0;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 17.5px;
+    line-height: 1.6;
+    color: var(--slate);
+    max-width: 62ch;
+  }
+  button.copybtn {
+    position: absolute;
+    top: 18px; right: 18px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--g700);
+    background: var(--g100);
+    border: 1.5px solid var(--g300);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  button.copybtn:hover { border-color: var(--g500); }
+  button.copybtn.done { color: var(--olive); border-color: var(--olive); background: var(--paper); }
+
+  /* ── divider ── */
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 48px 0 30px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--g500);
+    white-space: nowrap;
+  }
+  .divider::before, .divider::after { content: ""; height: 1.5px; background: var(--g300); flex: 1; }
+
+  /* ── the document card ── */
+  .doc {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .doc-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    padding: 14px 22px;
+    border-bottom: 1.5px solid var(--g200);
+    background: var(--g100);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g700);
+  }
+  .doc-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--olive); flex: none; }
+  .doc-head .path { overflow-wrap: anywhere; }
+  .doc-head .meta { margin-left: auto; color: var(--g500); }
+
+  .doc-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 22px 22px 0;
+  }
+  .stat {
+    flex: 1 1 130px;
+    background: var(--ivory);
+    border: 1.5px solid var(--g200);
+    border-radius: 10px;
+    padding: 12px 16px 10px;
+  }
+  .stat .n { font-family: var(--serif); font-weight: 500; font-size: 30px; line-height: 1.1; letter-spacing: -0.02em; }
+  .stat .t { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--g500); margin-top: 3px; }
+  .stat.dev .n { color: var(--clay-d); }
+  .stat.you .n { color: var(--slate); }
+  .stat.you { border-color: var(--oat); background: #F6F0E4; }
+
+  /* filter chips */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 18px 22px 4px;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1.5px solid var(--g300);
+    background: var(--paper);
+    color: var(--g700);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--g500); }
+  .chip.on { background: var(--slate); border-color: var(--slate); color: var(--ivory); }
+  .chip .ct { color: var(--g500); }
+  .chip.on .ct { color: var(--g300); }
+
+  /* timeline */
+  .timeline { padding: 16px 22px 26px; }
+  .entry {
+    display: grid;
+    grid-template-columns: 52px 14px 1fr;
+    gap: 0 14px;
+    position: relative;
+  }
+  .entry .ts {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    padding-top: 4px;
+    text-align: right;
+  }
+  .entry .rail { position: relative; }
+  .entry .rail::before {
+    content: "";
+    position: absolute;
+    left: 50%; top: 0; bottom: 0;
+    width: 1.5px;
+    background: var(--g200);
+    transform: translateX(-50%);
+  }
+  .entry.rail-first .rail::before { top: 10px; }
+  .entry.rail-last .rail::before { bottom: auto; height: 10px; }
+  .entry.rail-first.rail-last .rail::before { display: none; }
+  .entry .node {
+    position: absolute;
+    left: 50%; top: 8px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    background: var(--g300);
+    border: 2px solid var(--paper);
+    box-shadow: 0 0 0 1.5px var(--g300);
+  }
+  .entry.t-plan .node    { background: var(--olive); box-shadow: 0 0 0 1.5px var(--olive); }
+  .entry.t-dev .node     { background: var(--clay);  box-shadow: 0 0 0 1.5px var(--clay); }
+  .entry.t-disc .node    { background: var(--oat);   box-shadow: 0 0 0 1.5px var(--g500); }
+  .entry.t-human .node   { background: var(--slate); box-shadow: 0 0 0 1.5px var(--slate); }
+  .entry .body { padding: 0 0 22px; min-width: 0; }
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2.5px 9px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .t-plan  .badge { color: var(--olive); background: #EEF1E8; border: 1px solid #C9D4B8; }
+  .t-dev   .badge { color: #fff; background: var(--clay); border: 1px solid var(--clay); }
+  .t-disc  .badge { color: var(--g700); background: var(--g100); border: 1px solid var(--g300); }
+  .t-human .badge { color: var(--ivory); background: var(--slate); border: 1px solid var(--slate); }
+  .entry h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 15px;
+    margin: 0 0 4px;
+    letter-spacing: -0.005em;
+  }
+  .entry p { margin: 0; font-size: 14px; color: var(--g700); max-width: 68ch; }
+  .entry code, .devgrid code, .n2 code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--g100);
+    border: 1px solid var(--g200);
+    border-radius: 5px;
+    padding: 1px 5px;
+    overflow-wrap: anywhere;
+  }
+  .ts-mobile { display: none; }
+
+  /* per-entry sub-fields */
+  .devgrid {
+    margin-top: 10px;
+    border: 1.5px solid var(--oat);
+    border-left: 3px solid var(--clay);
+    border-radius: 10px;
+    background: #FBF6EC;
+    overflow: hidden;
+  }
+  .devgrid .row {
+    display: grid;
+    grid-template-columns: 158px 1fr;
+    gap: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    color: var(--g700);
+  }
+  .devgrid .row + .row { border-top: 1px solid #EFE5D2; }
+  .devgrid .k {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--clay-d);
+    padding-top: 2px;
+  }
+  .devgrid .row.chosen .k { color: var(--olive); }
+  .devgrid .row.chosen .v { color: var(--slate); font-weight: 500; }
+  @media (max-width: 560px) {
+    .entry { grid-template-columns: 14px 1fr; }
+    .entry .ts { display: none; }
+    .ts-mobile { display: inline; font-family: var(--mono); font-size: 11px; color: var(--g500); margin-left: 8px; }
+  }
+  /* Below ~860px the 158px key column starves the value column: every task wraps to
+     three or four lines while the key column sits empty. Stack the key above instead. */
+  @media (max-width: 860px) {
+    .devgrid .row { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  /* needs-your-decision block */
+  .next {
+    margin-top: 26px;
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 24px 26px 22px;
+    position: relative;
+  }
+  .next .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 8px;
+  }
+  .next h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .next .sub { font-size: 14px; color: var(--g500); margin: 0 0 14px; max-width: 60ch; }
+  .next ol { margin: 0; padding-left: 22px; }
+  .next li { font-size: 14.5px; color: var(--g700); margin-bottom: 10px; max-width: 70ch; }
+  .next li strong { color: var(--slate); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 22px;
+    border-top: 1.5px solid var(--g300);
+    font-size: 13.5px;
+    color: var(--g500);
+  }
+  footer a { color: var(--clay-d); text-decoration-color: var(--oat); text-underline-offset: 3px; }
+
+  button.copybtn:focus-visible,
+  .chip:focus-visible,
+  a:focus-visible {
+    outline: 3px solid var(--clay);
+    outline-offset: 3px;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <div class="eyebrow">Local agent proof &middot; Implementation notes</div>
+    <a class="back" href="../../README.md">&larr; project README</a>
+    <h1>Gemma to VisionCapture MCP proof</h1>
+    <p class="lede">A minimal host-controlled tool loop in the existing TurboFieldfare Mac chat, using the same loaded Gemma model and decode-service conversation while leaving VisionCapture and the model unchanged.</p>
+
+    <div class="promptcard">
+      <div class="label">Requested scope</div>
+      <button class="copybtn" id="copyScope" type="button">copy scope</button>
+      <blockquote id="scopeText">&ldquo;Keep Agent Mode as the ordinary TurboFieldfare Mac chat with optional tools. When the user asks to test an application, Gemma requests the existing VisionCapture skills through a controlled file tool, then prepares function calls that the Mac host validates and forwards to VisionCapture&rsquo;s local MCP server for the selected app and Simulator. Keep the first proof simple and do not integrate TurboFieldfare into VisionCapture.&rdquo;</blockquote>
+    </div>
+  </header>
+
+  <div class="divider">Implementation record</div>
+
+  <div class="doc">
+    <div class="doc-head">
+      <span class="dot"></span>
+      <span class="path">TurboFieldfare app/runtime source + VisionCapture MCP source and skills</span>
+      <span class="meta">created 2026-09-04 &middot; updated 2026-09-04 &middot; implementation built, live proof pending</span>
+    </div>
+
+    <div class="doc-summary">
+      <div class="stat"><div class="n">17</div><div class="t">notes</div></div>
+      <div class="stat"><div class="n">5</div><div class="t">confirmed decisions and findings</div></div>
+      <div class="stat dev"><div class="n">9</div><div class="t">implemented</div></div>
+      <div class="stat you"><div class="n">1</div><div class="t">live-proof input needed</div></div>
+    </div>
+
+    <div class="chips" role="tablist" aria-label="Filter entries">
+      <button class="chip on" data-f="all" type="button" aria-pressed="true">All <span class="ct">17</span></button>
+      <button class="chip" data-f="plan" type="button" aria-pressed="false">Plan <span class="ct">11</span></button>
+      <button class="chip" data-f="disc" type="button" aria-pressed="false">Findings <span class="ct">5</span></button>
+      <button class="chip" data-f="human" type="button" aria-pressed="false">For you <span class="ct">1</span></button>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <div class="entry t-disc" data-t="disc">
+        <div class="ts">01</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Finding &middot; confirmed</span><span class="ts-mobile">01</span>
+          <h3>The existing Mac decode path needed a narrow tool bridge</h3>
+          <p>The original <code>AppGenerationRequest.swift</code> and <code>DecodeProtocol.swift</code> had no tool fields. The approved architecture keeps the existing Mac chat and decode service, then adds only optional tool definitions, tool-call events, and tool-result continuation. It does not use or require <code>TurboFieldfareServer</code>.</p>
+        </div>
+      </div>
+
+      <div class="entry t-disc" data-t="disc">
+        <div class="ts">02</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Finding &middot; confirmed</span><span class="ts-mobile">02</span>
+          <h3>The parser and native Gemma tool format already exist</h3>
+          <p><code>StructuredAssistantDecoder.swift</code>, <code>GemmaToolCallParser.swift</code>, and <code>GFTokenizer.FunctionDefinition</code> already decode native Gemma calls. <code>TurboFieldfareServer/Core/ServerInference.swift</code> is the working reference for rendering tools and returning structured calls.</p>
+        </div>
+      </div>
+
+      <div class="entry t-disc" data-t="disc">
+        <div class="ts">03</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Finding &middot; confirmed</span><span class="ts-mobile">03</span>
+          <h3>VisionCapture needs no implementation change</h3>
+          <p><code>MCPHTTPServer.swift</code> already exposes loopback <code>POST /mcp</code>. <code>MCPRequestHandler.swift</code> supports <code>initialize</code>, <code>tools/list</code>, and <code>tools/call</code>, and publishes exactly one public tool named <code>execute</code>.</p>
+        </div>
+      </div>
+
+      <div class="entry t-disc" data-t="disc">
+        <div class="ts">04</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Finding &middot; confirmed + inference</span><span class="ts-mobile">04</span>
+          <h3>Agent Mode must preserve the loaded runtime configuration</h3>
+          <p>Agent Mode uses the model session that the existing Load Model control created. Context length, expert-cache slots, temperature, Top-K, Top-P, prefill, RDADVISE, image support, and the other current app controls continue to apply unchanged. The normal request validation and retained-conversation context limit remain the gate. No second model profile or server startup configuration is introduced.</p>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">05</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">05</span>
+          <h3>Add an explicit in-session Agent Mode</h3>
+          <p><code>MacAppSettings.swift</code> persists one opt-in Agent Mode toggle, shown in the existing Inspector. The mode sends every prompt through the same <code>AppModel</code>, <code>DecodeServiceInferenceClient</code>, and loaded decode-service model as ordinary chat. Tools are available but optional. A normal prompt such as <code>hi</code> produces a normal answer without requiring target configuration, reading skills, or opening an MCP connection. No external model server is started.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Visible change</div><div class="v">One toggle plus bundle identifier and Simulator UDID fields that are required only when VisionCapture execution is requested.</div></div>
+            <div class="row"><div class="k">Preserved</div><div class="v">Load Model, Unload Model, sampling controls, the composer, transcript, status HUD, and user-pasted image path behave as before.</div></div>
+            <div class="row"><div class="k">Boundary</div><div class="v">Changing the mode requires an empty New Chat because the tool template belongs to one retained conversation. Target fields may change during ordinary idle chat, but the first accepted VisionCapture execution locks them until New Chat.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">06</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">06</span>
+          <h3>Expose compact tools and allowlisted local skill reads</h3>
+          <p><code>VisionCaptureToolDefinitions.swift</code> and <code>VisionCaptureSkillReader.swift</code> expose fixed names for this checkout&rsquo;s <code>.codex/skills/vision-capture/SKILL.md</code>, efficient-exploration skill, and local <code>reference/index.md</code>. The reader is created lazily only after Gemma requests the read tool. The release binary carries a compiled checkout fallback so an installed app can find these copied files when launched outside the checkout. VisionCapture remains unchanged.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Why</div><div class="v">The raw VisionCapture <code>tools/list</code> schema contains forms that are not directly accepted by <code>GemmaToolSchema</code>. A small wrapper schema avoids both incompatibility and unnecessary context cost.</div></div>
+            <div class="row"><div class="k">Acceptance</div><div class="v">Traversal strings, symlinks outside the allowlisted local skill files, and arbitrary absolute paths never return bytes.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">07</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">07</span>
+          <h3>Add a loopback-only VisionCapture MCP client</h3>
+          <p><code>Sources/TurboFieldfareApp/Core/Tools/VisionCaptureMCPClient.swift</code> is created lazily only after Gemma requests <code>visioncapture_execute</code> and the host accepts the target. It then initializes JSON-RPC, verifies exactly one published tool named <code>execute</code> through <code>tools/list</code>, and sends sequential <code>tools/call</code> requests to VisionCapture&rsquo;s inspected default endpoint, <code>http://127.0.0.1:8766/mcp</code>. Ordinary conversation never opens this connection.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Boundary</div><div class="v">Only <code>127.0.0.1</code>, only <code>/mcp</code>, only <code>execute</code>, with request timeout and response-size limits.</div></div>
+            <div class="row"><div class="k">Acceptance</div><div class="v">A proposed remote host, different path, or different MCP tool is refused without opening the connection.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">08</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">08</span>
+          <h3>Carry optional tool turns through the existing decode service</h3>
+          <p><code>AppGenerationRequest.swift</code> and <code>DecodeProtocol.swift</code> now carry an optional tool-aware user step or matched tool results. <code>AppInferenceEvent</code> and <code>DecodeServiceEvent</code> can return a structured tool call with its name, ID, and JSON arguments. Requests without these optional values keep the ordinary chat path.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Why</div><div class="v">This is the minimum protocol change needed to return host tool results to the same model process and retained KV conversation.</div></div>
+            <div class="row"><div class="k">Acceptance</div><div class="v">A Gemma tool call reaches the Mac host intact, and every result must match the pending call ID and name.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">09</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">09</span>
+          <h3>Keep one loaded model and the existing chat session</h3>
+          <p><code>Sources/TurboFieldfareApp/Core/State/AppModel.swift</code> runs Agent Mode through the same request preparation, retained images, decode client, and loaded runtime as normal chat. Enabling the mode does not unload, reload, replace, or block the app model, and it does not start a second model process.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Rejected route</div><div class="v">A separate <code>TurboFieldfareServer</code> process and a second model-loading workflow.</div></div>
+            <div class="row"><div class="k">Acceptance</div><div class="v">The existing Load Model and Unload Model controls remain available, and one decode-service model owns every ordinary and tool-aware turn.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">10</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">10</span>
+          <h3>Continue tool results inside the retained model conversation</h3>
+          <p><code>MultimodalConversation.swift</code> uses the existing Gemma tool renderer and <code>StructuredAssistantDecoder</code>. The decode service holds one conversation admission while assistant calls and host results continue against the same KV state, then commits one visible user-and-final-answer pair. New Chat resets both the visible conversation and internal tool state.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Acceptance</div><div class="v">Every result matches the pending call, a failed tool run marks the lineage unusable, and New Chat is the recovery boundary.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">11</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">11</span>
+          <h3>Run one bounded host-controlled loop</h3>
+          <p>Add <code>Sources/TurboFieldfareApp/Core/Tools/VisionCaptureToolLoop.swift</code> and call it from <code>Sources/TurboFieldfareApp/Core/State/AppModel.swift</code>. It reads a call, validates it, executes it, returns the result to Gemma, and repeats until Gemma answers or a terminal rule fires.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Stop rules</div><div class="v">Final answer, user cancellation, fixed 16-call limit, MCP timeout or refusal, context exhaustion, identity mismatch, malformed call, or a request for unsupported visual evidence.</div></div>
+            <div class="row"><div class="k">Acceptance</div><div class="v">An ordinary Send action may return a final answer with no tools. When Gemma requests VisionCapture execution, the host requires the three ordered instruction reads first, then returns each result to the same model conversation. Calls never overlap.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">12</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">12</span>
+          <h3>Lock the selected application and Simulator</h3>
+          <p><code>VisionCaptureToolLoop.swift</code> does not validate or require target fields for an ordinary chat turn. The fields remain editable while no turn is running. Only after Gemma requests <code>visioncapture_execute</code> does the host validate the exact bundle identifier and Simulator UDID, inject both into the VisionCapture request, and enforce the target established by the first accepted execution. Missing or conflicting identity becomes a structured host tool error returned to Gemma, with no MCP dispatch or device input. Capabilities, grants, session IDs, and proof fields remain opaque and unchanged.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Acceptance</div><div class="v">Missing identity does not block normal chat and stops only the requested VisionCapture action. A later execute call cannot change either locked value. <code>payload.proof.verdict</code> controls continuation where the skill requires it.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">13</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented</span><span class="ts-mobile">13</span>
+          <h3>Preserve the existing chat, status, and image experience</h3>
+          <p>Agent Mode does not replace the chat placeholder, transcript, status HUD, Generate and Stop controls, or image-paste path. User-pasted images still flow through the existing vision companion when installed. Internal tool arguments, capability values, response bodies, and image data are not added to the visible transcript.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Acceptance</div><div class="v">Send remains disabled during the loop, Stop cancels the active model or MCP step, and New Chat clears the retained tool state.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">14</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Build complete &middot; live proof pending</span><span class="ts-mobile">14</span>
+          <h3>Build the proof, then run one bounded driver-only journey</h3>
+          <p>The owner requested no unit tests for this proof, so no tests were added or run. Release builds completed successfully for <code>TurboFieldfareMac</code> and <code>TurboFieldfareDecodeService</code>. No live model or Simulator journey ran because the exact bundle identifier and Simulator UDID were not supplied, and an existing installed decode-service process was left untouched.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Build evidence</div><div class="v"><code>swift build -c release --product TurboFieldfareMac</code> and <code>swift build -c release --product TurboFieldfareDecodeService</code> both exited successfully.</div></div>
+            <div class="row"><div class="k">Still unverified</div><div class="v">A real app-testing request must produce the required skill reads, at least one <code>execute</code> call, a returned proof verdict, and a final summary. Source inspection and a successful build are not live acceptance.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">15</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Future plan &middot; parked</span><span class="ts-mobile">15</span>
+          <h3>Discuss a larger context option after the first proof</h3>
+          <p>Keep 64K as the selected context for the first proof. In a separate follow-up, consider adding a larger option for Macs with more available unified memory. The requested target is around 120K. Before implementation, choose between an exact 120K value and the standard 128K boundary, measure a real model load and short generation, and agree how the app should warn when memory pressure is too high.</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Current evidence</div><div class="v">The app currently stops at 64K. Its existing KV-cache formula estimates 120K at +2.35 GB versus the 8K default, or +1.17 GB beyond 64K. A 128K option estimates +2.52 GB versus 8K, or +1.34 GB beyond 64K. These figures do not include model weights, expert-cache slots, Metal scratch allocations, the optional vision tower, or other process memory.</div></div>
+            <div class="row"><div class="k">Boundary</div><div class="v">Do not add this option during the first proof. Do not treat the estimate as runtime validation. Discuss the exact token boundary, supported hardware, user warning, and acceptance measurement before changing <code>AppContextLengthOption.swift</code>, <code>ServerArguments.swift</code>, or their tests.</div></div>
+            <div class="row"><div class="k">Model limit</div><div class="v">The official Gemma 4 26B-A4B model card states a 256K context length, so both proposed values are inside the model specification. TurboFieldfare support above 64K is not yet proven.</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-disc" data-t="disc">
+        <div class="ts">16</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Decision &middot; confirmed</span><span class="ts-mobile">16</span>
+          <h3>Keep the first proof accessibility-only</h3>
+          <p>The implemented boundary is bounded, driver-only, and accessibility-only. VisionCapture screenshot, Computer Use, pointer, preview, recording, and visual-bypass requests stop before forwarding. This does not disable the existing chat image path: images pasted by the user still reach the same loaded model through the installed vision companion. Transporting images returned by VisionCapture remains outside this proof.</p>
+        </div>
+      </div>
+
+      <div class="entry t-human" data-t="human">
+        <div class="ts">17</div><div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Input needed</span><span class="ts-mobile">17</span>
+          <h3>Provide the acceptance target</h3>
+          <p>Provide the exact app bundle identifier and Simulator UDID before the live app-testing journey. These values are not prerequisites for ordinary Agent Mode conversation. The MCP endpoint is fixed to VisionCapture&rsquo;s default <code>127.0.0.1:8766/mcp</code>, and the proof uses a fixed limit of 16 model-requested tool calls. The loaded app model keeps its current context, expert-cache, sampling, prefill, RDADVISE, and image settings.</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="next">
+    <div class="label">Live proof pending</div>
+    <h2>What still needs your input</h2>
+    <p class="sub">The implementation and release builds are complete. A real app journey still needs its exact target.</p>
+    <button class="copybtn" id="copyNext" type="button">copy list</button>
+    <ol id="nextList">
+      <li><strong>Acceptance target:</strong> provide the exact bundle identifier and Simulator UDID, then run the bounded accessibility-only journey with VisionCapture available on its default local endpoint.</li>
+    </ol>
+  </div>
+
+  <footer>
+    <a href="../../Sources/TurboFieldfareApp/Core/Inference/AppGenerationRequest.swift">Current Mac inference request</a><br>
+    <a href="../../Sources/TurboFieldfareApp/Core/Inference/AppConversation.swift">Current Mac conversation model</a><br>
+    <a href="../../Sources/TurboFieldfareDecodeProtocol/DecodeProtocol.swift">Current decode-service protocol</a><br>
+    <a href="../../Sources/TurboFieldfare/Tokenization/StructuredAssistantDecoder.swift">Existing structured assistant decoder</a><br>
+    <a href="../../Sources/TurboFieldfare/Runtime/Generation/MultimodalConversation.swift">Retained model conversation and tool continuation</a><br>
+    <a href="../../Sources/TurboFieldfareApp/Core/Tools/VisionCaptureToolLoop.swift">Bounded VisionCapture host loop</a><br>
+    <a href="../../Sources/TurboFieldfareApp/Core/Configuration/AppContextLengthOption.swift">Current context options and memory estimate</a><br>
+    <a href="https://huggingface.co/google/gemma-4-26B-A4B-it">Official Gemma 4 26B-A4B model card</a><br>
+    <a href="../../.codex/skills/vision-capture/SKILL.md">Local VisionCapture skill copy</a><br>
+    <a href="../../.codex/skills/vision-capture-efficient-exploration/SKILL.md">Local efficient exploration companion copy</a>
+    <br>This page summarizes the linked evidence. If they disagree, the source evidence wins.
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  function wireCopy(btnId, getText) {
+    var btn = document.getElementById(btnId);
+    if (!btn) return;
+    var original = btn.textContent;
+    btn.addEventListener('click', function () {
+      var text = getText();
+      function done() {
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.classList.remove('done');
+        }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text); done(); });
+      } else {
+        fallback(text); done();
+      }
+    });
+  }
+  function fallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  wireCopy('copyScope', function () {
+    var el = document.getElementById('scopeText');
+    return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+  });
+
+  wireCopy('copyNext', function () {
+    var items = document.querySelectorAll('#nextList li');
+    var out = [];
+    items.forEach(function (li, i) { out.push((i + 1) + '. ' + li.textContent.replace(/\s+/g, ' ').trim()); });
+    return out.join('\n');
+  });
+
+  var chips = document.querySelectorAll('.chip');
+  var entries = document.querySelectorAll('.entry');
+  function markRailEnds() {
+    var visible = Array.prototype.filter.call(entries, function (e) {
+      return !e.classList.contains('hidden');
+    });
+    entries.forEach(function (e) {
+      e.classList.remove('rail-first', 'rail-last');
+    });
+    if (visible.length) {
+      visible[0].classList.add('rail-first');
+      visible[visible.length - 1].classList.add('rail-last');
+    }
+  }
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      chips.forEach(function (c) { c.classList.remove('on'); });
+      chips.forEach(function (c) { c.setAttribute('aria-pressed', 'false'); });
+      chip.classList.add('on');
+      chip.setAttribute('aria-pressed', 'true');
+      var f = chip.getAttribute('data-f');
+      entries.forEach(function (e) {
+        var t = e.getAttribute('data-t');
+        var show = (f === 'all') || (f === t);
+        e.classList.toggle('hidden', !show);
+      });
+      markRailEnds();
+    });
+  });
+  markRailEnds();
+})();
+</script>
+</body>
+</html>

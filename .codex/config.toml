@@ -1,0 +1,10 @@
+[features.multi_agent_v2]
+enabled = true
+max_concurrent_threads_per_session = 10
+
+[agents]
+job_max_runtime_seconds = 1800
+
+[agents.luna-max-investigator]
+description = "Max-reasoning Luna investigator for deep, read-only VisionCapture code, history, document, and evidence audits."
+config_file = "/Users/dev-machine/Dev/VisionOS/.codex/agents/luna-max-investigator.toml"

@@ -1,0 +1,563 @@
+<!-- Styles adapted from "Know your unknowns" — Copyright 2026 Anthropic PBC · SPDX-License-Identifier: Apache-2.0
+     Source: https://thariqs.github.io/html-effectiveness/unknowns/09-implementation-notes.html
+
+     AUTHOR: Copy this file to Project-files/human/<slug>-implementation-notes.html.
+     AUTHOR: Replace every {{placeholder}}, delete unused example entries, and remove all AUTHOR comments.
+     AUTHOR: Keep this page factual. Source files and evidence remain authoritative.
+     AUTHOR: Preserve the CSS and reuse the four entry types below.
+
+     ENTRY TYPES
+       t-plan   olive   intended scope, acceptance contract, or planned work
+       t-dev    clay    implemented change or verified result
+       t-disc   oat     finding, constraint, or unresolved technical fact
+       t-human  black   owner decision that cannot be inferred
+-->
+<!-- implementation-notes-template: v1 -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}} — Implementation notes</title>
+<style>
+  :root {
+    --ivory:  #FAF9F5;
+    --paper:  #FFFFFF;
+    --slate:  #141413;
+    --clay:   #D97757;
+    --clay-d: #B85C3E;
+    --oat:    #E3DACC;
+    --olive:  #788C5D;
+    --g100:   #F0EEE6;
+    --g200:   #E6E3DA;
+    --g300:   #D1CFC5;
+    --g500:   #87867F;
+    --g700:   #3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", Times, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px 100px; }
+
+  /* ── header ── */
+  header.page { padding: 56px 0 8px; position: relative; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--g500);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .eyebrow::before { content: ""; width: 24px; height: 1.5px; background: var(--clay); flex: none; }
+  a.back {
+    position: absolute;
+    top: 60px; right: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    text-decoration: none;
+  }
+  a.back:hover { color: var(--clay-d); }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 10px;
+  }
+  .lede { font-size: 16.5px; color: var(--g700); max-width: 640px; margin: 0 0 30px; }
+
+  /* ── scope box ── */
+  .promptcard {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 22px 26px 24px;
+    position: relative;
+  }
+  .promptcard .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 12px;
+  }
+  .promptcard blockquote {
+    margin: 0;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 17.5px;
+    line-height: 1.6;
+    color: var(--slate);
+    max-width: 62ch;
+  }
+  button.copybtn {
+    position: absolute;
+    top: 18px; right: 18px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--g700);
+    background: var(--g100);
+    border: 1.5px solid var(--g300);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  button.copybtn:hover { border-color: var(--g500); }
+  button.copybtn.done { color: var(--olive); border-color: var(--olive); background: var(--paper); }
+
+  /* ── divider ── */
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 48px 0 30px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--g500);
+    white-space: nowrap;
+  }
+  .divider::before, .divider::after { content: ""; height: 1.5px; background: var(--g300); flex: 1; }
+
+  /* ── the document card ── */
+  .doc {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .doc-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    padding: 14px 22px;
+    border-bottom: 1.5px solid var(--g200);
+    background: var(--g100);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g700);
+  }
+  .doc-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--olive); flex: none; }
+  .doc-head .path { overflow-wrap: anywhere; }
+  .doc-head .meta { margin-left: auto; color: var(--g500); }
+
+  .doc-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 22px 22px 0;
+  }
+  .stat {
+    flex: 1 1 130px;
+    background: var(--ivory);
+    border: 1.5px solid var(--g200);
+    border-radius: 10px;
+    padding: 12px 16px 10px;
+  }
+  .stat .n { font-family: var(--serif); font-weight: 500; font-size: 30px; line-height: 1.1; letter-spacing: -0.02em; }
+  .stat .t { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--g500); margin-top: 3px; }
+  .stat.dev .n { color: var(--clay-d); }
+  .stat.you .n { color: var(--slate); }
+  .stat.you { border-color: var(--oat); background: #F6F0E4; }
+
+  /* filter chips */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 18px 22px 4px;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1.5px solid var(--g300);
+    background: var(--paper);
+    color: var(--g700);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--g500); }
+  .chip.on { background: var(--slate); border-color: var(--slate); color: var(--ivory); }
+  .chip .ct { color: var(--g500); }
+  .chip.on .ct { color: var(--g300); }
+
+  /* timeline */
+  .timeline { padding: 16px 22px 26px; }
+  .entry {
+    display: grid;
+    grid-template-columns: 52px 14px 1fr;
+    gap: 0 14px;
+    position: relative;
+  }
+  .entry .ts {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    padding-top: 4px;
+    text-align: right;
+  }
+  .entry .rail { position: relative; }
+  .entry .rail::before {
+    content: "";
+    position: absolute;
+    left: 50%; top: 0; bottom: 0;
+    width: 1.5px;
+    background: var(--g200);
+    transform: translateX(-50%);
+  }
+  .entry.rail-first .rail::before { top: 10px; }
+  .entry.rail-last .rail::before { bottom: auto; height: 10px; }
+  .entry.rail-first.rail-last .rail::before { display: none; }
+  .entry .node {
+    position: absolute;
+    left: 50%; top: 8px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    background: var(--g300);
+    border: 2px solid var(--paper);
+    box-shadow: 0 0 0 1.5px var(--g300);
+  }
+  .entry.t-plan .node    { background: var(--olive); box-shadow: 0 0 0 1.5px var(--olive); }
+  .entry.t-dev .node     { background: var(--clay);  box-shadow: 0 0 0 1.5px var(--clay); }
+  .entry.t-disc .node    { background: var(--oat);   box-shadow: 0 0 0 1.5px var(--g500); }
+  .entry.t-human .node   { background: var(--slate); box-shadow: 0 0 0 1.5px var(--slate); }
+  .entry .body { padding: 0 0 22px; min-width: 0; }
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2.5px 9px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .t-plan  .badge { color: var(--olive); background: #EEF1E8; border: 1px solid #C9D4B8; }
+  .t-dev   .badge { color: #fff; background: var(--clay); border: 1px solid var(--clay); }
+  .t-disc  .badge { color: var(--g700); background: var(--g100); border: 1px solid var(--g300); }
+  .t-human .badge { color: var(--ivory); background: var(--slate); border: 1px solid var(--slate); }
+  .entry h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 15px;
+    margin: 0 0 4px;
+    letter-spacing: -0.005em;
+  }
+  .entry p { margin: 0; font-size: 14px; color: var(--g700); max-width: 68ch; }
+  .entry code, .devgrid code, .n2 code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--g100);
+    border: 1px solid var(--g200);
+    border-radius: 5px;
+    padding: 1px 5px;
+    overflow-wrap: anywhere;
+  }
+  .ts-mobile { display: none; }
+
+  /* per-entry sub-fields */
+  .devgrid {
+    margin-top: 10px;
+    border: 1.5px solid var(--oat);
+    border-left: 3px solid var(--clay);
+    border-radius: 10px;
+    background: #FBF6EC;
+    overflow: hidden;
+  }
+  .devgrid .row {
+    display: grid;
+    grid-template-columns: 158px 1fr;
+    gap: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    color: var(--g700);
+  }
+  .devgrid .row + .row { border-top: 1px solid #EFE5D2; }
+  .devgrid .k {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--clay-d);
+    padding-top: 2px;
+  }
+  .devgrid .row.chosen .k { color: var(--olive); }
+  .devgrid .row.chosen .v { color: var(--slate); font-weight: 500; }
+  @media (max-width: 560px) {
+    .entry { grid-template-columns: 14px 1fr; }
+    .entry .ts { display: none; }
+    .ts-mobile { display: inline; font-family: var(--mono); font-size: 11px; color: var(--g500); margin-left: 8px; }
+  }
+  /* Below ~860px the 158px key column starves the value column: every task wraps to
+     three or four lines while the key column sits empty. Stack the key above instead. */
+  @media (max-width: 860px) {
+    .devgrid .row { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  /* needs-your-decision block */
+  .next {
+    margin-top: 26px;
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 24px 26px 22px;
+    position: relative;
+  }
+  .next .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 8px;
+  }
+  .next h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .next .sub { font-size: 14px; color: var(--g500); margin: 0 0 14px; max-width: 60ch; }
+  .next ol { margin: 0; padding-left: 22px; }
+  .next li { font-size: 14.5px; color: var(--g700); margin-bottom: 10px; max-width: 70ch; }
+  .next li strong { color: var(--slate); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 22px;
+    border-top: 1.5px solid var(--g300);
+    font-size: 13.5px;
+    color: var(--g500);
+  }
+  footer a { color: var(--clay-d); text-decoration-color: var(--oat); text-underline-offset: 3px; }
+
+  button.copybtn:focus-visible,
+  .chip:focus-visible,
+  a:focus-visible {
+    outline: 3px solid var(--clay);
+    outline-offset: 3px;
+  }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="page">
+    <div class="eyebrow">{{topic}} &middot; Implementation notes</div>
+    <!-- AUTHOR: Remove this link when there is no safe relative source link. -->
+    <a class="back" href="{{primary_source_href}}">&larr; source</a>
+    <h1>{{title}}</h1>
+    <p class="lede">{{one-sentence outcome}}</p>
+
+    <div class="promptcard">
+      <div class="label">Requested scope</div>
+      <button class="copybtn" id="copyScope" type="button">copy scope</button>
+      <blockquote id="scopeText">&ldquo;{{requested scope, quoted or accurately compressed}}&rdquo;</blockquote>
+    </div>
+  </header>
+
+  <div class="divider">Implementation record</div>
+
+  <div class="doc">
+    <div class="doc-head">
+      <span class="dot"></span>
+      <span class="path">{{authoritative source path or paths}}</span>
+      <span class="meta">created {{YYYY-MM-DD}} &middot; updated {{YYYY-MM-DD}} &middot; {{status}}</span>
+    </div>
+
+    <div class="doc-summary">
+      <div class="stat"><div class="n">{{n}}</div><div class="t">notes</div></div>
+      <div class="stat"><div class="n">{{n}}</div><div class="t">verified</div></div>
+      <div class="stat dev"><div class="n">{{n}}</div><div class="t">open</div></div>
+      <div class="stat you"><div class="n">{{n}}</div><div class="t">need your decision</div></div>
+    </div>
+
+    <div class="chips" role="tablist" aria-label="Filter entries">
+      <button class="chip on" data-f="all" type="button" aria-pressed="true">All <span class="ct">{{n}}</span></button>
+      <button class="chip" data-f="plan" type="button" aria-pressed="false">Plan <span class="ct">{{n}}</span></button>
+      <button class="chip" data-f="dev" type="button" aria-pressed="false">Implemented <span class="ct">{{n}}</span></button>
+      <button class="chip" data-f="disc" type="button" aria-pressed="false">Findings <span class="ct">{{n}}</span></button>
+      <button class="chip" data-f="human" type="button" aria-pressed="false">For you <span class="ct">{{n}}</span></button>
+    </div>
+
+    <div class="timeline" id="timeline">
+      <!-- AUTHOR: Keep only the entry types the page needs. Duplicate an entry when needed. -->
+      <div class="entry t-plan" data-t="plan">
+        <div class="ts">01</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Plan &middot; {{status}}</span><span class="ts-mobile">01</span>
+          <h3>{{planned outcome}}</h3>
+          <p>{{why this work exists and what is observably true when it succeeds}}</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Scope</div><div class="v">{{exact included behavior}}</div></div>
+            <div class="row"><div class="k">Not included</div><div class="v">{{exact excluded behavior}}</div></div>
+            <div class="row"><div class="k">Touches</div><div class="v"><code>{{exact file or component}}</code></div></div>
+            <div class="row"><div class="k">Acceptance</div><div class="v">{{observable acceptance condition}}</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-dev" data-t="dev">
+        <div class="ts">02</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Implemented &middot; {{verified or not verified}}</span><span class="ts-mobile">02</span>
+          <h3>{{visible result}}</h3>
+          <p>{{specific implementation outcome}}</p>
+          <div class="devgrid">
+            <div class="row"><div class="k">Changed</div><div class="v"><code>{{exact file or component}}</code> &mdash; {{what changed}}</div></div>
+            <div class="row"><div class="k">Behavior</div><div class="v">{{what the owner or customer now sees}}</div></div>
+            <div class="row chosen"><div class="k">Evidence</div><div class="v">{{test, receipt, screenshot, or inspection result}}</div></div>
+            <div class="row"><div class="k">Remaining</div><div class="v">{{open check, risk, or “Nothing open.”}}</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="entry t-disc" data-t="disc">
+        <div class="ts">03</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Finding</span><span class="ts-mobile">03</span>
+          <h3>{{specific finding}}</h3>
+          <p>{{what is true, the source that proves it, and why it matters}}</p>
+        </div>
+      </div>
+
+      <div class="entry t-human" data-t="human">
+        <div class="ts">04</div>
+        <div class="rail"><span class="node"></span></div>
+        <div class="body">
+          <span class="badge">Needs your decision</span><span class="ts-mobile">04</span>
+          <h3>{{decision question}}</h3>
+          <p>{{options, effect of each option, and evidence-based recommendation}}</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="next">
+    <div class="label">Open</div>
+    <h2>What still needs your decision</h2>
+    <p class="sub">Only choices that cannot be resolved from the current scope or evidence belong here.</p>
+    <button class="copybtn" id="copyNext" type="button">copy list</button>
+    <ol id="nextList">
+      <li><strong>{{short decision name}}:</strong> {{choice, effect of each option, and recommendation}}</li>
+    </ol>
+    <!-- AUTHOR: If nothing is open, remove the button and list, then write:
+         <p class="sub">Nothing open. The current evidence supports the recorded outcome.</p> -->
+  </div>
+
+  <footer>
+    <a href="{{primary_source_href}}">{{primary source label}}</a>
+    <!-- AUTHOR: Add more relative source links only when they are authoritative. -->
+    <br>This page summarizes the linked evidence. If they disagree, the source evidence wins.
+  </footer>
+
+</div>
+
+<script>
+(function () {
+  function wireCopy(btnId, getText) {
+    var btn = document.getElementById(btnId);
+    if (!btn) return;
+    var original = btn.textContent;
+    btn.addEventListener('click', function () {
+      var text = getText();
+      function done() {
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.classList.remove('done');
+        }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text); done(); });
+      } else {
+        fallback(text); done();
+      }
+    });
+  }
+  function fallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  wireCopy('copyScope', function () {
+    var el = document.getElementById('scopeText');
+    return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+  });
+
+  wireCopy('copyNext', function () {
+    var items = document.querySelectorAll('#nextList li');
+    var out = [];
+    items.forEach(function (li, i) { out.push((i + 1) + '. ' + li.textContent.replace(/\s+/g, ' ').trim()); });
+    return out.join('\n');
+  });
+
+  var chips = document.querySelectorAll('.chip');
+  var entries = document.querySelectorAll('.entry');
+  function markRailEnds() {
+    var visible = Array.prototype.filter.call(entries, function (e) {
+      return !e.classList.contains('hidden');
+    });
+    entries.forEach(function (e) {
+      e.classList.remove('rail-first', 'rail-last');
+    });
+    if (visible.length) {
+      visible[0].classList.add('rail-first');
+      visible[visible.length - 1].classList.add('rail-last');
+    }
+  }
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      chips.forEach(function (c) { c.classList.remove('on'); });
+      chips.forEach(function (c) { c.setAttribute('aria-pressed', 'false'); });
+      chip.classList.add('on');
+      chip.setAttribute('aria-pressed', 'true');
+      var f = chip.getAttribute('data-f');
+      entries.forEach(function (e) {
+        var t = e.getAttribute('data-t');
+        var show = (f === 'all') || (f === t);
+        e.classList.toggle('hidden', !show);
+      });
+      markRailEnds();
+    });
+  });
+  markRailEnds();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+interface:
+  display_name: "UML Diagram Expert"
+  short_description: "Choose and create clear UML diagrams from task intent"
+  default_prompt: "Use $create-uml-diagrams to select and draft the right UML diagram for this task."
