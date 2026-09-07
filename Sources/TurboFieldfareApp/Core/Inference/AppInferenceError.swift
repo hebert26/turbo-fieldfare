@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfare
 
 public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertible {
     case invalidRequest(String)
@@ -15,6 +16,8 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
     /// leave the conversation usable, this one can only be cleared.
     case conversationLineageLost(String)
     case unknown(String)
+    case structuredToolFailure(
+        message: String, canRegenerateToolResult: Bool, evidence: StructuredToolFailureEvidence?)
 
     public var description: String { userMessage }
 
@@ -40,7 +43,7 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
             return "Generation cancelled."
         case .conversationLineageLost(let message):
             return "This conversation can no longer continue: \(message) Start a new chat."
-        case .unknown(let message):
+        case .unknown(let message), .structuredToolFailure(let message, _, _):
             return message
         }
     }

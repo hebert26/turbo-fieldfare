@@ -4,6 +4,7 @@ import TurboFieldfare
 import TurboFieldfareRepackCore
 import TurboFieldfare
 import Observation
+import TurboFieldfareDecodeProtocol
 
 @MainActor
 @Observable
@@ -39,6 +40,11 @@ public final class AppModel {
     /// them here rather than in `conversation` is what preserves that type's
     /// invariant: its turns are exactly the model's context.
     public private(set) var archivedPairs: [(user: AppChatTurn, assistant: AppChatTurn)] = []
+    /// Host-side Agent Mode activity keyed to the visible user turn. This is
+    /// transcript-only state and never enters `AppConversation` or the model KV.
+    private var agentActivitiesByTurnID: [UUID: [AppAgentActivity]] = [:]
+    private var retainedScreenshotPreviewCount = 0
+    public private(set) var outputAgentActivities: [AppAgentActivity] = []
     /// The epoch the inference side has actually been told to open. Nil after a
     /// load or unload, both of which rebuild or release the KV; the next turn
     /// opens the conversation again before it sends anything.
@@ -58,6 +64,9 @@ public final class AppModel {
     /// Whether launching the app should load the model straight away. Off by
     /// default, because loading takes minutes and holds gigabytes.
     public private(set) var loadModelOnLaunch: Bool = false
+    public private(set) var agentModeEnabled: Bool = false
+    public private(set) var agentBundleIdentifier: String = ""
+    public private(set) var agentSimulatorUDID: String = ""
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
     public var installState: AppModelInstallState = .idle
@@ -84,6 +93,34 @@ public final class AppModel {
     public private(set) var phase: AppGenerationPhase = .idle
     public private(set) var liveTokenCount: Int = 0
     public private(set) var liveElapsedDecodeSeconds: Double = 0
+    private var liveStructuredProgress: DecodeStructuredProgress?
+    /// Display only. Never appended to the answer, conversation, or tool results.
+    public private(set) var thinkingPreview: DecodeThinkingPreview?
+    /// Raw unfinished model output for display only, never an executable request.
+    public private(set) var toolCallPreview: DecodeToolCallPreview?
+    private var agentWaitingForMCP = false
+
+    public var generationStatusText: String? {
+        guard isRunning else { return nil }
+        if isCancellationPending { return "Stopping generation" }
+        if agentWaitingForMCP { return "Waiting for VisionCapture" }
+        if phase == .prefill {
+            return livePrefillTotal > 0
+                ? "Reading prompt · \(livePrefillDone) / \(livePrefillTotal) tokens"
+                : "Processing your prompt"
+        }
+        guard phase == .decode else { return "Preparing next step" }
+        let stage: String
+        switch liveStructuredProgress?.stage {
+        case "thinking": stage = "Thinking"
+        case "tool_call": stage = "Preparing tool call"
+        case "visible_response": stage = "Writing response"
+        case "channel_label": stage = "Reading channel label"
+        default: stage = agentModeEnabled ? "Unknown output stage" : "Writing response"
+        }
+        let seconds = max(0, Int(liveElapsedDecodeSeconds))
+        return "\(stage) · \(seconds / 60):\(String(format: "%02d", seconds % 60)) elapsed · \(liveTokenCount) tokens"
+    }
     public private(set) var livePrefillDone: Int = 0
     public private(set) var livePrefillTotal: Int = 0
     public private(set) var liveMemoryBytes: UInt64?
@@ -112,6 +149,8 @@ public final class AppModel {
     private var installTask: Task<Void, Never>?
     private var visionInstallTask: Task<Void, Never>?
     private var unloadTask: Task<Void, Never>?
+    private var agentToolLoop = VisionCaptureToolLoop()
+    private var activeAgentActivityTurnID: UUID?
     private var loadGeneration: UInt64 = 0
     /// The highest load-phase sequence already applied. Each `onState` callback
     /// hops to the main actor in its own task, and ordering between separately
@@ -163,7 +202,8 @@ public final class AppModel {
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
-            visionResidencyPolicy: .onDemand)
+            visionResidencyPolicy: .onDemand,
+            toolThinkingEnabled: settings.toolThinkingEnabled)
         self.maxContextTokens = settings.contextTokens
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
@@ -173,6 +213,7 @@ public final class AppModel {
         self.newlineShortcut = settings.newlineShortcut
         self.showPromptExamples = settings.showPromptExamples
         self.loadModelOnLaunch = settings.loadModelOnLaunch
+        self.agentModeEnabled = settings.agentModeEnabled
         self.installationStatus = AppModelInstallationProbe.status(at: directory)
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
         self.client = client
@@ -403,7 +444,7 @@ public final class AppModel {
         !archivedPairs.isEmpty
             || !conversation.isEmpty
             || !outputPromptText.isEmpty || !outputImageAttachments.isEmpty
-            || !outputText.isEmpty
+            || !outputText.isEmpty || !outputAgentActivities.isEmpty
     }
 
     public var shouldShowPromptExamples: Bool {
@@ -429,6 +470,12 @@ public final class AppModel {
         let live = conversation.hasTurnInFlight ? pairs
             : (pairs.isEmpty ? pairs : Array(pairs.dropLast()))
         return archivedPairs + live
+    }
+
+    public var transcriptAgentActivityHistory: [[AppAgentActivity]] {
+        transcriptHistory.map { pair in
+            agentActivitiesByTurnID[pair.user.id] ?? []
+        }
     }
 
     /// Where the transcript draws "earlier turns are no longer in context",
@@ -486,7 +533,8 @@ public final class AppModel {
             livePrefillDone: livePrefillDone,
             livePrefillTotal: livePrefillTotal,
             lastStopReason: diagnostics?.stopReason,
-            isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress))
+            isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress,
+            terminalError: hasHandledTerminalEvent ? error : nil))
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -602,6 +650,64 @@ public final class AppModel {
         guard loadModelOnLaunch != enabled else { return }
         loadModelOnLaunch = enabled
         persistSettings()
+    }
+
+    public var canChangeAgentMode: Bool {
+        !isRunning && !loadState.isLoading && !isInstallingModel
+            && !isVisionCompanionOperationInProgress
+            && conversation.isEmpty && conversation.canSend
+    }
+
+    public var toolThinkingEnabled: Bool { runtimeOptions.toolThinkingEnabled }
+
+    public var canChangeToolThinking: Bool {
+        !isRunning && !loadState.isLoading && !isInstallingModel
+            && !isVisionCompanionOperationInProgress
+    }
+
+    public var toolThinkingStatus: String {
+        guard loadState.isReady, let loadedRuntimeKey else {
+            return "Used with Agent Mode. Applies when the model loads."
+        }
+        let current = loadedRuntimeKey.toolThinkingEnabled ? "On" : "Off"
+        if loadedRuntimeKey.toolThinkingEnabled != toolThinkingEnabled {
+            return "Current: \(current). Reload Model to apply. This starts a new chat."
+        }
+        return "Current: \(current). Used with Agent Mode."
+    }
+
+    public func setToolThinkingEnabled(_ enabled: Bool) {
+        guard canChangeToolThinking, toolThinkingEnabled != enabled else { return }
+        runtimeOptions.toolThinkingEnabled = enabled
+        persistSettings()
+    }
+
+    public func setAgentModeEnabled(_ enabled: Bool) {
+        guard canChangeAgentMode, agentModeEnabled != enabled else { return }
+        agentModeEnabled = enabled
+        agentToolLoop = VisionCaptureToolLoop()
+        persistSettings()
+    }
+
+    public func setAgentBundleIdentifier(_ value: String) {
+        guard agentModeEnabled, !isRunning,
+              agentBundleIdentifier != value else { return }
+        agentBundleIdentifier = value
+    }
+
+    public func setAgentSimulatorUDID(_ value: String) {
+        guard agentModeEnabled, !isRunning,
+              agentSimulatorUDID != value else { return }
+        agentSimulatorUDID = value
+    }
+
+    private func makeAgentConfiguration() -> VisionCaptureAgentConfiguration {
+        VisionCaptureAgentConfiguration(
+            bundleIdentifier: agentBundleIdentifier.trimmingCharacters(
+                in: .whitespacesAndNewlines),
+            simulatorUDID: agentSimulatorUDID.trimmingCharacters(
+                in: .whitespacesAndNewlines),
+            modelDirectory: URL(fileURLWithPath: modelPathText, isDirectory: true))
     }
 
     /// Starts the launch load if it is switched on and the model can be loaded.
@@ -825,6 +931,10 @@ public final class AppModel {
     }
 
     private func beginLoad() {
+        liveStructuredProgress = nil
+        thinkingPreview = nil
+        toolCallPreview = nil
+        agentWaitingForMCP = false
         guard let lifecycle = client as? AppModelLifecycleClient else {
             loadState = .failed(.modelLoadFailed("This client has no model load lifecycle."))
             return
@@ -1552,7 +1662,8 @@ public final class AppModel {
             // image tower. Reading the persisted value here would let a
             // `keepReady` written by an older build resurrect ~1 GB of resident
             // tower on a machine with no control that shows or clears it.
-            visionResidencyPolicy: .onDemand)
+            visionResidencyPolicy: .onDemand,
+            toolThinkingEnabled: settings.toolThinkingEnabled)
         maxContextTokens = settings.contextTokens
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
@@ -1562,6 +1673,8 @@ public final class AppModel {
         newlineShortcut = settings.newlineShortcut
         showPromptExamples = settings.showPromptExamples
         loadModelOnLaunch = settings.loadModelOnLaunch
+        agentModeEnabled = settings.agentModeEnabled
+        agentToolLoop = VisionCaptureToolLoop()
     }
 
     private func persistSettings() {
@@ -1579,7 +1692,9 @@ public final class AppModel {
             showPromptExamples: showPromptExamples,
             visionResidencyPolicy: runtimeOptions.visionResidencyPolicy,
             rdadvisePolicy: runtimeOptions.rdadvisePolicy,
-            loadModelOnLaunch: loadModelOnLaunch)
+            loadModelOnLaunch: loadModelOnLaunch,
+            agentModeEnabled: agentModeEnabled,
+            toolThinkingEnabled: runtimeOptions.toolThinkingEnabled)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         try? MacAppSettingsFileStore.save(
             settings,
@@ -1677,6 +1792,10 @@ public final class AppModel {
     /// Releases every image the conversation is holding — each turn's, the
     /// archived turns', and the newest turn's.
     private func releaseConversationImages() {
+        for activity in outputAgentActivities + agentActivitiesByTurnID.values.flatMap({ $0 }) {
+            if let preview = activity.screenshotPreview { attachmentStore.remove(preview) }
+        }
+        retainedScreenshotPreviewCount = 0
         for pair in archivedPairs {
             for attachment in pair.user.images { attachmentStore.remove(attachment) }
         }
@@ -1741,12 +1860,19 @@ public final class AppModel {
     /// calling this when the transcript is not empty.
     public func newChat() {
         guard !isRunning else { return }
+        liveStructuredProgress = nil
+        thinkingPreview = nil
+        toolCallPreview = nil
+        agentWaitingForMCP = false
         // Every turn holds its own hard links. Dropping the turn list without
         // releasing them leaked one staged file per image per turn until quit:
         // `releaseTranscriptImages` only ever covered the newest turn, which is
         // why a single-turn test passed.
         releaseConversationImages()
         archivedPairs.removeAll()
+        agentActivitiesByTurnID.removeAll()
+        outputAgentActivities = []
+        activeAgentActivityTurnID = nil
         conversation.startNew()
         outputPromptText = ""
         releaseTranscriptImages()
@@ -1754,6 +1880,7 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
+        agentToolLoop = VisionCaptureToolLoop()
         // Only the intent is recorded here; the next turn opens the new lineage
         // on the inference side. Resetting eagerly as well raced that opening
         // and sent two resets for one new chat, and it buys nothing: the KV
@@ -1770,6 +1897,10 @@ public final class AppModel {
     /// from the service's gate, which has just gone back to expecting turn zero;
     /// the gate would then refuse every turn for the rest of the session.
     private func archiveConversationContext() {
+        liveStructuredProgress = nil
+        thinkingPreview = nil
+        toolCallPreview = nil
+        agentWaitingForMCP = false
         var carried = conversation.completedPairs
         // The live fields hold the newest finished turn between runs, and it is
         // already in `completedPairs`; nothing extra to carry.
@@ -1786,6 +1917,8 @@ public final class AppModel {
         if !carried.isEmpty {
             outputPromptText = ""
             outputText = ""
+            outputAgentActivities = []
+            activeAgentActivityTurnID = nil
             outputImageAttachments = []
             generationTranscriptMailbox?.reset()
         }
@@ -1804,6 +1937,7 @@ public final class AppModel {
 
     public func run() {
         guard canRun else { return }
+        let agentConfiguration = agentModeEnabled ? makeAgentConfiguration() : nil
         // Reserved before the request is built, so the position the service
         // will check is the position the transcript shows.
         guard let ticket = conversation.beginTurn(text: promptText, images: []) else {
@@ -1850,6 +1984,12 @@ public final class AppModel {
         runIdentity &+= 1
         let generation = runIdentity
         outputPromptText = request.prompt
+        outputAgentActivities = []
+        activeAgentActivityTurnID = agentConfiguration == nil
+            ? nil : conversation.turns.last?.id
+        if let activeAgentActivityTurnID {
+            agentActivitiesByTurnID[activeAgentActivityTurnID] = []
+        }
         // Not released: every turn of a conversation keeps its own images for
         // as long as the conversation shows them. They are hard links to files
         // that already exist, so holding them costs no additional bytes.
@@ -1859,6 +1999,8 @@ public final class AppModel {
         diagnostics = nil
         error = nil
         hasHandledTerminalEvent = false
+        thinkingPreview = nil
+        toolCallPreview = nil
         activeRunRuntimeKey = AppLoadedRuntimeKey(
             modelDirectory: request.modelDirectory,
             maxContextTokens: request.maxContextTokens,
@@ -1884,25 +2026,408 @@ public final class AppModel {
         imageAttachments.removeAll()
         imageAttachmentError = nil
 
-        runTask = Task.detached { [weak self, client, request, generation] in
-            guard let self else { return }
-            do {
-                try await self.openConversationIfNeeded()
-                for try await event in client.generate(request) {
-                    await self.apply(event, generation: generation)
+        if let agentConfiguration {
+            let loop = agentToolLoop
+            runTask = Task.detached {
+                [weak self, client, request, generation, loop, agentConfiguration] in
+                guard let self else { return }
+                do {
+                    try await self.openConversationIfNeeded()
+                    let result = try await loop.run(
+                        configuration: agentConfiguration,
+                        activity: { event in
+                            await self.applyAgentActivity(
+                                event,
+                                generation: generation)
+                        }
+                    ) { toolTurn in
+                        try await self.generateAgentStep(
+                            client: client,
+                            baseRequest: request,
+                            toolTurn: toolTurn,
+                            generation: generation)
+                    }
+                    try Task.checkCancellation()
+                    await self.finishAgentSuccessfully(
+                        result,
+                        generation: generation)
+                } catch is CancellationError {
+                    await self.finishAgentFailure(.cancelled, generation: generation)
+                } catch let error as VisionCaptureAgentError {
+                    await self.finishAgentFailure(
+                        .conversationLineageLost(error.description),
+                        generation: generation)
+                } catch let appError as AppInferenceError {
+                    await self.finishAgentFailure(appError, generation: generation)
+                } catch {
+                    await self.finishAgentFailure(
+                        .conversationLineageLost(String(describing: error)),
+                        generation: generation)
                 }
-            } catch let appError as AppInferenceError {
-                await self.finishStreamFailure(appError, generation: generation)
-            } catch {
-                await self.finishStreamFailure(.unknown("\(error)"), generation: generation)
+            }
+        } else {
+            runTask = Task.detached { [weak self, client, request, generation] in
+                guard let self else { return }
+                do {
+                    try await self.openConversationIfNeeded()
+                    for try await event in client.generate(request) {
+                        await self.apply(event, generation: generation)
+                    }
+                } catch let appError as AppInferenceError {
+                    await self.finishStreamFailure(appError, generation: generation)
+                } catch {
+                    await self.finishStreamFailure(.unknown("\(error)"), generation: generation)
+                }
             }
         }
     }
 
     public func cancel() {
         guard canCancel else { return }
+        liveStructuredProgress = nil
         isCancellationPending = true
+        if agentModeEnabled {
+            runTask?.cancel()
+        }
         client.cancel()
+    }
+
+    private nonisolated func generateAgentStep(
+        client: any AppInferenceClient,
+        baseRequest: AppGenerationRequest,
+        toolTurn: AppToolTurn,
+        generation: Int,
+        allowsMalformedRegeneration: Bool = true
+    ) async throws -> VisionCaptureModelCompletion {
+        await beginAgentStep(generation: generation)
+        var request = baseRequest
+        request.toolTurn = toolTurn
+        if case .results(let results) = toolTurn {
+            request.prompt = ""
+            request.imageAttachments = results.flatMap(\.imageAttachments)
+        }
+        let trace = AgentInferenceTrace.shared
+        let traceStep = await trace?.begin(request)
+        request.captureToolFailureEvidence = traceStep != nil
+        request.captureGPUCompletionTiming = traceStep != nil
+        var content = ""
+        var calls: [AppToolCall] = []
+        var terminal: AppDiagnostics?
+        var streamFailure: AppInferenceError?
+        var previousStepElapsed = 0.0
+        var previousStepTokenCount = 0
+        var latestStructuredProgress: DecodeStructuredProgress?
+        var latestToolCallPreview: DecodeToolCallPreview?
+        var lastProgressTrace = ContinuousClock.now
+        do {
+            await recordAgentModelInput(
+                request, isFormatCorrection: !allowsMalformedRegeneration,
+                generation: generation)
+            for try await event in client.generate(request) {
+                switch event {
+                case .token(let token):
+                    content += token.textDelta
+                    latestStructuredProgress = token.structuredProgress
+                    latestToolCallPreview = token.toolCallPreview
+                    let observedCount = max(0, token.index + 1)
+                    let tokenCountDelta = max(0, observedCount - previousStepTokenCount)
+                    let elapsedDelta = max(
+                        0, token.elapsedDecodeSeconds - previousStepElapsed)
+                    previousStepTokenCount = observedCount
+                    previousStepElapsed = token.elapsedDecodeSeconds
+                    await applyAgentToken(
+                        text: token.textDelta,
+                        tokenCountDelta: tokenCountDelta,
+                        elapsedDelta: elapsedDelta,
+                        structuredProgress: token.structuredProgress,
+                        thinkingPreview: token.thinkingPreview,
+                        toolCallPreview: token.toolCallPreview,
+                        generation: generation)
+                    if traceStep != nil,
+                       lastProgressTrace.duration(to: .now) >= .seconds(30) {
+                        lastProgressTrace = .now
+                        await trace?.generationProgress(
+                            traceStep, progress: token.structuredProgress,
+                            tokens: observedCount, elapsedSeconds: token.elapsedDecodeSeconds,
+                            toolCallPreview: latestToolCallPreview)
+                    }
+                case .toolCall(let call):
+                    calls.append(call)
+                case .finished(let diagnostics):
+                    terminal = diagnostics
+                    await applyAgentStep(event, generation: generation)
+                case .cancelled(let diagnostics):
+                    terminal = diagnostics
+                    throw CancellationError()
+                case .failed(let error, let partial):
+                    terminal = partial
+                    // Drain through stream termination before considering a
+                    // retry. Abandoning this iterator can cancel the next run.
+                    streamFailure = error
+                case .memorySample, .prefillProgress:
+                    await applyAgentStep(event, generation: generation)
+                }
+            }
+            if let streamFailure { throw streamFailure }
+            // Cancelling stream iteration can end it without a terminal event.
+            // Preserve the owner's Stop before classifying a missing answer.
+            try Task.checkCancellation()
+            guard let terminal else {
+                throw VisionCaptureAgentError.incompleteAnswer
+            }
+            if let reporter = client as? any AppInferenceTranscriptReporting {
+                content = reporter.generationTranscriptMailbox.completeText
+            }
+            await trace?.finish(
+                traceStep, content: content, calls: calls, diagnostics: terminal,
+                structuredProgress: latestStructuredProgress)
+            return VisionCaptureModelCompletion(
+                content: content,
+                toolCalls: calls,
+                diagnostics: terminal)
+        } catch {
+            await trace?.finish(
+                traceStep, content: content, calls: calls, diagnostics: terminal,
+                error: String(describing: error), cancelled: error is CancellationError,
+                parserFailure: (error as? AppInferenceError).flatMap {
+                    if case .structuredToolFailure(_, _, let evidence) = $0 { return evidence }
+                    return nil
+                }, structuredProgress: latestStructuredProgress,
+                toolCallPreview: latestToolCallPreview)
+            if allowsMalformedRegeneration, calls.isEmpty,
+               case .results(let results) = toolTurn,
+               let failure = error as? AppInferenceError,
+               case .structuredToolFailure(_, true, _) = failure {
+                try Task.checkCancellation()
+                // The pending tool result was rolled back, not its preceding
+                // app action. Reprocess that result once without invoking MCP.
+                let feedback = """
+
+
+                Host generation feedback: The previous model response was malformed. No tool call from that response was executed. Use exactly visioncapture_navigate with an action argument. Use Gemma's native delimiters around every string argument. The action must be exactly one of launch, observe, screenshot, tap, set_boolean, type, or back. Choose only from the latest supplied facts and choices. Do not invent tool names or selectors.
+                """
+                let corrected = results.map {
+                    AppToolResult(callID: $0.callID, name: $0.name, content: $0.content + feedback,
+                                  imageAttachments: $0.imageAttachments)
+                }
+                return try await generateAgentStep(
+                    client: client, baseRequest: baseRequest,
+                    toolTurn: .results(corrected), generation: generation,
+                    allowsMalformedRegeneration: false)
+            }
+            if !allowsMalformedRegeneration, calls.isEmpty,
+               case .results = toolTurn,
+               let failure = error as? AppInferenceError,
+               case .structuredToolFailure(_, true, let evidence) = failure {
+                throw AppInferenceError.structuredToolFailure(
+                    message: "The model still produced an invalid tool request after one format correction. This invalid request was not sent. Generation stopped.",
+                    canRegenerateToolResult: true,
+                    evidence: evidence)
+            }
+            throw error
+        }
+    }
+
+    /// Live decode counters describe the current model step. A tool result
+    /// starts a new prompt whose absolute prefill total already contains every
+    /// earlier step, so carrying their generated-token count forward would
+    /// double-count context growth in the HUD.
+    private func beginAgentStep(generation: Int) {
+        guard generation == runIdentity, agentModeEnabled, isRunning else { return }
+        liveStructuredProgress = nil
+        thinkingPreview = nil
+        toolCallPreview = nil
+        agentWaitingForMCP = false
+        phase = .prefill
+        liveTokenCount = 0
+        liveElapsedDecodeSeconds = 0
+        livePrefillDone = 0
+        livePrefillTotal = 0
+    }
+
+    private func recordAgentModelInput(
+        _ request: AppGenerationRequest, isFormatCorrection: Bool, generation: Int
+    ) {
+        guard generation == runIdentity, isRunning else { return }
+        var body = ""
+        func appendImages(_ images: [AppImageAttachment]) {
+            body += "\nImage attachments: \(images.count) (image bytes supplied separately)\n"
+            for image in images {
+                body += "\(image.displayName)\nReference: \(image.fileURL.path)\nSHA-256: \(image.sha256)\n"
+            }
+        }
+        switch request.toolTurn {
+        case .user(let developerPrompt, let tools):
+            if let developerPrompt {
+                body += "Developer message configuration (may already be retained):\n\(developerPrompt)\n\n"
+            }
+            body += "User message:\n\(request.prompt)\n"
+            appendImages(request.imageAttachments)
+            for tool in tools {
+                body += "\nTool definition configuration (may already be retained): \(tool.name)\n\(tool.description)\nParameters (JSON formatted for display):\n"
+                body += Self.prettyAgentActivityJSON(tool.parameters) + "\n"
+            }
+        case .results(let results):
+            for result in results {
+                body += "Tool result: \(result.name)\nCall: \(result.callID)\n\(result.content)\n"
+                appendImages(result.imageAttachments)
+            }
+        case nil:
+            body += "User message:\n\(request.prompt)\n"
+            appendImages(request.imageAttachments)
+        }
+        let attempt = outputAgentActivities.reduce(1) { count, activity in
+            if case .modelInput = activity.kind { return count + 1 }
+            return count
+        }
+        outputAgentActivities.append(AppAgentActivity(
+            id: UUID(), kind: .modelInput(attempt: attempt, isFormatCorrection: isFormatCorrection),
+            body: body, status: .succeeded))
+    }
+
+    private func applyAgentToken(
+        text: String,
+        tokenCountDelta: Int,
+        elapsedDelta: Double,
+        structuredProgress: DecodeStructuredProgress?,
+        thinkingPreview: DecodeThinkingPreview?,
+        toolCallPreview: DecodeToolCallPreview?,
+        generation: Int
+    ) {
+        guard generation == runIdentity, agentModeEnabled, isRunning else { return }
+        phase = .decode
+        liveStructuredProgress = structuredProgress
+        if let thinkingPreview { self.thinkingPreview = thinkingPreview }
+        self.toolCallPreview = toolCallPreview
+        liveTokenCount += tokenCountDelta
+        liveElapsedDecodeSeconds += elapsedDelta
+        sampleLiveMemory()
+        if !text.isEmpty {
+            outputText += text
+        }
+    }
+
+    private func applyAgentStep(_ event: AppInferenceEvent, generation: Int) {
+        guard generation == runIdentity, agentModeEnabled, isRunning else { return }
+        switch event {
+        case .memorySample:
+            sampleLiveMemory()
+        case .prefillProgress(let done, let total):
+            phase = .prefill
+            livePrefillDone = done
+            livePrefillTotal = total
+            sampleLiveMemory()
+        case .token:
+            break
+        case .finished(let diagnostics):
+            self.diagnostics = diagnostics
+            visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
+            liveStructuredProgress = nil
+            phase = .idle
+        case .toolCall, .cancelled, .failed:
+            break
+        }
+    }
+
+    private func applyAgentActivity(
+        _ event: VisionCaptureActivityEvent,
+        generation: Int
+    ) async {
+        guard generation == runIdentity,
+              agentModeEnabled,
+              isRunning,
+              activeAgentActivityTurnID != nil else { return }
+        switch event {
+        case .outgoingRequest(let id, let arguments):
+            agentWaitingForMCP = true
+            liveStructuredProgress = nil
+            outputAgentActivities.append(AppAgentActivity(
+                id: id,
+                kind: .mcpRequest,
+                body: Self.prettyAgentActivityJSON(arguments),
+                status: .dispatching))
+        case .requestStatus(let id, let status, let elapsedSeconds):
+            agentWaitingForMCP = false
+            guard let index = outputAgentActivities.firstIndex(
+                where: { $0.id == id }) else { return }
+            outputAgentActivities[index].status = status
+            outputAgentActivities[index].elapsedSeconds = elapsedSeconds
+        case .incomingResponse(let id, let excerpt):
+            guard let index = outputAgentActivities.firstIndex(
+                where: { $0.id == id && $0.kind == .mcpRequest }) else { return }
+            outputAgentActivities[index].responseBody = excerpt
+        case .modelResult(let callID, let toolName, let excerpt, let imageCount):
+            outputAgentActivities.append(AppAgentActivity(
+                id: UUID(),
+                kind: .modelResult(callID: callID, toolName: toolName, imageCount: imageCount),
+                body: excerpt,
+                status: .succeeded))
+        case .screenshot(let id, let image):
+            guard let index = outputAgentActivities.firstIndex(where: { $0.id == id }) else { return }
+            outputAgentActivities[index].screenshotPreviewUnavailable = "Screenshot preview unavailable."
+            guard retainedScreenshotPreviewCount < 32 else {
+                outputAgentActivities[index].screenshotPreviewUnavailable =
+                    "Preview not retained: this chat has reached its 32-screenshot display limit."
+                return
+            }
+            let store = attachmentStore
+            let preview = await Task.detached(priority: .userInitiated) {
+                try? VisionCaptureScreenshot.stagePreview(of: image, in: store)
+            }.value
+            guard generation == runIdentity, isRunning,
+                  let currentIndex = outputAgentActivities.firstIndex(where: { $0.id == id }) else {
+                if let preview { store.remove(preview) }
+                return
+            }
+            if let preview {
+                outputAgentActivities[currentIndex].screenshotPreview = preview
+                outputAgentActivities[currentIndex].screenshotPreviewUnavailable = nil
+                retainedScreenshotPreviewCount += 1
+            } else {
+                outputAgentActivities[currentIndex].screenshotPreviewUnavailable = "Screenshot preview unavailable."
+            }
+        case .localRejection(let id, let call, let reason):
+            let proposal = JSONValue.object([
+                "name": .string(call.name),
+                "arguments": call.arguments,
+            ])
+            outputAgentActivities.append(AppAgentActivity(
+                id: id,
+                kind: .localProposal,
+                body: Self.prettyAgentActivityJSON(proposal),
+                status: .notSent(reason: reason)))
+        }
+    }
+
+    private static func prettyAgentActivityJSON(_ value: JSONValue) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        guard let data = try? encoder.encode(value) else {
+            return "Unable to display this tool call."
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func finishAgentSuccessfully(
+        _ result: VisionCaptureAgentRunResult,
+        generation: Int
+    ) {
+        guard generation == runIdentity, !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        outputText = result.answer
+        diagnostics = result.diagnostics
+        conversation.completeTurn(text: result.answer, diagnostics: result.diagnostics)
+        finishTerminalRun()
+    }
+
+    private func finishAgentFailure(_ appError: AppInferenceError, generation: Int) {
+        guard generation == runIdentity, !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        error = appError
+        if let abandoned = conversation.markLineageLost() {
+            restoreComposer(from: abandoned)
+        }
+        finishTerminalRun()
     }
 
     public func makeRequest(
@@ -1965,6 +2490,9 @@ public final class AppModel {
             if !token.textDelta.isEmpty {
                 outputText += token.textDelta
             }
+        case .toolCall:
+            finishWithError(.conversationLineageLost(
+                "The model returned a tool call while Agent Mode was off."))
         case .finished(let diagnostics):
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
             finishSuccessfully(diagnostics)
@@ -2067,10 +2595,19 @@ public final class AppModel {
     }
 
     private func finishTerminalRun() {
+        liveStructuredProgress = nil
+        agentWaitingForMCP = false
+        if let activeAgentActivityTurnID {
+            // The live array drives in-flight rendering. Snapshot it once when
+            // the turn ends instead of copying an ever-growing audit trail into
+            // history after every request and status event.
+            agentActivitiesByTurnID[activeAgentActivityTurnID] = outputAgentActivities
+        }
         phase = .idle
         runState = .idle
         isCancellationPending = false
         activeRunRuntimeKey = nil
+        activeAgentActivityTurnID = nil
         runTask = nil
     }
 

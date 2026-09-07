@@ -13,6 +13,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         var pendingText = ""
         var latestPrefill: PrefillProgress?
         var latestToken: AppTokenEvent?
+        var pendingToolCalls: [AppToolCall] = []
         var terminal: DecodeServiceEvent?
         var terminalCommitted = false
         var finished = false
@@ -54,6 +55,9 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         case .token(let token):
             state.pendingText += token.textDelta
             state.latestToken = token
+        case .toolCall(let call):
+            state.pendingToolCalls.append(call)
+            condition.signal()
         case .finished(let diagnostics):
             if !state.terminalCommitted {
                 state.terminal = terminal(.finished, diagnostics: diagnostics)
@@ -75,6 +79,12 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 else { kind = .failed }
                 state.terminal = terminal(
                     kind, diagnostics: diagnostics, error: error.userMessage)
+                if case .structuredToolFailure(_, let canRegenerate, let evidence) = error {
+                    state.terminal?.parserFailureCanRegenerateToolResult = canRegenerate
+                    if let evidence, let data = try? JSONEncoder().encode(evidence) {
+                        state.terminal?.parserFailureJSON = String(data: data, encoding: .utf8)
+                    }
+                }
                 state.terminalCommitted = true
             }
         }
@@ -103,11 +113,13 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             let prefill = state.latestPrefill
             let text = state.pendingText
             let token = state.latestToken
+            let toolCalls = state.pendingToolCalls
             let terminal = state.terminal
             let done = state.finished
             state.latestPrefill = nil
             state.pendingText = ""
             state.latestToken = nil
+            state.pendingToolCalls = []
             state.terminal = nil
             var prefillSequence: UInt64?
             if prefill != nil {
@@ -123,7 +135,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
 
             _ = memorySampler.sample()
 
-            if prefill == nil, text.isEmpty, token == nil, terminal == nil, !done {
+            if prefill == nil, text.isEmpty, token == nil, toolCalls.isEmpty,
+               terminal == nil, !done {
                 let snapshot = DecodeServiceEvent(
                     kind: .memory, generationID: generationID,
                     currentMemoryBytes: memorySampler.sample(),
@@ -152,8 +165,21 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     tokensPerSecond: elapsed > 0 ? Double(count) / elapsed : 0,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
-                    visionTowerMappedBytes: towerBytes())
+                    visionTowerMappedBytes: towerBytes(),
+                    structuredProgress: token?.structuredProgress,
+                    thinkingPreview: token?.thinkingPreview,
+                    toolCallPreview: token?.toolCallPreview)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
+            }
+            for call in toolCalls {
+                let event = DecodeServiceEvent(
+                    kind: .toolCall,
+                    generationID: generationID,
+                    toolCall: DecodeToolCall(
+                        id: call.id,
+                        name: call.name,
+                        argumentsJSON: (try? call.arguments.encoded()) ?? "{}"))
+                try handle.write(contentsOf: DecodeFrameCodec.encode(event))
             }
             if let terminal {
                 try handle.write(contentsOf: DecodeFrameCodec.encode(terminal))
@@ -183,7 +209,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             cachedPromptTokens: diagnostics?.cachedPromptTokens,
             conversationTokenCount: conversationTokens(),
             prefill: diagnostics?.prefill.map(Self.prefillDiagnostics),
-            runner: diagnostics?.runner.map(Self.runnerDiagnostics))
+            runner: diagnostics?.runner.map(Self.runnerDiagnostics),
+            structuredProgress: diagnostics?.structuredProgress)
     }
 
     private static func prefillDiagnostics(_ value: PrefillExecutionDiagnostics)
@@ -200,6 +227,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         -> DecodeRunnerDiagnostics {
         DecodeRunnerDiagnostics(
             cb1MillisecondsPerToken: value.cb1MillisecondsPerToken,
+            routerWaitMillisecondsPerToken: value.routerWaitMillisecondsPerToken,
+            gpuCompletionTiming: value.gpuCompletionTiming,
             ioMillisecondsPerToken: value.ioMillisecondsPerToken,
             cb2MillisecondsPerToken: value.cb2MillisecondsPerToken,
             headMillisecondsPerToken: value.headMillisecondsPerToken,

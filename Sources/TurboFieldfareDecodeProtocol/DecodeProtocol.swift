@@ -8,6 +8,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
     public var rdadvisePolicy: String
     public var modelVerification: String
     public var visionResidencyPolicy: String?
+    public var toolThinkingEnabled: Bool?
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: String = "lfu",
@@ -15,7 +16,8 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: String = "off",
                 modelVerification: String = "full-sha256",
-                visionResidencyPolicy: String? = nil) {
+                visionResidencyPolicy: String? = nil,
+                toolThinkingEnabled: Bool? = nil) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
@@ -23,6 +25,7 @@ public struct DecodeRuntimeOptions: Codable, Sendable, Equatable {
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.visionResidencyPolicy = visionResidencyPolicy
+        self.toolThinkingEnabled = toolThinkingEnabled
     }
 }
 
@@ -94,6 +97,11 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     /// committed, so a dropped or duplicated turn is a refusal rather than a
     /// silently reordered conversation.
     public var turnIndex: Int?
+    public var toolTurn: DecodeToolTurn?
+    /// Absent means off, including requests from older clients.
+    public var captureToolFailureEvidence: Bool?
+    /// Absent means off. Enabled only by the process-opt-in agent trace.
+    public var captureGPUCompletionTiming: Bool?
 
     public init(prompt: String,
                 imageAttachments: [DecodeImageAttachment]? = nil,
@@ -103,9 +111,11 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 generationID: UUID = UUID(),
                 conversationEpoch: UUID? = nil,
-                turnIndex: Int? = nil) {
+                turnIndex: Int? = nil,
+                toolTurn: DecodeToolTurn? = nil) {
         self.conversationEpoch = conversationEpoch
         self.turnIndex = turnIndex
+        self.toolTurn = toolTurn
         self.prompt = prompt
         self.imageAttachments = imageAttachments
         self.maxNewTokens = maxNewTokens
@@ -116,6 +126,51 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
+    }
+}
+
+public struct DecodeToolDefinition: Codable, Equatable, Sendable {
+    public var name: String
+    public var description: String
+    public var parametersJSON: String
+
+    public init(name: String, description: String, parametersJSON: String) {
+        self.name = name
+        self.description = description
+        self.parametersJSON = parametersJSON
+    }
+}
+
+public struct DecodeToolResult: Codable, Equatable, Sendable {
+    public var callID: String
+    public var name: String
+    public var content: String
+    /// Absent in older clients and text-only results.
+    public var imageAttachments: [DecodeImageAttachment]?
+
+    public init(callID: String, name: String, content: String,
+                imageAttachments: [DecodeImageAttachment]? = nil) {
+        self.callID = callID
+        self.name = name
+        self.content = content
+        self.imageAttachments = imageAttachments
+    }
+}
+
+public enum DecodeToolTurn: Codable, Equatable, Sendable {
+    case user(developerPrompt: String?, tools: [DecodeToolDefinition])
+    case results([DecodeToolResult])
+}
+
+public struct DecodeToolCall: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    public var argumentsJSON: String
+
+    public init(id: String, name: String, argumentsJSON: String) {
+        self.id = id
+        self.name = name
+        self.argumentsJSON = argumentsJSON
     }
 }
 
@@ -145,6 +200,7 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
     case ready
     case prefill
     case snapshot
+    case toolCall
     /// Carries a live memory reading while image encoding or another silent
     /// phase has not produced progress or tokens yet.
     case memory
@@ -159,8 +215,23 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
     case unloaded
 }
 
+/// Completed-buffer timing coverage. A duration is absent for incomplete coverage.
+public struct DecodeGPUCompletionTiming: Codable, Sendable, Equatable {
+    public var millisecondsPerForward: Double?
+    public var validCount: UInt64
+    public var expectedCount: UInt64
+
+    public init(millisecondsPerForward: Double?, validCount: UInt64, expectedCount: UInt64) {
+        self.millisecondsPerForward = millisecondsPerForward
+        self.validCount = validCount
+        self.expectedCount = expectedCount
+    }
+}
+
 public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
     public var cb1MillisecondsPerToken: Double
+    public var routerWaitMillisecondsPerToken: Double?
+    public var gpuCompletionTiming: [String: DecodeGPUCompletionTiming]?
     public var ioMillisecondsPerToken: Double
     public var cb2MillisecondsPerToken: Double
     public var headMillisecondsPerToken: Double
@@ -171,6 +242,8 @@ public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
     public var rdadviseFailures: UInt64
 
     public init(cb1MillisecondsPerToken: Double,
+                routerWaitMillisecondsPerToken: Double? = nil,
+                gpuCompletionTiming: [String: DecodeGPUCompletionTiming]? = nil,
                 ioMillisecondsPerToken: Double,
                 cb2MillisecondsPerToken: Double,
                 headMillisecondsPerToken: Double,
@@ -180,6 +253,8 @@ public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
                 rdadviseSkippedPerToken: Double,
                 rdadviseFailures: UInt64) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
+        self.routerWaitMillisecondsPerToken = routerWaitMillisecondsPerToken
+        self.gpuCompletionTiming = gpuCompletionTiming
         self.ioMillisecondsPerToken = ioMillisecondsPerToken
         self.cb2MillisecondsPerToken = cb2MillisecondsPerToken
         self.headMillisecondsPerToken = headMillisecondsPerToken
@@ -206,6 +281,49 @@ public struct DecodePrefillDiagnostics: Codable, Sendable, Equatable {
         self.kvStorageMode = kvStorageMode
         self.chunkCompleteness = chunkCompleteness
         self.unsupportedReason = unsupportedReason
+    }
+}
+
+/// Fixed-size decoder diagnostics. Contains no generated token or channel text.
+public struct DecodeStructuredProgress: Codable, Equatable, Sendable {
+    public var stage: String
+    public var thinkingTokens: Int
+    public var toolCallTokens: Int
+    public var visibleResponseTokens: Int
+    public var channelLabelTokens: Int
+    public var unknownHiddenChannelTokens: Int
+
+    public init(stage: String, thinkingTokens: Int, toolCallTokens: Int,
+                visibleResponseTokens: Int, channelLabelTokens: Int,
+                unknownHiddenChannelTokens: Int) {
+        self.stage = stage
+        self.thinkingTokens = thinkingTokens
+        self.toolCallTokens = toolCallTokens
+        self.visibleResponseTokens = visibleResponseTokens
+        self.channelLabelTokens = channelLabelTokens
+        self.unknownHiddenChannelTokens = unknownHiddenChannelTokens
+    }
+}
+
+/// Latest bounded thought window for display only, excluded from diagnostics/history.
+public struct DecodeThinkingPreview: Codable, Equatable, Sendable {
+    public var text: String
+    public var earlierTextOmitted: Bool
+
+    public init(text: String, earlierTextOmitted: Bool) {
+        self.text = text
+        self.earlierTextOmitted = earlierTextOmitted
+    }
+}
+
+/// Raw, unvalidated draft. Display/opt-in trace only, never a tool request.
+public struct DecodeToolCallPreview: Codable, Equatable, Sendable {
+    public var text: String
+    public var middleTextOmitted: Bool
+
+    public init(text: String, middleTextOmitted: Bool) {
+        self.text = text
+        self.middleTextOmitted = middleTextOmitted
     }
 }
 
@@ -242,6 +360,16 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var conversationEpoch: UUID?
     public var prefill: DecodePrefillDiagnostics?
     public var runner: DecodeRunnerDiagnostics?
+    public var toolCall: DecodeToolCall?
+    /// Diagnostic attachment only. Never part of user-visible error text.
+    public var parserFailureJSON: String?
+    /// Runtime-confirmed rollback and zero captured calls. Absent means no retry.
+    public var parserFailureCanRegenerateToolResult: Bool?
+    /// Process-captured tool-template choice, acknowledged on model readiness.
+    public var toolThinkingEnabled: Bool?
+    public var structuredProgress: DecodeStructuredProgress?
+    public var thinkingPreview: DecodeThinkingPreview?
+    public var toolCallPreview: DecodeToolCallPreview?
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
                 sequence: UInt64 = 0, textDelta: String = "",
@@ -258,7 +386,12 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 conversationTokenCount: Int? = nil,
                 conversationEpoch: UUID? = nil,
                 prefill: DecodePrefillDiagnostics? = nil,
-                runner: DecodeRunnerDiagnostics? = nil) {
+                runner: DecodeRunnerDiagnostics? = nil,
+                toolCall: DecodeToolCall? = nil,
+                toolThinkingEnabled: Bool? = nil,
+                structuredProgress: DecodeStructuredProgress? = nil,
+                thinkingPreview: DecodeThinkingPreview? = nil,
+                toolCallPreview: DecodeToolCallPreview? = nil) {
         self.kind = kind
         self.generationID = generationID
         self.sequence = sequence
@@ -282,6 +415,11 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.conversationEpoch = conversationEpoch
         self.prefill = prefill
         self.runner = runner
+        self.toolCall = toolCall
+        self.toolThinkingEnabled = toolThinkingEnabled
+        self.structuredProgress = structuredProgress
+        self.thinkingPreview = thinkingPreview
+        self.toolCallPreview = toolCallPreview
     }
 }
 

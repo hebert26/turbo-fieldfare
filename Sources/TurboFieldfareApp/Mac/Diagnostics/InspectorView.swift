@@ -8,6 +8,8 @@ struct InspectorView: View {
 
     var body: some View {
         Form {
+            agentModeSection
+            thinkingSection
             modelSection
             // Second, beside Model: image support is an install concern, not a
             // diagnostic. Last put it under the runner diagnostics and below the
@@ -24,6 +26,67 @@ struct InspectorView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var agentModeSection: some View {
+        Section("Agent Mode") {
+            Toggle("Enable Agent Mode", isOn: agentModeBinding)
+                .toggleStyle(.switch)
+                .disabled(!model.canChangeAgentMode)
+
+            if model.agentModeEnabled {
+                Text("Adds VisionCapture tools to the existing loaded model and chat. VisionCapture must be running on its default local endpoint.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                TextField("Application bundle identifier", text: agentBundleBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(model.isRunning)
+                TextField("Simulator UDID", text: agentUDIDBinding)
+                    .textFieldStyle(.roundedBorder)
+                    .disabled(model.isRunning)
+            }
+        }
+    }
+
+    private var agentModeBinding: Binding<Bool> {
+        Binding {
+            model.agentModeEnabled
+        } set: { enabled in
+            model.setAgentModeEnabled(enabled)
+        }
+    }
+
+    private var thinkingSection: some View {
+        Section("Thinking") {
+            Toggle("Enable Thinking", isOn: Binding {
+                model.toolThinkingEnabled
+            } set: { enabled in
+                model.setToolThinkingEnabled(enabled)
+            })
+            .toggleStyle(.switch)
+            .disabled(!model.canChangeToolThinking)
+
+            Text(model.toolThinkingStatus)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var agentBundleBinding: Binding<String> {
+        Binding {
+            model.agentBundleIdentifier
+        } set: { value in
+            model.setAgentBundleIdentifier(value)
+        }
+    }
+
+    private var agentUDIDBinding: Binding<String> {
+        Binding {
+            model.agentSimulatorUDID
+        } set: { value in
+            model.setAgentSimulatorUDID(value)
+        }
     }
 
     /// Shown while it has something to say, hidden once it does not. Unlike

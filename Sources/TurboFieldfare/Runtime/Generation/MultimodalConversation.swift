@@ -7,6 +7,9 @@ public enum MultimodalConversationError: Error, CustomStringConvertible {
     case lineageBroken
     case lineageRecoveryFailed(reason: String)
     case emptyTurn
+    case toolModeRequiresNewConversation
+    case invalidToolContinuation
+    case noObservableToolProgress(limit: Int)
     case contextExhausted(prompt: Int, maxContext: Int)
     case imageUnavailable(reason: String?)
 
@@ -21,6 +24,13 @@ public enum MultimodalConversationError: Error, CustomStringConvertible {
             "generation failed partway and the KV could not be restored; "
                 + "call reset() to start over. \(reason)"
         case .emptyTurn: "a turn needs text or an image"
+        case .toolModeRequiresNewConversation:
+            "tool mode must start in a new conversation"
+        case .invalidToolContinuation:
+            "tool results do not match the pending tool calls"
+        case .noObservableToolProgress(let limit):
+            "structured generation produced \(limit) consecutive tokens without "
+                + "visible answer text or a completed tool call"
         case .contextExhausted(let prompt, let maxContext):
             "conversation needs \(prompt) tokens, beyond the \(maxContext)-token context"
         case .imageUnavailable(let reason):
@@ -104,6 +114,25 @@ public struct MultimodalTurnResult: Sendable {
     public let decodeSeconds: Double
 }
 
+public struct StructuredConversationTurnResult: Sendable {
+    public let turn: MultimodalTurnResult
+    public let toolCalls: [ParsedToolCall]
+}
+
+public struct ConversationToolResult: Equatable, Sendable {
+    public let callID: String
+    public let name: String
+    public let content: String
+    public let images: [URL]
+
+    public init(callID: String, name: String, content: String, images: [URL] = []) {
+        self.callID = callID
+        self.name = name
+        self.content = content
+        self.images = images
+    }
+}
+
 /// A stateful multi-turn conversation that owns its own KV lineage.
 ///
 /// The server has to *match* a stateless request against a cached prefix and
@@ -112,6 +141,19 @@ public struct MultimodalTurnResult: Sendable {
 /// turn prefills only the new tokens, and an image is encoded once, when its
 /// turn is appended.
 public actor MultimodalConversation {
+    private struct ToolState {
+        var messages: [GFTokenizer.Message]
+        let tools: [GFTokenizer.FunctionDefinition]
+        var awaitingResults: Bool
+    }
+
+    private struct ProvisionalToolResultPrefix {
+        let committedTokenCount: Int
+        let calls: [GFTokenizer.HistoricalToolCall]
+        // Shares the failed turn's existing buffer, bounded by maxContext.
+        let suffix: [Int32]
+    }
+
     private let model: Model
     private let context: MetalContext
     private let tokenizer: GFTokenizer
@@ -122,8 +164,12 @@ public actor MultimodalConversation {
     private let visionResidency: VisionResidencyPolicy
     private let maxContext: Int
 
-    /// Exactly the tokens the KV holds, in order.
+    /// Exact committed tokens, also retained when the KV needs reconstruction.
     private var kvTokenIDs: [Int32] = []
+    /// Original feature buffers, with ranges in the committed token history.
+    private var committedImageSpans: [MultimodalImageSpan] = []
+    private var kvNeedsRebuild = false
+    private var provisionalToolResultPrefix: ProvisionalToolResultPrefix?
     private var pending: (parts: [MultimodalContinuationPart], images: [URL])?
     private var closed = false
     /// One generation at a time. `RawCompletionScratch` documents that its
@@ -136,14 +182,14 @@ public actor MultimodalConversation {
     /// Barrier for `reset()`, set before it awaits the in-flight decode so a
     /// `generate()` racing the reset cannot start and have its KV wiped.
     private var resetting = false
-    /// Set when a run throws after prefill. The runner's KV has advanced but
-    /// `kvTokenIDs` has not, so the lineage is unusable until reset.
+    /// Set only when the committed record cannot be safely reconstructed.
     private var lineageBroken = false
     /// Tokens the model emitted that never entered the KV, which happens when
     /// a run stops on max tokens or is cancelled. The next turn must replay
     /// them, exactly as the server's prefix cache does.
     private var uncommittedBoundary: [Int32] = []
     private var boundaryNeedsReplay = false
+    private var toolState: ToolState?
 
     public init(model: Model,
                 context: MetalContext,
@@ -176,10 +222,14 @@ public actor MultimodalConversation {
     public func invalidate() async {
         closed = true
         pending = nil
+        toolState = nil
         // Wait for any run still decoding: the session resets the shared runner
         // straight after this, and resetting under a live decode either aborts
         // that turn mid-stream or lets two turns drive one runner at once.
         await waitForGeneration()
+        committedImageSpans.removeAll()
+        kvNeedsRebuild = false
+        provisionalToolResultPrefix = nil
     }
 
     /// Suspends until no turn is decoding.
@@ -202,6 +252,13 @@ public actor MultimodalConversation {
         for waiter in waiters { waiter.resume() }
     }
 
+    private func discardProvisionalToolResultPrefix() {
+        guard provisionalToolResultPrefix != nil else { return }
+        provisionalToolResultPrefix = nil
+        runner.reset()
+        kvNeedsRebuild = !kvTokenIDs.isEmpty
+    }
+
     /// Whether a turn is decoding right now.
     public var isGenerating: Bool { generating }
 
@@ -213,6 +270,7 @@ public actor MultimodalConversation {
         // staged turn vanished and the next `generate()` reported an empty turn
         // with the user's message gone.
         guard !generating else { throw MultimodalConversationError.busy }
+        discardProvisionalToolResultPrefix()
         let imageCount = parts.filter {
             if case .image = $0 { return true } else { return false }
         }.count
@@ -230,6 +288,7 @@ public actor MultimodalConversation {
     /// abandon it, at the cost of re-prefilling the conversation.
     public func clear() {
         pending = nil
+        if !generating { discardProvisionalToolResultPrefix() }
     }
 
     /// Drops the KV and starts over. The model stays loaded.
@@ -257,10 +316,14 @@ public actor MultimodalConversation {
         guard !closed else { return }
         runner.reset()
         kvTokenIDs.removeAll(keepingCapacity: true)
+        committedImageSpans.removeAll()
+        kvNeedsRebuild = false
+        provisionalToolResultPrefix = nil
         pending = nil
         lineageBroken = false
         uncommittedBoundary = []
         boundaryNeedsReplay = false
+        toolState = nil
     }
 
     /// Ends this conversation and clears the KV it was using. It deliberately
@@ -275,7 +338,11 @@ public actor MultimodalConversation {
         await waitForGeneration()
         runner.reset()
         kvTokenIDs.removeAll(keepingCapacity: false)
+        committedImageSpans.removeAll()
+        kvNeedsRebuild = false
+        provisionalToolResultPrefix = nil
         pending = nil
+        toolState = nil
     }
 
     /// Appends one user turn and generates the reply, prefilling only the new
@@ -319,6 +386,7 @@ public actor MultimodalConversation {
         guard !closed else { throw MultimodalConversationError.closed }
         guard !lineageBroken else { throw MultimodalConversationError.lineageBroken }
         guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        discardProvisionalToolResultPrefix()
         guard let staged = pending else {
             throw MultimodalConversationError.emptyTurn
         }
@@ -334,9 +402,264 @@ public actor MultimodalConversation {
                 reason: visionRuntimeError.map(String.init(describing:)))
         }
 
-        let cached = kvTokenIDs.count
         let turn = try await encodeTurn(parts: parts, images: images,
                                         checkCancellation: checkCancellation)
+        let completion = try await completeEncodedTurn(
+            turn,
+            config: config,
+            prefillConfig: prefillConfig,
+            checkCancellation: checkCancellation,
+            shouldStop: shouldStop,
+            allowedTools: nil,
+            onProgress: onProgress)
+        pending = nil
+        return completion.turn
+    }
+
+    /// Runs one tool-aware user turn on this conversation's existing model and
+    /// KV. Tool mode starts only on an empty lineage so its definitions are
+    /// present in the first rendered prompt. Later user turns are ordinary KV
+    /// continuations and keep those definitions in their prefix.
+    public func sendToolUser(
+        parts: [MultimodalContinuationPart],
+        images: [URL] = [],
+        developerPrompt: String?,
+        tools: [GFTokenizer.FunctionDefinition],
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        acceptsUnknownToolNames: Bool = false,
+        captureToolFailureEvidence: Bool = false,
+        maximumConsecutiveInvisibleTokens: Int? = nil,
+        captureThoughtPreview: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
+    ) async throws -> StructuredConversationTurnResult {
+        guard !closed else { throw MultimodalConversationError.closed }
+        guard !lineageBroken else { throw MultimodalConversationError.lineageBroken }
+        guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        discardProvisionalToolResultPrefix()
+        guard pending == nil else { throw MultimodalConversationError.busy }
+        let imageCount = parts.reduce(into: 0) {
+            if case .image = $1 { $0 += 1 }
+        }
+        guard !parts.isEmpty, imageCount == images.count else {
+            throw MultimodalConversationError.emptyTurn
+        }
+        if imageCount > 0, visionRuntime == nil {
+            throw MultimodalConversationError.imageUnavailable(
+                reason: visionRuntimeError.map(String.init(describing:)))
+        }
+
+        let text = parts.reduce(into: "") {
+            if case .text(let value) = $1 { $0 += value }
+        }
+        var state: ToolState
+        let turn: EncodedTurn
+        if var existing = toolState {
+            guard existing.tools == tools, !existing.awaitingResults else {
+                throw MultimodalConversationError.invalidToolContinuation
+            }
+            existing.messages.append(GFTokenizer.Message(role: .user, content: text))
+            state = existing
+            turn = try await encodeTurn(
+                parts: parts, images: images,
+                checkCancellation: checkCancellation)
+        } else {
+            guard kvTokenIDs.isEmpty else {
+                throw MultimodalConversationError.toolModeRequiresNewConversation
+            }
+            var messages: [GFTokenizer.Message] = []
+            if let developerPrompt {
+                messages.append(GFTokenizer.Message(
+                    role: .developer, content: developerPrompt))
+            }
+            messages.append(GFTokenizer.Message(role: .user, content: text))
+            state = ToolState(messages: messages, tools: tools, awaitingResults: false)
+            turn = try await encodeOpeningToolTurn(
+                parts: parts, images: images,
+                messages: messages, tools: tools,
+                checkCancellation: checkCancellation)
+        }
+
+        generating = true
+        defer { finishGeneration() }
+        let completion = try await completeEncodedTurn(
+            turn,
+            config: config,
+            prefillConfig: prefillConfig,
+            checkCancellation: checkCancellation,
+            shouldStop: shouldStop,
+            allowedTools: Set(tools.map(\.name)),
+            acceptsUnknownToolNames: acceptsUnknownToolNames,
+            captureToolFailureEvidence: captureToolFailureEvidence,
+            maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+            captureThoughtPreview: captureThoughtPreview,
+            onProgress: onProgress,
+            onStructuredProgress: onStructuredProgress)
+        state.messages.append(Self.assistantMessage(for: completion))
+        state.awaitingResults = !completion.toolCalls.isEmpty
+        toolState = state
+        return completion
+    }
+
+    /// Appends host-produced tool results at the exact pending tool boundary,
+    /// then asks the same loaded model to continue from the retained KV.
+    public func sendToolResults(
+        _ results: [ConversationToolResult],
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @escaping @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        acceptsUnknownToolNames: Bool = false,
+        captureToolFailureEvidence: Bool = false,
+        maximumConsecutiveInvisibleTokens: Int? = nil,
+        captureThoughtPreview: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
+    ) async throws -> StructuredConversationTurnResult {
+        guard !closed else { throw MultimodalConversationError.closed }
+        guard !lineageBroken else { throw MultimodalConversationError.lineageBroken }
+        guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        var handedToCompletion = false
+        defer {
+            if !handedToCompletion { discardProvisionalToolResultPrefix() }
+        }
+        guard var state = toolState,
+              state.awaitingResults,
+              let assistant = state.messages.last,
+              !assistant.toolCalls.isEmpty,
+              results.count == assistant.toolCalls.count,
+              zip(results, assistant.toolCalls).allSatisfy({ result, call in
+                  result.callID == call.id && result.name == call.name
+              }) else {
+            throw MultimodalConversationError.invalidToolContinuation
+        }
+        let toolMessages = results.map {
+            GFTokenizer.Message(
+                role: .tool,
+                content: $0.content,
+                toolCallID: $0.callID,
+                name: $0.name,
+                toolImageCount: $0.images.count)
+        }
+        let cached = Array(state.messages.dropLast())
+        let incoming = state.messages + toolMessages
+        let bridge = try tokenizer.encodeToolResultContinuation(
+            cachedMessages: cached,
+            assistant: assistant,
+            incomingMessages: incoming,
+            tools: state.tools)
+        let images = results.flatMap(\.images)
+        guard !results.contains(where: { $0.content.contains(MultimodalPromptRenderer.placeholder) }) else {
+            throw MultimodalPromptRendererError.reservedImageMarker
+        }
+        // The bridge must contain only this step's images, not prior image
+        // markers retained in the template history.
+        guard bridge.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == images.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+
+        generating = true
+        defer { finishGeneration() }
+        let turn: EncodedTurn
+        if images.isEmpty {
+            turn = EncodedTurn(effectiveTokenIDs: bridge, prefillInput: nil)
+        } else {
+            guard let visionRuntime else {
+                throw MultimodalConversationError.imageUnavailable(
+                    reason: visionRuntimeError.map(String.init(describing:)))
+            }
+            let checkImageCancellation: @Sendable () throws -> Void = {
+                try checkCancellation()
+                if shouldStop?() == true { throw CancellationError() }
+            }
+            try checkImageCancellation()
+            let preprocessor = Gemma4ImagePreprocessor(device: context.device, config: visionRuntime.config)
+            let plans = try images.map { try preprocessor.plan(fileURL: $0) }
+            let imageTokens = plans.reduce(0) { $0 + $1.geometry.softTokenCount + 1 }
+            let boundaryCount = boundaryNeedsReplay ? uncommittedBoundary.count : 0
+            guard kvTokenIDs.count + boundaryCount + bridge.count + imageTokens + 1 <= maxContext else {
+                throw MultimodalConversationError.contextExhausted(
+                    prompt: kvTokenIDs.count + boundaryCount + bridge.count + imageTokens,
+                    maxContext: maxContext)
+            }
+            var features: [VisionFeatures] = []
+            for plan in plans {
+                try checkImageCancellation()
+                let encoded = try visionRuntime.encodeImage(
+                    plan: plan, languageModel: model, residencyPolicy: visionResidency,
+                    checkCancellation: checkImageCancellation)
+                guard encoded.tokenCount == plan.geometry.softTokenCount else {
+                    throw MultimodalPromptRendererError.placeholderMismatch
+                }
+                features.append(encoded)
+            }
+            try checkImageCancellation()
+            let input = try MultimodalPromptRenderer.expandingImageTokens(bridge, features: features)
+            turn = EncodedTurn(effectiveTokenIDs: input.effectiveTokenIDs, prefillInput: input)
+        }
+        handedToCompletion = true
+        let completion = try await completeEncodedTurn(
+            turn,
+            config: config,
+            prefillConfig: prefillConfig,
+            checkCancellation: checkCancellation,
+            shouldStop: shouldStop,
+            allowedTools: Set(state.tools.map(\.name)),
+            pendingToolCalls: assistant.toolCalls,
+            acceptsUnknownToolNames: acceptsUnknownToolNames,
+            captureToolFailureEvidence: captureToolFailureEvidence,
+            maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+            captureThoughtPreview: captureThoughtPreview,
+            onProgress: onProgress,
+            onStructuredProgress: onStructuredProgress)
+        state.messages.append(contentsOf: toolMessages)
+        state.messages.append(Self.assistantMessage(for: completion))
+        state.awaitingResults = !completion.toolCalls.isEmpty
+        toolState = state
+        return completion
+    }
+
+    private static func assistantMessage(
+        for completion: StructuredConversationTurnResult
+    ) -> GFTokenizer.Message {
+        GFTokenizer.Message(
+            role: .assistant,
+            content: completion.toolCalls.isEmpty ? completion.turn.text : nil,
+            toolCalls: completion.toolCalls.map {
+                GFTokenizer.HistoricalToolCall(
+                    id: $0.id, name: $0.name, arguments: $0.arguments)
+            })
+    }
+
+    private func completeEncodedTurn(
+        _ turn: EncodedTurn,
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig,
+        checkCancellation: @Sendable () throws -> Void,
+        shouldStop: (@Sendable () -> Bool)?,
+        allowedTools: Set<String>?,
+        pendingToolCalls: [GFTokenizer.HistoricalToolCall]? = nil,
+        acceptsUnknownToolNames: Bool = false,
+        captureToolFailureEvidence: Bool = false,
+        maximumConsecutiveInvisibleTokens: Int? = nil,
+        captureThoughtPreview: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)?,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
+    ) async throws -> StructuredConversationTurnResult {
+        let provisional = provisionalToolResultPrefix
+        provisionalToolResultPrefix = nil
+        var provisionalNeedsCleanup = provisional != nil
+        defer {
+            // Errors before decoding, or a failed retry without a new saved
+            // prefix, must not leave uncommitted rows as the next KV lineage.
+            if provisionalNeedsCleanup, provisionalToolResultPrefix == nil {
+                runner.reset()
+                kvNeedsRebuild = !kvTokenIDs.isEmpty
+            }
+        }
         // A run that stopped on max tokens or was cancelled left its final
         // token outside the KV. Replay it ahead of this turn, exactly as the
         // server's prefix cache does, or the model's context is missing a
@@ -348,17 +671,97 @@ public actor MultimodalConversation {
                 prompt: promptIDs.count, maxContext: maxContext)
         }
 
+        var cached = kvNeedsRebuild ? 0 : kvTokenIDs.count
+        if let provisional {
+            do {
+                try Task.checkCancellation()
+                try checkCancellation()
+                guard !closed, !resetting, shouldStop?() != true,
+                      !kvNeedsRebuild, boundary.isEmpty, turn.prefillInput == nil,
+                      provisional.committedTokenCount == kvTokenIDs.count,
+                      let pendingToolCalls,
+                      provisional.calls == pendingToolCalls,
+                      runner.continuationPosition == kvTokenIDs.count + provisional.suffix.count else {
+                    throw MultimodalConversationError.invalidToolContinuation
+                }
+                var shared = 0
+                for (old, new) in zip(provisional.suffix, turn.effectiveTokenIDs) {
+                    if old != new { break }
+                    if shared.isMultiple(of: PrefillRuntimeConfig.maxChunkTokens) {
+                        try Task.checkCancellation()
+                        try checkCancellation()
+                    }
+                    shared += 1
+                }
+                // Refeed at least the final token to obtain the sampling seed.
+                let sharedPosition = min(kvTokenIDs.count + shared, promptIDs.count - 1)
+                guard sharedPosition > kvTokenIDs.count else {
+                    throw MultimodalConversationError.invalidToolContinuation
+                }
+                // Uses the original high-water mark, including the first
+                // rewind. Two short rewinds cannot bypass ring overwrite.
+                try runner.rewind(to: sharedPosition)
+                cached = sharedPosition
+            } catch {
+                runner.reset()
+                kvNeedsRebuild = !kvTokenIDs.isEmpty
+                provisionalNeedsCleanup = false
+                cached = 0
+                try Task.checkCancellation()
+                try checkCancellation()
+                if shouldStop?() == true { throw CancellationError() }
+            }
+        }
+
+        let suffixInput = try turn.prefillInput?.prepending(boundary)
+        let turnImageSpans = (suffixInput?.imageSpans ?? []).map {
+            MultimodalImageSpan(
+                tokenRange: ($0.tokenRange.lowerBound + kvTokenIDs.count)
+                    ..< ($0.tokenRange.upperBound + kvTokenIDs.count),
+                features: $0.features)
+        }
+        let multimodalInput: MultimodalPrefillInput?
+        if kvNeedsRebuild, !committedImageSpans.isEmpty || !turnImageSpans.isEmpty {
+            let spans = committedImageSpans + turnImageSpans
+            var embeddingIDs = promptIDs
+            for span in spans {
+                // Match the original renderer: image rows use the retained
+                // projected features, with zero IDs for the embedding input.
+                embeddingIDs.replaceSubrange(
+                    span.tokenRange, with: repeatElement(Int32(0), count: span.tokenRange.count))
+            }
+            multimodalInput = try MultimodalPrefillInput(
+                effectiveTokenIDs: promptIDs,
+                embeddingTokenIDs: embeddingIDs,
+                imageSpans: spans)
+        } else if kvNeedsRebuild {
+            multimodalInput = nil
+        } else {
+            multimodalInput = suffixInput
+        }
+
         // Same coercion as the other entry points: a turn carrying image spans
         // cannot run under a non-chunked mode, and refusing it after the images
         // are encoded helps nobody.
         var effectivePrefill = prefillConfig
-        if turn.prefillInput != nil,
+        if multimodalInput != nil,
            let coerced = effectivePrefill.coercedForImagePrompt() {
             effectivePrefill = coerced
         }
         var generation = config
         generation.maxNewTokens = min(config.maxNewTokens, maxContext - promptIDs.count)
         var text = ""
+        var calls: [ParsedToolCall] = []
+        var structuredError: Error?
+        var consecutiveInvisibleTokens = 0
+        let decoder = allowedTools.map {
+            StructuredAssistantDecoder(
+                tokenizer: tokenizer,
+                allowedTools: $0,
+                acceptsUnknownToolNames: acceptsUnknownToolNames,
+                captureFailureEvidence: captureToolFailureEvidence,
+                captureThoughtPreview: captureThoughtPreview)
+        }
         // Marked only once the run has actually written to the KV. Setting it
         // before the attempt condemned the conversation for failures that never
         // touched the cache — a cancellation caught by the first
@@ -373,12 +776,13 @@ public actor MultimodalConversation {
         let positionBefore = runner.continuationPosition
         var kvAdvanced = false
         let result: RawDecodeResult
+        var originalStopReason: String?
         do {
             result = try await runRawCompletion(
             producer: runner,
             tokenizer: tokenizer,
             promptIds: promptIDs,
-            multimodalInput: try turn.prefillInput?.prepending(boundary),
+            multimodalInput: multimodalInput,
             config: generation,
             context: context,
             scratch: scratch,
@@ -388,33 +792,117 @@ public actor MultimodalConversation {
                 // and returns the partial result; throwing here instead would
                 // condemn the lineage for a KV that is perfectly resumable.
                 shouldStop: {
+                    if structuredError != nil { return true }
                     if shouldStop?() == true { return true }
                     do { try checkCancellation(); return false } catch { return true }
                 }) { progress in
-                    onProgress?(progress)
-                    switch progress {
-                    case .token(_, _, let delta):
-                        text += delta
-                    case .tail(let tail):
+                    do {
+                        switch progress {
+                        case .token(let index, let tokenID, let delta):
+                            if let decoder {
+                                var visible = ""
+                                let events: [StructuredAssistantEvent]
+                                do {
+                                    events = try decoder.consume(tokenID: tokenID, delta: delta)
+                                } catch {
+                                    onStructuredProgress?(decoder.progress)
+                                    throw error
+                                }
+                                onStructuredProgress?(decoder.progress)
+                                for event in events {
+                                    switch event {
+                                    case .content(let value): visible += value
+                                    case .toolCall(let call): calls.append(call)
+                                    }
+                                }
+                                let madeProgress = visible.contains {
+                                    !$0.isWhitespace
+                                }
+                                    || events.contains {
+                                        if case .toolCall = $0 { return true }
+                                        return false
+                                    }
+                                if madeProgress {
+                                    consecutiveInvisibleTokens = 0
+                                } else if let limit = maximumConsecutiveInvisibleTokens {
+                                    consecutiveInvisibleTokens += 1
+                                    if consecutiveInvisibleTokens >= limit {
+                                        throw MultimodalConversationError
+                                            .noObservableToolProgress(limit: limit)
+                                    }
+                                }
+                                text += visible
+                                onProgress?(.token(index: index,
+                                                   id: tokenID,
+                                                   delta: visible))
+                            } else {
+                                text += delta
+                                onProgress?(progress)
+                            }
+                        case .tail(let tail):
+                            if let decoder {
+                                var visible = ""
+                                for event in try decoder.consumeTail(tail) {
+                                    if case .content(let value) = event { visible += value }
+                                }
+                                onStructuredProgress?(decoder.progress)
+                                text += visible
+                                onProgress?(.tail(visible))
+                            } else {
+                                text += tail
+                                onProgress?(progress)
+                            }
                         // The detokenizer flush at the stop boundary. Dropping
                         // it returned turn text missing its final characters
                         // while the KV kept those very tokens.
-                        text += tail
-                    case .prefill:
+                        case .prefill:
                         // The first progress report is the proof the KV moved.
-                        kvAdvanced = true
+                            kvAdvanced = true
+                            onProgress?(progress)
+                        }
+                    } catch {
+                        structuredError = error
                     }
                 }
+            if captureToolFailureEvidence { originalStopReason = String(describing: result.reason) }
+            if let structuredError { throw structuredError }
+            try decoder?.finish()
+            if decoder != nil,
+               (result.reason == .toolCalls) != !calls.isEmpty {
+                decoder?.captureFailure(phase: "stop_call_mismatch")
+                throw GemmaToolCallParserError.malformed
+            }
         } catch let generationError {
+            decoder?.refreshToolCallPreview()
+            if let decoder { onStructuredProgress?(decoder.progress) }
             if runner.continuationPosition != positionBefore { kvAdvanced = true }
-            // A failure that moved the KV used to condemn the lineage outright,
-            // but the same rewind the stop-string path uses can usually put the
-            // cursor back at the turn start: a cancellation caught between
-            // prefill chunks or at a token boundary leaves the committed prefix
-            // intact under a rewindable tail. The staged turn stays pending, so
-            // a successful rewind makes the turn retryable. Only a rewind past
-            // the SWA ring slack fails, and only then is the lineage unusable.
-            if kvAdvanced {
+            var preservedPrompt = false
+            if let pendingToolCalls, !pendingToolCalls.isEmpty,
+               turn.prefillInput == nil, boundary.isEmpty,
+               generationError as? GemmaToolCallParserError == .malformed,
+               calls.isEmpty, !closed, !resetting,
+               !Task.isCancelled, shouldStop?() != true {
+                do {
+                    try checkCancellation()
+                    // Only a fully fed prompt is reusable. This guarded
+                    // rewind drops generated rows, never the pending result.
+                    try runner.rewind(to: promptIDs.count)
+                    provisionalToolResultPrefix = ProvisionalToolResultPrefix(
+                        committedTokenCount: kvTokenIDs.count,
+                        calls: pendingToolCalls, suffix: turn.effectiveTokenIDs)
+                    kvNeedsRebuild = false
+                    preservedPrompt = true
+                } catch {
+                    // The existing rollback/reconstruction path remains the
+                    // fallback when generation already exceeded ring slack.
+                    preservedPrompt = false
+                }
+            }
+            // The token record, image features and pending tool results are
+            // still committed at the old boundary. If a long failed attempt
+            // overwrote the sliding window, rebuild that prefix on the next
+            // request. Prefilling recorded tokens does not execute tools.
+            if kvAdvanced, !preservedPrompt {
                 do {
                     try MultimodalConversationKVRecovery.restoreAfterFailure(
                         positionBefore: positionBefore,
@@ -422,21 +910,28 @@ public actor MultimodalConversation {
                         rewind: runner.rewind(to:),
                         reset: runner.reset)
                 } catch {
-                    lineageBroken = true
-                    throw error
+                    runner.reset()
+                    kvNeedsRebuild = !kvTokenIDs.isEmpty
                 }
+            }
+            if let parserError = generationError as? GemmaToolCallParserError {
+                var evidence = decoder?.failureEvidence
+                evidence?.originalStopReason = originalStopReason
+                throw StructuredToolFailure(
+                    underlying: parserError,
+                    canRegenerateToolResult: parserError == .malformed && calls.isEmpty
+                        && !Task.isCancelled && shouldStop?() != true,
+                    evidence: evidence)
             }
             throw generationError
         }
 
+        provisionalNeedsCleanup = false
         // The KV now holds exactly what the run reported, including the tokens
         // the model generated; keeping the model's own tokens rather than
         // re-tokenising its text is what makes the next turn resumable.
-        // The turn is in the KV now, so it is no longer staged. Leaving it
-        // pending let a repeated generate() append the same user turn again,
-        // behind its own reply, and corrupt the rest of the conversation.
-        pending = nil
         kvTokenIDs = result.kvBackedTokenIDs
+        kvNeedsRebuild = false
         // A stop-string match discards the text of the tokens that formed it,
         // but all except the final one were already committed to the KV. Left
         // there, every later turn resumes on a context holding assistant text
@@ -452,16 +947,21 @@ public actor MultimodalConversation {
                     rewind: runner.rewind(to:),
                     reset: runner.reset)
             } catch {
-                lineageBroken = true
-                throw error
+                let target = result.kvBackedTokenIDs.count - result.withheldTrailingKVTokens
+                guard target >= promptIDs.count else {
+                    lineageBroken = true
+                    throw error
+                }
+                kvTokenIDs = Array(result.kvBackedTokenIDs.prefix(target))
+                runner.reset()
+                kvNeedsRebuild = !kvTokenIDs.isEmpty
             }
         }
+        committedImageSpans.append(contentsOf: turnImageSpans)
         uncommittedBoundary = result.uncommittedBoundaryTokenIDs
         boundaryNeedsReplay = result.reason == .maxTokens || result.reason == .cancelled
-        return MultimodalTurnResult(
-            text: text,
-            promptTokens: promptIDs.count,
-            cachedTokens: cached,
+        let turnResult = MultimodalTurnResult(
+            text: text, promptTokens: promptIDs.count, cachedTokens: cached,
             // The runner's own count, not a reconstruction from KV lengths.
             // Reconstructing it made the figure depend on the stop reason —
             // end-of-turn, EOS, tool-call and stop-string stops each reported
@@ -473,6 +973,9 @@ public actor MultimodalConversation {
             reason: result.reason,
             prefillSeconds: result.prefillSeconds,
             decodeSeconds: result.decodeSeconds)
+        return StructuredConversationTurnResult(
+            turn: turnResult,
+            toolCalls: calls)
     }
 
     private struct EncodedTurn {
@@ -532,5 +1035,58 @@ public actor MultimodalConversation {
                 effectiveTokenIDs: bridge.effectiveTokenIDs,
                 embeddingTokenIDs: bridge.embeddingTokenIDs,
                 imageSpans: spans))
+    }
+
+    private func encodeOpeningToolTurn(
+        parts: [MultimodalContinuationPart],
+        images: [URL],
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        checkCancellation: @Sendable () throws -> Void
+    ) async throws -> EncodedTurn {
+        guard !images.isEmpty, let visionRuntime else {
+            return EncodedTurn(
+                effectiveTokenIDs: try tokenizer.encodeToolChat(
+                    messages: messages, tools: tools),
+                prefillInput: nil)
+        }
+        let preprocessor = Gemma4ImagePreprocessor(
+            device: context.device, config: visionRuntime.config)
+        let plans = try images.map { try preprocessor.plan(fileURL: $0) }
+        let imageIDs = images.map { _ in UUID() }
+        var imageIndex = 0
+        let userContent: [MultimodalContentPart] = parts.map { part in
+            switch part {
+            case .text(let value):
+                return .text(value)
+            case .image:
+                defer { imageIndex += 1 }
+                return .image(id: imageIDs[imageIndex])
+            }
+        }
+        var renderedMessages: [MultimodalMessage] = []
+        if let developer = messages.first, developer.role == .developer {
+            renderedMessages.append(MultimodalMessage(
+                role: .developer,
+                content: [.text(developer.content ?? "")]))
+        }
+        renderedMessages.append(MultimodalMessage(
+            role: .user, content: userContent))
+        var features: [UUID: VisionFeatures] = [:]
+        for (id, plan) in zip(imageIDs, plans) {
+            try checkCancellation()
+            features[id] = try visionRuntime.encodeImage(
+                plan: plan, languageModel: model,
+                residencyPolicy: visionResidency,
+                checkCancellation: checkCancellation)
+        }
+        let input = try MultimodalPromptRenderer.render(
+            messages: renderedMessages,
+            featuresByID: features,
+            tokenizer: tokenizer,
+            tools: tools)
+        return EncodedTurn(
+            effectiveTokenIDs: input.effectiveTokenIDs,
+            prefillInput: input)
     }
 }

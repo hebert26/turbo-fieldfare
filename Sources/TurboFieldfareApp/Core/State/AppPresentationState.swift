@@ -35,6 +35,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
     /// "Installed · Not loaded" with a `.load` action, and the banner rendered a
     /// fully enabled button that did nothing for the whole transfer.
     public var isVisionCompanionOperationInProgress: Bool
+    public var terminalError: AppInferenceError?
 
     public init(requiresInstallation: Bool,
                 installState: AppModelInstallState,
@@ -47,7 +48,8 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
                 livePrefillDone: Int = 0,
                 livePrefillTotal: Int = 0,
                 lastStopReason: AppStopReason? = nil,
-                isVisionCompanionOperationInProgress: Bool = false) {
+                isVisionCompanionOperationInProgress: Bool = false,
+                terminalError: AppInferenceError? = nil) {
         self.requiresInstallation = requiresInstallation
         self.installState = installState
         self.installReadiness = installReadiness
@@ -60,6 +62,7 @@ public struct AppPresentationSnapshot: Equatable, Sendable {
         self.livePrefillTotal = livePrefillTotal
         self.lastStopReason = lastStopReason
         self.isVisionCompanionOperationInProgress = isVisionCompanionOperationInProgress
+        self.terminalError = terminalError
     }
 }
 
@@ -187,6 +190,12 @@ public struct AppPresentationState: Equatable, Sendable {
         }
 
         if case .ready = snapshot.loadState {
+            if let error = snapshot.terminalError {
+                return Self(label: error == .cancelled ? "Generation cancelled" : "Generation stopped",
+                            detail: error.userMessage,
+                            severity: error == .cancelled ? .neutral : .error,
+                            secondaryAction: .unload)
+            }
             if let reason = snapshot.lastStopReason {
                 return Self(label: "Done · \(reason.rawValue)", severity: .success,
                             secondaryAction: .unload)

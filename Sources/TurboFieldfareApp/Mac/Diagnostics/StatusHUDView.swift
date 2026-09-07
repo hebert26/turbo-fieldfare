@@ -138,7 +138,8 @@ private struct PhaseLabel: View {
         .lineLimit(1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Model status")
-        .accessibilityValue(model.presentation.label)
+        .accessibilityValue(statusText)
+        .help(statusText)
     }
 
     private enum Content {
@@ -150,10 +151,15 @@ private struct PhaseLabel: View {
 
     private var content: Content {
         let presentation = model.presentation
-        if presentation.showsActivity { return .loading(presentation.label) }
-        if model.isRunning && model.phase == .prefill { return .pulse(presentation.label) }
-        if model.isRunning && model.phase == .decode { return .steady(presentation.label) }
-        return .quiet(presentation.label)
+        if presentation.showsActivity { return .loading(statusText) }
+        if model.isRunning && model.phase == .prefill { return .pulse(statusText) }
+        if model.isRunning && model.phase == .decode { return .steady(statusText) }
+        return .quiet(statusText)
+    }
+
+    private var statusText: String {
+        if model.agentModeEnabled, let status = model.generationStatusText { return status }
+        return model.presentation.label
     }
 }
 

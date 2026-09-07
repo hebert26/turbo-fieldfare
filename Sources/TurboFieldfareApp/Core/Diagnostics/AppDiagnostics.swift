@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareDecodeProtocol
 
 public enum AppStopReason: String, Equatable, Sendable {
     case maxTokens
@@ -13,6 +14,8 @@ public enum AppStopReason: String, Equatable, Sendable {
 
 public struct AppRunnerDiagnostics: Equatable, Sendable {
     public var cb1MillisecondsPerToken: Double
+    public var routerWaitMillisecondsPerToken: Double?
+    public var gpuCompletionTiming: [String: DecodeGPUCompletionTiming]?
     public var ioMillisecondsPerToken: Double
     public var cb2MillisecondsPerToken: Double
     public var headMillisecondsPerToken: Double
@@ -23,6 +26,8 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
     public var rdadviseFailures: UInt64
 
     public init(cb1MillisecondsPerToken: Double = 0,
+                routerWaitMillisecondsPerToken: Double? = nil,
+                gpuCompletionTiming: [String: DecodeGPUCompletionTiming]? = nil,
                 ioMillisecondsPerToken: Double = 0,
                 cb2MillisecondsPerToken: Double = 0,
                 headMillisecondsPerToken: Double = 0,
@@ -32,6 +37,8 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
                 rdadviseSkippedPerToken: Double = 0,
                 rdadviseFailures: UInt64 = 0) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
+        self.routerWaitMillisecondsPerToken = routerWaitMillisecondsPerToken
+        self.gpuCompletionTiming = gpuCompletionTiming
         self.ioMillisecondsPerToken = ioMillisecondsPerToken
         self.cb2MillisecondsPerToken = cb2MillisecondsPerToken
         self.headMillisecondsPerToken = headMillisecondsPerToken
@@ -66,6 +73,7 @@ public struct AppDiagnostics: Equatable, Sendable {
     public var runtimeOptions: AppRuntimeOptions
     public var prefill: PrefillExecutionDiagnostics?
     public var runner: AppRunnerDiagnostics?
+    public var structuredProgress: DecodeStructuredProgress?
 
     public var requestStartTimeToFirstTokenSeconds: Double? {
         guard let prefillSeconds, let timeToFirstTokenSeconds else { return nil }
@@ -98,7 +106,8 @@ public struct AppDiagnostics: Equatable, Sendable {
                 visionTowerMappedBytes: UInt64? = nil,
                 runtimeOptions: AppRuntimeOptions,
                 prefill: PrefillExecutionDiagnostics? = nil,
-                runner: AppRunnerDiagnostics? = nil) {
+                runner: AppRunnerDiagnostics? = nil,
+                structuredProgress: DecodeStructuredProgress? = nil) {
         self.generatedTokens = generatedTokens
         self.stopReason = stopReason
         self.promptTokenCount = promptTokenCount
@@ -114,6 +123,7 @@ public struct AppDiagnostics: Equatable, Sendable {
         self.runtimeOptions = runtimeOptions
         self.prefill = prefill
         self.runner = runner
+        self.structuredProgress = structuredProgress
     }
 }
 
@@ -121,12 +131,39 @@ public struct AppTokenEvent: Equatable, Sendable {
     public var index: Int
     public var textDelta: String
     public var elapsedDecodeSeconds: Double
+    public var structuredProgress: DecodeStructuredProgress? = nil
+    public var thinkingPreview: DecodeThinkingPreview? = nil
+    public var toolCallPreview: DecodeToolCallPreview? = nil
+}
+
+extension DecodeStructuredProgress {
+    init(_ value: StructuredAssistantProgress) {
+        self.init(stage: value.stage.rawValue,
+                  thinkingTokens: value.thinkingTokens,
+                  toolCallTokens: value.toolCallTokens,
+                  visibleResponseTokens: value.visibleResponseTokens,
+                  channelLabelTokens: value.channelLabelTokens,
+                  unknownHiddenChannelTokens: value.unknownHiddenChannelTokens)
+    }
+}
+
+public struct AppToolCall: Equatable, Sendable {
+    public let id: String
+    public let name: String
+    public let arguments: JSONValue
+
+    public init(id: String, name: String, arguments: JSONValue) {
+        self.id = id
+        self.name = name
+        self.arguments = arguments
+    }
 }
 
 public enum AppInferenceEvent: Equatable, Sendable {
     case prefillProgress(done: Int, total: Int)
     case memorySample
     case token(AppTokenEvent)
+    case toolCall(AppToolCall)
     case finished(AppDiagnostics)
     case cancelled(AppDiagnostics)
     case failed(AppInferenceError, partial: AppDiagnostics?)

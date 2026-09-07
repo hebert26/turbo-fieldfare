@@ -1,0 +1,21 @@
+# Team membership is intentionally ordered. The dispatcher serializes any role
+# that can edit files and permits parallel dispatch only for read-only roles.
+general-purpose:
+  - dev-engineer
+  - pi-engineer
+
+qwen-training:
+  - team-lead
+  - qwen-researcher
+  - qwen-implementation-engineer
+  - qwen-test-engineer
+  - qwen-quality-check
+  - qwen-documentation-writer
+
+vision-capture:
+  - team-lead
+  - senior-dev-engineer
+  - code-quality-check
+  - app-agnostic-check
+quality-docs:
+  - documentation-writer

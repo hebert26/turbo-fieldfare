@@ -41,19 +41,22 @@ struct OutputPaneView: View {
     private var transcript: some View {
         IncrementalTranscriptView(
             history: model.transcriptHistory,
+            historyActivities: model.transcriptAgentActivityHistory,
             contextBreak: model.transcriptContextBreak,
             conversationEpoch: model.conversation.epoch,
             lastAnswer: model.outputResponsePlainText,
             conversationPlainText: model.outputConversationPlainText,
             requestNewChat: model.isRunning ? nil : { model.newChat() },
             prompt: model.outputPromptText,
+            activities: model.outputAgentActivities,
             images: model.outputImageAttachments,
             output: model.outputText,
             mailbox: model.generationTranscriptMailbox,
             isTerminal: !model.isRunning,
             showsPrefillPlaceholder: model.isRunning
                 && model.outputResponsePlainText.isEmpty,
-            runIdentity: model.runIdentity)
+            runIdentity: model.runIdentity,
+            generationStatusText: model.generationStatusText)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) {
                 if !model.isRunning && !model.outputResponsePlainText.isEmpty {
@@ -63,6 +66,29 @@ struct OutputPaneView: View {
             }
             .padding(.horizontal, 24)
             .padding(.vertical, 20)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                VStack(spacing: 0) {
+                    if let preview = model.thinkingPreview, !preview.text.isEmpty {
+                        LiveGenerationPreviewPanel(
+                            title: "Gemma thinking",
+                            detail: "Recent text from this model step. This is not a final answer or a verified app result.",
+                            text: preview.text,
+                            omissionNotice: preview.earlierTextOmitted
+                                ? "Earlier thinking omitted. Showing the latest 8 KiB of text." : nil,
+                            accessibilityID: "gemma-thinking-panel")
+                    }
+                    if let preview = model.toolCallPreview {
+                        LiveGenerationPreviewPanel(
+                            title: "Preparing tool call · Not sent to VisionCapture",
+                            detail: "Latest received raw draft. It may be incomplete or invalid and is not an executable request. Stop may leave the final tokens undisplayed.",
+                            text: preview.text,
+                            omissionNotice: preview.middleTextOmitted
+                                ? "Middle text omitted. Up to the first 2 KiB and latest 6 KiB are joined in this preview." : nil,
+                            accessibilityID: "gemma-tool-call-draft-panel",
+                            monospaced: true)
+                    }
+                }
+            }
     }
 
     private var copyResponseButton: some View {
@@ -167,6 +193,70 @@ struct OutputPaneView: View {
         withAnimation(.easeIn(duration: 0.15)) {
             responseCopyFeedbackID = UUID()
         }
+    }
+}
+
+private struct LiveGenerationPreviewPanel: View {
+    let title: String
+    let detail: String
+    let text: String
+    let omissionNotice: String?
+    let accessibilityID: String
+    var monospaced = false
+    @State private var scrollPosition = ScrollPosition(edge: .bottom)
+    @State private var followsLatest = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.headline)
+                Spacer()
+                Button("Follow latest") {
+                    followsLatest = true
+                    scrollPosition.scrollTo(edge: .bottom)
+                }
+                .disabled(followsLatest)
+                .controlSize(.small)
+            }
+            Text(detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                Text(text.isEmpty ? "Waiting for draft text…" : text)
+                    .font(monospaced ? .system(.body, design: .monospaced) : .body)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
+                        followsLatest = false
+                    })
+            }
+            .scrollPosition($scrollPosition)
+            .onScrollPhaseChange { _, phase in
+                if phase == .tracking || phase == .interacting || phase == .decelerating {
+                    followsLatest = false
+                }
+            }
+            .onChange(of: text) { _, _ in
+                if followsLatest { scrollPosition.scrollTo(edge: .bottom) }
+            }
+            .onAppear {
+                followsLatest = true
+                scrollPosition.scrollTo(edge: .bottom)
+            }
+            .frame(maxHeight: 150)
+            if let omissionNotice {
+                Text(omissionNotice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.background.secondary)
+        .padding(.horizontal, 24)
+        .padding(.bottom, 12)
+        .accessibilityIdentifier(accessibilityID)
     }
 }
 
@@ -336,6 +426,7 @@ private struct LoadingModelText: View {
 
 private struct IncrementalTranscriptView: NSViewRepresentable {
     var history: [(user: AppChatTurn, assistant: AppChatTurn)] = []
+    var historyActivities: [[AppAgentActivity]] = []
     /// Pairs above this index are on screen but no longer in the model's
     /// context. Nil when everything drawn is still in the KV.
     var contextBreak: Int?
@@ -344,12 +435,14 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
     var conversationPlainText: String = ""
     var requestNewChat: (() -> Void)?
     var prompt: String
+    var activities: [AppAgentActivity] = []
     var images: [AppImageAttachment] = []
     var output: String
     var mailbox: GenerationTranscriptMailbox?
     var isTerminal: Bool
     var showsPrefillPlaceholder: Bool
     var runIdentity: Int
+    var generationStatusText: String? = nil
 
     @MainActor
     final class Coordinator: NSObject {
@@ -357,6 +450,7 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         weak var textView: NSTextView?
         var mailbox: GenerationTranscriptMailbox?
         var prompt = ""
+        var activities: [AppAgentActivity] = []
         var promptPrefix = NSAttributedString()
         var promptPrefixIdentifier = ""
 
@@ -380,6 +474,7 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         }
         var isTerminal = false
         var showsPrefillPlaceholder = false
+        var generationStatusText: String?
         var runIdentity = 0
         /// Decides what the transcript owes the conversation; see
         /// `TranscriptSyncPlanner`.
@@ -396,7 +491,12 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         /// `TranscriptScrollFollow`, where it can be tested.
         var follow = TranscriptScrollFollow()
         var timer: Timer?
-        var prefillAnimationTimer: Timer?
+        private struct ScrollGeometry: Equatable {
+            let viewportSize: CGSize
+            let documentSize: CGSize
+        }
+        private var lastScrollGeometry: ScrollGeometry?
+        private var needsScrollAfterContentChange = false
         let documentController = InstructionTranscriptDocumentController()
 
         func attach(scrollView: NSScrollView, textView: NSTextView) {
@@ -435,18 +535,21 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
 
         func synchronize(
             history: [(user: AppChatTurn, assistant: AppChatTurn)],
+            historyActivities: [[AppAgentActivity]],
             contextBreak: Int?,
             conversationEpoch: UUID,
             lastAnswer: String,
             conversationPlainText: String,
             requestNewChat: (() -> Void)?,
             prompt: String,
+            activities: [AppAgentActivity],
             images: [AppImageAttachment],
             output: String,
             mailbox: GenerationTranscriptMailbox?,
             isTerminal: Bool,
             showsPrefillPlaceholder: Bool,
-            runIdentity: Int
+            runIdentity: Int,
+            generationStatusText: String? = nil
         ) {
             // A new run always goes to the bottom, whatever the reader was
             // looking at: it is the thing they just asked for.
@@ -457,11 +560,13 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             self.conversationPlainText = conversationPlainText
             self.requestNewChat = requestNewChat
             adoptConversation(conversationEpoch, history: history,
+                              historyActivities: historyActivities,
                               contextBreak: contextBreak,
                               startedNewRun: startedNewRun,
                               firstSynchronize: firstSynchronize)
             self.mailbox = mailbox
             self.prompt = prompt
+            self.activities = activities
             let prefixIdentifier = images.map {
                 "\($0.id.uuidString):\($0.sha256)"
             }.joined(separator: ",")
@@ -472,6 +577,7 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             }
             self.isTerminal = isTerminal
             self.showsPrefillPlaceholder = showsPrefillPlaceholder
+            self.generationStatusText = generationStatusText
             let response = mailbox?.drain().completeText ?? output
             apply(
                 prompt: prompt,
@@ -484,7 +590,11 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             // charge again; the usual follow-the-bottom rule takes over from a
             // view that is already at the bottom.
             if !response.isEmpty || isTerminal { follow.end() }
-            if startedNewRun || shouldFollowNow() { scrollToBottom() }
+            if startedNewRun {
+                scrollToBottom(force: true)
+            } else if shouldFollowNow() {
+                scrollToBottom()
+            }
         }
 
         /// Keeps the drawn document in step with the conversation.
@@ -501,6 +611,7 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         private func adoptConversation(
             _ epoch: UUID,
             history: [(user: AppChatTurn, assistant: AppChatTurn)],
+            historyActivities: [[AppAgentActivity]],
             contextBreak: Int?,
             startedNewRun: Bool,
             firstSynchronize: Bool
@@ -534,6 +645,9 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
                     _ = documentController.synchronize(
                         storage: storage,
                         prompt: pair.user.text,
+                        activities: index < historyActivities.count
+                            ? historyActivities[index]
+                            : [],
                         response: pair.assistant.text,
                         isTerminal: true,
                         // Cached thumbnails only. A history image whose
@@ -560,10 +674,20 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
                 }
             }
             storage.endEditing()
+            needsScrollAfterContentChange = true
         }
 
-        func scrollToBottom() {
-            guard let textView else { return }
+        private var scrollGeometry: ScrollGeometry? {
+            guard let scrollView else { return nil }
+            return ScrollGeometry(
+                viewportSize: scrollView.contentView.bounds.size,
+                documentSize: scrollView.documentView?.bounds.size ?? .zero)
+        }
+
+        func scrollToBottom(force: Bool = false) {
+            guard let textView, let geometry = scrollGeometry,
+                  force || needsScrollAfterContentChange
+                    || geometry != lastScrollGeometry else { return }
             if let textContainer = textView.textContainer {
                 textView.layoutManager?.ensureLayout(for: textContainer)
             }
@@ -576,10 +700,20 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             follow.recordScroll(
                 origin: scrollView.contentView.bounds.origin.y,
                 documentHeight: scrollView.documentView?.bounds.height ?? 0)
+            lastScrollGeometry = scrollGeometry
+            needsScrollAfterContentChange = false
         }
 
         private func shouldFollowNow() -> Bool {
             guard let scrollView else { return false }
+            if let previous = lastScrollGeometry,
+               previous.viewportSize != scrollView.contentView.bounds.size {
+                // A resize may shift the clip origin without a reader scroll.
+                // Rebase that comparison without ending pending image follow.
+                follow.recordScroll(
+                    origin: scrollView.contentView.bounds.origin.y,
+                    documentHeight: scrollView.documentView?.bounds.height ?? 0)
+            }
             return follow.shouldScrollToBottom(
                 origin: scrollView.contentView.bounds.origin.y,
                 documentHeight: scrollView.documentView?.bounds.height ?? 0)
@@ -596,6 +730,8 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             // it, and a prompt with several images stayed scrolled off the top.
             // A reader moving the view changes the scroll origin while the
             // document height stays put, so that is what ends it.
+            // The existing timer also notices delayed image layout and resize.
+            // Stable content and geometry never request layout or scrolling.
             if shouldFollowNow() { scrollToBottom() }
             guard let mailbox else { return }
             let snapshot = mailbox.drain()
@@ -610,33 +746,6 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
                   promptPrefix: promptPrefix)
         }
 
-        @objc private func animatePrefillPlaceholderIfNeeded() {
-            guard documentController.showsPrefillPlaceholder,
-                  let scrollView,
-                  let textView,
-                  let storage = textView.textStorage else { return }
-            let wasAtBottom = isAtBottom(scrollView)
-            let selection = textView.selectedRanges.map(\.rangeValue)
-
-            storage.beginEditing()
-            let changed = documentController.advancePrefillAnimation(storage: storage)
-            storage.endEditing()
-            guard changed else { return }
-
-            let restored = InstructionTranscriptDocumentController.clampedRanges(
-                selection,
-                toLength: storage.length)
-            if restored.isEmpty {
-                textView.setSelectedRange(NSRange(location: storage.length, length: 0))
-            } else {
-                textView.selectedRanges = restored.map(NSValue.init(range:))
-            }
-            if wasAtBottom {
-                textView.scrollToEndOfDocument(nil)
-                recordScrollPosition()
-            }
-        }
-
         @objc private func readerTookOver() {
             follow.end()
         }
@@ -645,30 +754,9 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             NotificationCenter.default.removeObserver(self)
             timer?.invalidate()
             timer = nil
-            stopPrefillAnimationTimer()
             mailbox = nil
-        }
-
-        private func updatePrefillAnimationTimer() {
-            if documentController.showsPrefillPlaceholder {
-                guard prefillAnimationTimer == nil else { return }
-                let timer = Timer(
-                    timeInterval: 0.25,
-                    target: self,
-                    selector: #selector(animatePrefillPlaceholderIfNeeded),
-                    userInfo: nil,
-                    repeats: true)
-                timer.tolerance = 0.025
-                RunLoop.main.add(timer, forMode: .common)
-                prefillAnimationTimer = timer
-            } else {
-                stopPrefillAnimationTimer()
-            }
-        }
-
-        private func stopPrefillAnimationTimer() {
-            prefillAnimationTimer?.invalidate()
-            prefillAnimationTimer = nil
+            lastScrollGeometry = nil
+            needsScrollAfterContentChange = false
         }
 
         private func apply(
@@ -686,15 +774,17 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
             let update = documentController.synchronize(
                 storage: storage,
                 prompt: prompt,
+                activities: activities,
                 response: response,
                 isTerminal: isTerminal,
                 showsPrefillPlaceholder: showsPrefillPlaceholder,
                 promptPrefix: promptPrefix,
-                promptPrefixIdentifier: appliedPromptPrefixIdentifier)
+                promptPrefixIdentifier: appliedPromptPrefixIdentifier,
+                generationStatusText: generationStatusText)
             storage.endEditing()
-            updatePrefillAnimationTimer()
 
             guard update.mutation != .none else { return }
+            needsScrollAfterContentChange = true
             // A rewritten stretch is different text, so a selection that
             // reached into it is dropped back to the boundary rather than
             // kept at its old length over characters it never covered.
@@ -716,13 +806,7 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
                 wasAtBottom: wasAtBottom,
                 mutation: update.mutation
             ) {
-                if let textContainer = textView.textContainer {
-                    textView.layoutManager?.ensureLayout(for: textContainer)
-                }
-                textView.scrollToEndOfDocument(nil)
-                // Every programmatic scroll updates the baseline, or the next
-                // comparison reads our own move as the reader's.
-                recordScrollPosition()
+                scrollToBottom()
             }
         }
 
@@ -849,18 +933,21 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         context.coordinator.attach(scrollView: scrollView, textView: textView)
         context.coordinator.synchronize(
             history: history,
+            historyActivities: historyActivities,
             contextBreak: contextBreak,
             conversationEpoch: conversationEpoch,
             lastAnswer: lastAnswer,
             conversationPlainText: conversationPlainText,
             requestNewChat: requestNewChat,
             prompt: prompt,
+            activities: activities,
             images: images,
             output: output,
             mailbox: mailbox,
             isTerminal: isTerminal,
             showsPrefillPlaceholder: showsPrefillPlaceholder,
-            runIdentity: runIdentity)
+            runIdentity: runIdentity,
+            generationStatusText: generationStatusText)
     }
 
     static func dismantleNSView(_ nsView: NSScrollView, coordinator: Coordinator) {

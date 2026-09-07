@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Tracker"
+  short_description: "Split work into phases and track it with a test gate"
+  default_prompt: "Use $task-tracker to create or maintain the tracker, implementation document and HTML plan for this work."

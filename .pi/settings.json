@@ -1,0 +1,10 @@
+{
+  "theme": "dark",
+  "quietStartup": false,
+  "prompts": [],
+  "extensions": [
+    "!*.ts",
+    "!extensions/*.ts",
+    "+extensions/agent-team.ts"
+  ]
+}

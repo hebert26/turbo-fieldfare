@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import TurboFieldfareAppCore
 
 @MainActor
 public final class InstructionTranscriptDocumentController {
@@ -98,10 +99,12 @@ public final class InstructionTranscriptDocumentController {
     }
 
     public private(set) var prompt = ""
+    public private(set) var activities: [AppAgentActivity] = []
     public private(set) var promptPrefixIdentifier = ""
     public private(set) var response = ""
     public private(set) var isFinalized = false
     public private(set) var showsPrefillPlaceholder = false
+    private var generationStatusText: String?
     public private(set) var assistantRange = NSRange(location: 0, length: 0)
     /// Length of the completed turns above the live one. Everything below this
     /// offset is drawn once and never looked at again — which is the whole
@@ -114,6 +117,11 @@ public final class InstructionTranscriptDocumentController {
     /// belonging to the first one. Knowing which turn a click landed in is what
     /// lets the menu offer that turn's answer instead of guessing.
     private var sealedTurns: [(range: NSRange, answer: String)] = []
+    private var sealedRequestCount = 0
+    private var latestRequestMarkerRange: NSRange?
+    /// Absolute UTF-16 starts plus the end of the live activity section.
+    /// The rendered cards stay in text storage; only their boundaries are kept here.
+    private var activityBoundaries: [Int] = []
     private var prefillPlaceholderRange: NSRange?
     private var prefillDotCount = 0
 
@@ -245,18 +253,23 @@ public final class InstructionTranscriptDocumentController {
     public func synchronize(
         storage: NSMutableAttributedString,
         prompt: String,
+        activities: [AppAgentActivity] = [],
         response: String,
         isTerminal: Bool,
         showsPrefillPlaceholder: Bool = false,
         promptPrefix: NSAttributedString = NSAttributedString(),
-        promptPrefixIdentifier: String = ""
+        promptPrefixIdentifier: String = "",
+        generationStatusText: String? = nil
     ) -> UpdateResult {
+        let statusChanged = generationStatusText != self.generationStatusText
+        self.generationStatusText = generationStatusText
         let responseChanged = response != self.response
         let displaysPrefillPlaceholder = Self.shouldRunPrefillAnimation(
             response: response,
             isTerminal: isTerminal,
             requested: showsPrefillPlaceholder)
         var needsRebuild = prompt != self.prompt
+            || activities != self.activities
             || promptPrefixIdentifier != self.promptPrefixIdentifier
             || !Self.extendsExactly(response, self.response)
             || (isFinalized && !isTerminal)
@@ -269,6 +282,7 @@ public final class InstructionTranscriptDocumentController {
 
         var mutation: Mutation = .none
         var replaced: ReplacedRange?
+        var rebuiltSuffix: (previous: NSRange, text: NSString)?
         // In progressive mode a terminal response is closed block by block, so
         // the tick that carries it is an ordinary extension. The raw mode is
         // replaced wholesale below and has nothing to gain from writing the
@@ -280,10 +294,12 @@ public final class InstructionTranscriptDocumentController {
             || storage.length == frozenLength
                 && (!prompt.isEmpty || promptPrefix.length > 0
                     || !response.isEmpty || displaysPrefillPlaceholder) {
-            rebuild(
+            rebuiltSuffix = rebuild(
                 storage: storage,
                 prompt: prompt,
                 promptPrefix: promptPrefix,
+                promptPrefixIdentifier: promptPrefixIdentifier,
+                activities: activities,
                 response: response,
                 showsPrefillPlaceholder: displaysPrefillPlaceholder,
                 closingTail: isTerminal)
@@ -299,9 +315,18 @@ public final class InstructionTranscriptDocumentController {
             } else if !isTerminal {
                 mutation = appendRaw(delta, to: storage)
             }
+        } else if statusChanged, displaysPrefillPlaceholder, let range = prefillPlaceholderRange {
+            let text = NSAttributedString(
+                string: generationStatusText ?? Self.prefillPlaceholder(dotCount: prefillDotCount),
+                attributes: Self.prefillPlaceholderAttributes())
+            storage.replaceCharacters(in: range, with: text)
+            prefillPlaceholderRange = NSRange(location: range.location, length: text.length)
+            replaced = ReplacedRange(previous: range, length: text.length)
+            mutation = .tailReplaced
         }
 
         self.prompt = prompt
+        self.activities = activities
         self.promptPrefixIdentifier = promptPrefixIdentifier
         self.response = response
         self.showsPrefillPlaceholder = displaysPrefillPlaceholder
@@ -330,6 +355,18 @@ public final class InstructionTranscriptDocumentController {
             isFinalized = false
         }
 
+        // Terminal rendering may also change the answer after the activity
+        // suffix moved it. Report one change in the original coordinates.
+        if let rebuiltSuffix {
+            let current = NSRange(
+                location: rebuiltSuffix.previous.location,
+                length: storage.length - rebuiltSuffix.previous.location)
+            replaced = ReplacedRange.differing(
+                previous: rebuiltSuffix.previous,
+                old: rebuiltSuffix.text,
+                new: storage.mutableString.substring(with: current) as NSString)
+        }
+
         return UpdateResult(
             mutation: mutation,
             assistantRange: assistantRange,
@@ -345,7 +382,7 @@ public final class InstructionTranscriptDocumentController {
         }
         prefillDotCount = (prefillDotCount + 1) % 4
         let replacement = NSAttributedString(
-            string: Self.prefillPlaceholder(dotCount: prefillDotCount),
+            string: generationStatusText ?? Self.prefillPlaceholder(dotCount: prefillDotCount),
             attributes: Self.prefillPlaceholderAttributes())
         storage.replaceCharacters(in: range, with: replacement)
         range.length = replacement.length
@@ -368,12 +405,40 @@ public final class InstructionTranscriptDocumentController {
         storage: NSMutableAttributedString,
         prompt: String,
         promptPrefix: NSAttributedString,
+        promptPrefixIdentifier: String,
+        activities: [AppAgentActivity],
         response: String,
         showsPrefillPlaceholder: Bool,
         closingTail: Bool
-    ) {
+    ) -> (previous: NSRange, text: NSString)? {
+        let canKeepPrefix = prompt == self.prompt
+            && promptPrefixIdentifier == self.promptPrefixIdentifier
+            && activityBoundaries.count == self.activities.count + 1
+            && activityBoundaries.first.map { $0 >= frozenLength } == true
+            && activityBoundaries.last.map {
+                $0 <= assistantRange.location && $0 <= storage.length
+            } == true
+        var keptActivities = 0
+        if canKeepPrefix {
+            while keptActivities < min(activities.count, self.activities.count),
+                  activities[keptActivities] == self.activities[keptActivities] {
+                keptActivities += 1
+            }
+            // An unchanged request still needs redrawing when it loses Latest.
+            let latestID = activities.last(where: { $0.kind == .mcpRequest })?.id
+            if let oldLatest = self.activities.lastIndex(where: { $0.kind == .mcpRequest }),
+               self.activities[oldLatest].id != latestID {
+                keptActivities = min(keptActivities, oldLatest)
+            }
+        }
+        let replacementStart = canKeepPrefix
+            ? activityBoundaries[keptActivities] : frozenLength
+        let previous = NSRange(
+            location: replacementStart, length: storage.length - replacementStart)
+        let oldText: NSString? = canKeepPrefix
+            ? storage.mutableString.substring(with: previous) as NSString : nil
         let document = NSMutableAttributedString()
-        if !prompt.isEmpty || promptPrefix.length > 0 {
+        if !canKeepPrefix, !prompt.isEmpty || promptPrefix.length > 0 {
             document.append(NSAttributedString(
                 string: "You\n",
                 attributes: Self.userLabelAttributes()))
@@ -394,10 +459,26 @@ public final class InstructionTranscriptDocumentController {
                 string: "\n\n",
                 attributes: Self.promptAttributes()))
         }
+        let activityStart = replacementStart + document.length
+        let precedingRequests = activities.prefix(keptActivities)
+            .reduce(0) { $0 + ($1.kind == .mcpRequest ? 1 : 0) }
+        let requests = Self.activityDocument(
+            activities, startingNumber: sealedRequestCount + precedingRequests + 1,
+            from: keptActivities)
+        activityBoundaries = Array(activityBoundaries.prefix(keptActivities))
+            + requests.boundaries.map { activityStart + $0 }
+        if let marker = requests.latestMarkerRange {
+            latestRequestMarkerRange = NSRange(
+                location: activityStart + marker.location, length: marker.length)
+        } else if let marker = latestRequestMarkerRange,
+                  marker.location >= replacementStart {
+            latestRequestMarkerRange = nil
+        }
+        document.append(requests.document)
         document.append(NSAttributedString(
             string: "Answer\n",
             attributes: Self.assistantLabelAttributes()))
-        assistantRange = NSRange(location: document.length, length: 0)
+        assistantRange = NSRange(location: replacementStart + document.length, length: 0)
         let assistant = progressiveRendering
             ? progressiveRender(response, closingTail: closingTail)
             : NSAttributedString(string: response, attributes: Self.responseAttributes())
@@ -407,38 +488,35 @@ public final class InstructionTranscriptDocumentController {
         prefillPlaceholderRange = nil
         if showsPrefillPlaceholder {
             let placeholder = NSAttributedString(
-                string: Self.prefillPlaceholder(dotCount: prefillDotCount),
+                string: generationStatusText ?? Self.prefillPlaceholder(dotCount: prefillDotCount),
                 attributes: Self.prefillPlaceholderAttributes())
             prefillPlaceholderRange = NSRange(
-                location: document.length,
+                location: replacementStart + document.length,
                 length: placeholder.length)
             document.append(placeholder)
         }
-        // Only the live turn is replaced. `setAttributedString` would take the
-        // completed turns with it, and rebuilding is the common path — every
-        // prompt change and every non-extending response goes through here.
-        if frozenLength == 0 {
-            storage.setAttributedString(document)
-        } else {
-            storage.replaceCharacters(
-                in: NSRange(location: frozenLength,
-                            length: storage.length - frozenLength),
-                with: document)
-            assistantRange.location += frozenLength
-            if prefillPlaceholderRange != nil {
-                prefillPlaceholderRange?.location += frozenLength
-            }
-        }
+        // Finished turns and unchanged live cards retain their existing AppKit
+        // objects. Incompatible prompt/image changes still rebuild the live turn.
+        storage.replaceCharacters(in: previous, with: document)
         isFinalized = false
+        return oldText.map { (previous: previous, text: $0) }
     }
 
     /// Freezes the live turn into the history above it and starts an empty one.
     ///
-    /// Called when a turn is committed. The drawn turn is left exactly as it
-    /// is: sealing is bookkeeping, not a re-render, so a finished answer never
-    /// changes appearance after the fact.
+    /// Called when a turn is committed. Apart from retiring its current-request
+    /// marker, sealing is bookkeeping, not a re-render of the finished answer.
     public func sealTurn(storage: NSMutableAttributedString) {
         guard storage.length > frozenLength else { return }
+        // Only the current turn may claim Latest or Running. Remove its small
+        // marker once at archival, without re-rendering earlier requests.
+        if let range = latestRequestMarkerRange {
+            storage.deleteCharacters(in: range)
+            assistantRange.location -= range.length
+        }
+        latestRequestMarkerRange = nil
+        activityBoundaries.removeAll(keepingCapacity: true)
+        sealedRequestCount += activities.filter { $0.kind == .mcpRequest }.count
         let start = frozenLength
         let answer = response
         storage.append(NSAttributedString(
@@ -448,6 +526,7 @@ public final class InstructionTranscriptDocumentController {
             range: NSRange(location: start, length: frozenLength - start),
             answer: answer))
         prompt = ""
+        activities = []
         promptPrefixIdentifier = ""
         response = ""
         isFinalized = false
@@ -486,9 +565,14 @@ public final class InstructionTranscriptDocumentController {
     /// Empties the transcript, history included. New chat, not a new turn.
     public func resetTranscript(storage: NSMutableAttributedString) {
         storage.setAttributedString(NSAttributedString())
+        TranscriptImageLoader.clearCache()
         frozenLength = 0
         sealedTurns.removeAll()
+        sealedRequestCount = 0
+        latestRequestMarkerRange = nil
+        activityBoundaries.removeAll()
         prompt = ""
+        activities = []
         promptPrefixIdentifier = ""
         response = ""
         isFinalized = false
@@ -497,6 +581,8 @@ public final class InstructionTranscriptDocumentController {
         prefillPlaceholderRange = nil
         prefillDotCount = 0
         progressive.reset()
+        // Whole-chat resets release rendered blocks; normal turn resets reuse them.
+        progressive.cache.removeAll(keepingCapacity: false)
     }
 
     // MARK: - Progressive rendering
@@ -949,6 +1035,352 @@ public final class InstructionTranscriptDocumentController {
             count += 1
         }
         return count + seed
+    }
+
+    private static func activityDocument(
+        _ activities: [AppAgentActivity],
+        startingNumber: Int,
+        from startIndex: Int
+    ) -> (document: NSAttributedString, latestMarkerRange: NSRange?, boundaries: [Int]) {
+        let document = NSMutableAttributedString()
+        let latestRequestID = activities.last(where: { $0.kind == .mcpRequest })?.id
+        var number = startingNumber
+        var latestMarkerRange: NSRange?
+        var boundaries: [Int] = []
+        for activity in activities.dropFirst(startIndex) {
+            boundaries.append(document.length)
+            switch activity.kind {
+            case .mcpRequest:
+                document.append(NSAttributedString(
+                    string: "VisionCapture MCP request #\(number)",
+                    attributes: activityLabelAttributes(
+                        color: TurboFieldfareMacTheme.accentNSColor)))
+                number += 1
+                if activity.id == latestRequestID {
+                    let marker = activity.status == .dispatching ? " · Running" : " · Latest"
+                    latestMarkerRange = NSRange(
+                        location: document.length, length: (marker as NSString).length)
+                    document.append(NSAttributedString(
+                        string: marker,
+                        attributes: activityLabelAttributes(
+                            color: TurboFieldfareMacTheme.accentNSColor)))
+                }
+                document.append(NSAttributedString(string: "\n"))
+                let status = activityStatus(
+                    activity.status,
+                    elapsedSeconds: activity.elapsedSeconds)
+                document.append(activityCodeCard(
+                    body: activity.body,
+                    status: status))
+                if let response = activity.responseBody {
+                    document.append(NSAttributedString(
+                        string: "\nVisionCapture response to request #\(number - 1) · display excerpt\n",
+                        attributes: activityLabelAttributes(color: .secondaryLabelColor)))
+                    document.append(NSAttributedString(
+                        string: "Actual MCP result received by the host. Embedded content and binary fields are omitted where marked. This is not the sanitized result sent to Gemma.\n",
+                        attributes: activityBodyAttributes()))
+                    document.append(activityCodeCard(body: response, cardStyle: .response))
+                }
+                if let preview = activity.screenshotPreview {
+                    document.append(NSAttributedString(
+                        string: "\nScreenshot preview\n",
+                        attributes: activityLabelAttributes(color: .secondaryLabelColor)))
+                    let budget = TranscriptImageLoader.Budget(
+                        maximumSourcePixels: 512 * 512, maximumSourceDimension: 512,
+                        maximumDecodedBytes: 2 * 1_024 * 1_024,
+                        allowedTypeIdentifiers: ["public.png"])
+                    if let image = TranscriptImageLoader.thumbnail(
+                        at: preview.fileURL, maximumPixelSize: 512,
+                        budget: budget, cacheKey: preview.sha256) {
+                        let size = TranscriptImageTile.fittedSize(
+                            image.size, within: CGSize(width: 360, height: 360))
+                        let attachment = NSTextAttachment()
+                        attachment.image = image
+                        attachment.bounds = CGRect(origin: .zero, size: size)
+                        document.append(NSAttributedString(attachment: attachment))
+                    } else {
+                        document.append(NSAttributedString(
+                            string: "Screenshot preview unavailable.", attributes: activityBodyAttributes()))
+                    }
+                } else if let reason = activity.screenshotPreviewUnavailable {
+                    document.append(NSAttributedString(
+                        string: "\n\(reason)", attributes: activityBodyAttributes()))
+                }
+                document.append(NSAttributedString(string: "\n\n"))
+            case .modelInput(let attempt, let isFormatCorrection):
+                document.append(NSAttributedString(
+                    string: "Sent to Gemma · input attempt #\(attempt)\(isFormatCorrection ? " · format correction" : "")\n",
+                    attributes: activityLabelAttributes(color: modelInputAccentColor)))
+                document.append(NSAttributedString(
+                    string: "Complete request text below. Prior conversation is reused separately.\nDeveloper/tool configuration may already be retained.\nTool results are host-sanitized; raw MCP responses have their own cards.\nImages are supplied separately; references are listed below.\nJSON indentation is display-only. Original request text and values are unchanged.\n",
+                    attributes: activityBodyAttributes()))
+                document.append(activityCodeCard(
+                    body: formattedModelInputBody(activity.body), cardStyle: .modelInput))
+                document.append(NSAttributedString(string: "\n\n"))
+            case .modelResult(let callID, let toolName, let imageCount):
+                document.append(NSAttributedString(
+                    string: "Host → Gemma · tool result\n",
+                    attributes: activityLabelAttributes(color: TurboFieldfareMacTheme.accentNSColor)))
+                document.append(NSAttributedString(
+                    string: "\(toolName) · call \(callID)\nSanitized result · small JSON formatted for display. Original model input is unchanged. This result may combine several MCP responses.\n",
+                    attributes: activityBodyAttributes()))
+                document.append(activityCodeCard(body: activity.body, cardStyle: .response))
+                if imageCount > 0 {
+                    document.append(NSAttributedString(
+                        string: "\(imageCount) image attachment(s) included separately in this model input. Image bytes are omitted from this text; see the screenshot preview above.\n",
+                        attributes: activityBodyAttributes()))
+                }
+                document.append(NSAttributedString(string: "\n\n"))
+            case .localProposal:
+                document.append(NSAttributedString(
+                    string: "Not sent · Gemma proposal (not an MCP request)\n",
+                    attributes: activityLabelAttributes(color: .systemOrange)))
+                document.append(NSAttributedString(
+                    string: activity.body,
+                    attributes: activityBodyAttributes()))
+                if case .notSent(let reason) = activity.status {
+                    document.append(NSAttributedString(
+                        string: "\nReason: \(reason)\n\n",
+                        attributes: activityStatusAttributes(color: .systemOrange)))
+                } else {
+                    let status = activityStatus(
+                        activity.status,
+                        elapsedSeconds: activity.elapsedSeconds)
+                    document.append(NSAttributedString(
+                        string: "\nStatus: \(status.text)\n\n",
+                        attributes: activityStatusAttributes(color: status.color)))
+                }
+            }
+        }
+        boundaries.append(document.length)
+        return (document, latestMarkerRange, boundaries)
+    }
+
+    private enum ActivityCodeCardStyle {
+        case request
+        case response
+        case modelInput
+    }
+
+    private static var modelInputAccentColor: NSColor {
+        NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? NSColor(srgbRed: 0.89, green: 0.51, blue: 0.51, alpha: 1)
+                : NSColor(srgbRed: 0.64, green: 0.20, blue: 0.20, alpha: 1)
+        }
+    }
+
+    private static func formattedModelInputBody(_ body: String) -> String {
+        var result = ""
+        var followsToolHeader = false
+        var expectsJSON = false
+        body.enumerateSubstrings(in: body.startIndex..<body.endIndex, options: .byLines) {
+            line, range, enclosingRange, _ in
+            guard let line else { return }
+            if expectsJSON, let formatted = indentedJSONLine(line) {
+                result += formatted
+                result += body[range.upperBound..<enclosingRange.upperBound]
+            } else {
+                result += body[enclosingRange]
+            }
+            expectsJSON = followsToolHeader && line.hasPrefix("Call: ")
+            followsToolHeader = line.hasPrefix("Tool result: ")
+        }
+        return result
+    }
+
+    /// Add whitespace outside strings only: preserve every original JSON token,
+    /// including number spelling and escapes. Large/deep results remain complete
+    /// and wrap normally instead of creating an oversized formatted copy.
+    private static func indentedJSONLine(_ line: String) -> String? {
+        guard line.utf8.count <= 16 * 1_024, line.first == "{",
+              (try? JSONSerialization.jsonObject(with: Data(line.utf8))) != nil else { return nil }
+        let bytes = Array(line.utf8)
+        var output: [UInt8] = []
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var previous: UInt8?
+        func newline() {
+            output.append(10)
+            output.append(contentsOf: repeatElement(32, count: min(depth, 12) * 2))
+        }
+        for byte in bytes {
+            if inString {
+                output.append(byte)
+                if escaped { escaped = false }
+                else if byte == 92 { escaped = true }
+                else if byte == 34 { inString = false }
+            } else {
+                switch byte {
+                case 9, 10, 13, 32: continue
+                case 34:
+                    inString = true
+                    output.append(byte)
+                case 123, 91:
+                    output.append(byte)
+                    depth += 1
+                    newline()
+                case 125, 93:
+                    depth -= 1
+                    if previous == 123 || previous == 91 {
+                        output.removeLast(1 + min(depth + 1, 12) * 2)
+                    } else {
+                        newline()
+                    }
+                    output.append(byte)
+                case 44:
+                    output.append(byte)
+                    newline()
+                case 58: output.append(contentsOf: [58, 32])
+                default: output.append(byte)
+                }
+            }
+            previous = byte
+            guard output.count <= 64 * 1_024 else { return nil }
+        }
+        return String(decoding: output, as: UTF8.self)
+    }
+
+    private static func activityCodeCard(
+        body: String,
+        status: (text: String, color: NSColor)? = nil,
+        cardStyle: ActivityCodeCardStyle = .request
+    ) -> NSAttributedString {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 2
+        style.paragraphSpacing = 0
+        if cardStyle == .modelInput { style.lineBreakMode = .byCharWrapping }
+
+        // Match the native table-cell mechanism used by Markdown code blocks.
+        // One shared cell joins all JSON paragraphs into a full-width panel.
+        let table = NSTextTable()
+        table.numberOfColumns = 1
+        table.collapsesBorders = true
+        if cardStyle == .modelInput {
+            table.layoutAlgorithm = .fixedLayoutAlgorithm
+            table.setContentWidth(100, type: .percentageValueType)
+        }
+        let block = NSTextTableBlock(
+            table: table, startingRow: 0, rowSpan: 1,
+            startingColumn: 0, columnSpan: 1)
+        block.setContentWidth(100, type: .percentageValueType)
+        if cardStyle == .modelInput {
+            block.setValue(0, type: .absoluteValueType, for: .minimumWidth)
+            block.setValue(100, type: .percentageValueType, for: .maximumWidth)
+        }
+        block.backgroundColor = NSColor(name: nil) { appearance in
+            if cardStyle == .modelInput {
+                return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.28, green: 0.15, blue: 0.17, alpha: 1)
+                    : NSColor(srgbRed: 1, green: 0.93, blue: 0.93, alpha: 1)
+            }
+            if cardStyle == .response {
+                return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.12, green: 0.20, blue: 0.30, alpha: 1)
+                    : NSColor(srgbRed: 0.89, green: 0.94, blue: 1, alpha: 1)
+            }
+            return NSColor(calibratedWhite:
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 0.18 : 0.94,
+                alpha: 1)
+        }
+        block.setWidth(9, type: .absoluteValueType, for: .padding)
+        block.setWidth(1, type: .absoluteValueType, for: .border)
+        block.setBorderColor(NSColor(name: nil) { appearance in
+            if cardStyle == .modelInput {
+                return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.66, green: 0.36, blue: 0.38, alpha: 1)
+                    : NSColor(srgbRed: 0.76, green: 0.42, blue: 0.42, alpha: 1)
+            }
+            if cardStyle == .response {
+                return appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.34, green: 0.61, blue: 0.91, alpha: 1)
+                    : NSColor(srgbRed: 0.24, green: 0.46, blue: 0.74, alpha: 1)
+            }
+            return NSColor(calibratedWhite:
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua ? 0.40 : 0.76,
+                alpha: 1)
+        })
+        style.textBlocks = [block]
+
+        let card = NSMutableAttributedString(
+            string: body,
+            attributes: [
+                .font: NSFont.monospacedSystemFont(
+                    ofSize: NSFont.smallSystemFontSize, weight: .regular),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: style,
+            ])
+        if let status {
+            card.append(NSAttributedString(
+                string: "\nStatus: \(status.text)\n",
+                attributes: [
+                    .font: NSFont.monospacedSystemFont(
+                        ofSize: NSFont.smallSystemFontSize, weight: .semibold),
+                    .foregroundColor: status.color,
+                    .paragraphStyle: style,
+                ]))
+        } else {
+            card.append(NSAttributedString(string: "\n", attributes: [.paragraphStyle: style]))
+        }
+        return card
+    }
+
+    private static func activityStatus(
+        _ status: AppAgentActivity.Status,
+        elapsedSeconds: Double?
+    ) -> (text: String, color: NSColor) {
+        let presentation: (text: String, color: NSColor) = switch status {
+        case .dispatching:
+            ("Dispatching", .secondaryLabelColor)
+        case .succeeded:
+            ("Succeeded", .systemGreen)
+        case .recoverablePreDispatchRefusal(let outcome):
+            ("Recoverable pre-dispatch refusal · \(outcome.description)", .systemOrange)
+        case .serverOutcome(let outcome):
+            (outcome.description, outcome.verdict == "verified" ? .systemGreen
+                : outcome.verdict == "inconclusive" ? .systemOrange : .systemRed)
+        case .localFailure(let reason):
+            (reason, .systemRed)
+        case .cancelled:
+            ("Cancelled", .secondaryLabelColor)
+        case .notSent:
+            ("Not sent", .systemOrange)
+        }
+        guard let elapsedSeconds else { return presentation }
+        return (
+            "\(presentation.text) · \(String(format: "%.2f s", elapsedSeconds))",
+            presentation.color)
+    }
+
+    private static func activityLabelAttributes(
+        color: NSColor
+    ) -> [NSAttributedString.Key: Any] {
+        labelAttributes(color: color)
+    }
+
+    private static func activityBodyAttributes() -> [NSAttributedString.Key: Any] {
+        let style = NSMutableParagraphStyle()
+        style.lineSpacing = 2
+        return [
+            .font: NSFont.monospacedSystemFont(
+                ofSize: NSFont.smallSystemFontSize, weight: .regular),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: style,
+        ]
+    }
+
+    private static func activityStatusAttributes(
+        color: NSColor
+    ) -> [NSAttributedString.Key: Any] {
+        let style = NSMutableParagraphStyle()
+        style.paragraphSpacing = 4
+        return [
+            .font: NSFont.systemFont(
+                ofSize: NSFont.smallSystemFontSize, weight: .medium),
+            .foregroundColor: color,
+            .paragraphStyle: style,
+        ]
     }
 
     private static func userLabelAttributes() -> [NSAttributedString.Key: Any] {

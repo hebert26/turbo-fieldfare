@@ -60,6 +60,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var visionResidencyPolicy: VisionResidencyPolicy
+    public var toolThinkingEnabled: Bool
 
     public init(expertCacheSlots: Int = 16,
                 expertCachePolicy: AppExpertCachePolicy = .lfu,
@@ -67,7 +68,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
                 prefillChunkTokens: Int = 128,
                 rdadvisePolicy: AppRDAdvicePolicy = .off,
                 modelVerification: AppModelVerification = .fullSha256,
-                visionResidencyPolicy: VisionResidencyPolicy = .onDemand) {
+                visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
+                toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled) {
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
         self.prefillEnabled = prefillEnabled
@@ -75,6 +77,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         self.rdadvisePolicy = rdadvisePolicy
         self.modelVerification = modelVerification
         self.visionResidencyPolicy = visionResidencyPolicy
+        self.toolThinkingEnabled = toolThinkingEnabled
     }
 
     public func validate() throws {
@@ -137,6 +140,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public var rdadvisePolicy: AppRDAdvicePolicy
     public var modelVerification: AppModelVerification
     public var visionResidencyPolicy: VisionResidencyPolicy
+    public var toolThinkingEnabled: Bool
     public var forceLogitsHead: Bool
 
     public init(modelDirectory: URL,
@@ -150,6 +154,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
         self.rdadvisePolicy = options.rdadvisePolicy
         self.modelVerification = options.modelVerification
         self.visionResidencyPolicy = options.visionResidencyPolicy
+        self.toolThinkingEnabled = options.toolThinkingEnabled
         self.forceLogitsHead = forceLogitsHead
     }
 
@@ -169,6 +174,7 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
             prefillChunkTokens: prefillChunkTokens,
             rdadvisePolicy: rdadvisePolicy,
             modelVerification: modelVerification,
-            visionResidencyPolicy: visionResidencyPolicy)
+            visionResidencyPolicy: visionResidencyPolicy,
+            toolThinkingEnabled: toolThinkingEnabled)
     }
 }

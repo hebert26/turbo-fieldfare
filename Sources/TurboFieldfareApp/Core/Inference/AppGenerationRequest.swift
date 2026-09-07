@@ -1,6 +1,45 @@
 import Foundation
 import TurboFieldfare
 
+public struct AppToolDefinition: Equatable, Sendable {
+    public let name: String
+    public let description: String
+    public let parameters: JSONValue
+
+    public init(name: String, description: String, parameters: JSONValue) {
+        self.name = name
+        self.description = description
+        self.parameters = parameters
+    }
+
+    var tokenizerDefinition: GFTokenizer.FunctionDefinition {
+        GFTokenizer.FunctionDefinition(
+            name: name,
+            description: description,
+            parameters: parameters)
+    }
+}
+
+public struct AppToolResult: Equatable, Sendable {
+    public let callID: String
+    public let name: String
+    public let content: String
+    public let imageAttachments: [AppImageAttachment]
+
+    public init(callID: String, name: String, content: String,
+                imageAttachments: [AppImageAttachment] = []) {
+        self.callID = callID
+        self.name = name
+        self.content = content
+        self.imageAttachments = imageAttachments
+    }
+}
+
+public enum AppToolTurn: Equatable, Sendable {
+    case user(developerPrompt: String?, tools: [AppToolDefinition])
+    case results([AppToolResult])
+}
+
 public struct AppGenerationRequest: Equatable, Sendable {
     public var modelDirectory: URL
     public var prompt: String
@@ -28,6 +67,14 @@ public struct AppGenerationRequest: Equatable, Sendable {
     /// only the service is entitled to make it.
     public var conversationEpoch: UUID?
     public var turnIndex: Int?
+    /// Optional structured-tool step inside the same retained conversation.
+    /// The first case appends the user's visible turn. Result cases append only
+    /// host-produced tool responses and do not create another visible turn.
+    public var toolTurn: AppToolTurn?
+    /// Set only after the private local trace file has opened successfully.
+    public var captureToolFailureEvidence: Bool = false
+    /// Bounded GPU timing metadata for the process-opt-in agent trace only.
+    public var captureGPUCompletionTiming: Bool = false
 
     public init(modelDirectory: URL,
                 prompt: String,
@@ -42,11 +89,13 @@ public struct AppGenerationRequest: Equatable, Sendable {
                 continuesConversation: Bool = false,
                 conversationTokens: Int = 0,
                 conversationEpoch: UUID? = nil,
-                turnIndex: Int? = nil) {
+                turnIndex: Int? = nil,
+                toolTurn: AppToolTurn? = nil) {
         self.continuesConversation = continuesConversation
         self.conversationTokens = conversationTokens
         self.conversationEpoch = conversationEpoch
         self.turnIndex = turnIndex
+        self.toolTurn = toolTurn
         self.modelDirectory = modelDirectory
         self.prompt = prompt
         self.imageAttachments = imageAttachments
@@ -65,9 +114,19 @@ public struct AppGenerationRequest: Equatable, Sendable {
 
     public func validate(fileManager: FileManager = .default,
                          requireModelDirectory: Bool = true) throws {
+        let carriesToolResults: Bool = if case .results = toolTurn { true } else { false }
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || !imageAttachments.isEmpty else {
+                || !imageAttachments.isEmpty || carriesToolResults else {
             throw AppInferenceError.invalidRequest("Prompt or image cannot be empty.")
+        }
+        if case .results(let results) = toolTurn,
+           results.flatMap(\.imageAttachments) != imageAttachments {
+            throw AppInferenceError.invalidRequest(
+                "Tool-result images must match the supplied attachments exactly.")
+        }
+        if toolTurn != nil, !continuesConversation {
+            throw AppInferenceError.invalidRequest(
+                "Tool calls require the retained app conversation.")
         }
         // The same context-derived rule the server uses. A fixed four here
         // meant a request the API accepted was refused in the app.

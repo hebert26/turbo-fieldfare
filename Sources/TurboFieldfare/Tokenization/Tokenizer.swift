@@ -47,6 +47,11 @@ public struct GFTokenizer: @unchecked Sendable {
     public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
     public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
 
+    /// Default for callers without an explicit session setting. A configured
+    /// tokenizer keeps its own fixed mode for the lifetime of its conversation.
+    public static let toolThinkingEnabled =
+        ProcessInfo.processInfo.environment["TURBOFIELDFARE_AGENT_THINKING"] == "1"
+
     public let bosID: Int32
     public let eosID: Int32
     public let padID: Int32
@@ -74,6 +79,15 @@ public struct GFTokenizer: @unchecked Sendable {
 
     @usableFromInline
     let tokenizer: any Tokenizer
+    public private(set) var enableToolThinking: Bool
+
+    /// Shares the loaded tokenizer data, changing only this value's chat setting.
+    /// Configure before creating a conversation, never during a retained turn.
+    public func withToolThinking(enabled: Bool) -> Self {
+        var configured = self
+        configured.enableToolThinking = enabled
+        return configured
+    }
 
     public static func load() async throws -> GFTokenizer {
         try await GFTokenizerLoadCoordinator.shared.load(.pretrained(modelID))
@@ -191,6 +205,7 @@ public struct GFTokenizer: @unchecked Sendable {
 
     public init(tokenizer: any Tokenizer, tokenizerData: Config) throws {
         self.tokenizer = tokenizer
+        self.enableToolThinking = Self.toolThinkingEnabled
         try Self.verifyDecoderConfiguration(tokenizerData)
 
         // The same `added_tokens[special == true]` ID set the library's
@@ -301,6 +316,9 @@ public struct GFTokenizer: @unchecked Sendable {
         public let toolCalls: [HistoricalToolCall]
         public let toolCallID: String?
         public let name: String?
+        /// Native tool-result image parts. Pixels live only in the current
+        /// prefill input, never in the logical message history.
+        public let toolImageCount: Int
 
         public init(role: Role, content: String) {
             self.role = role
@@ -308,18 +326,21 @@ public struct GFTokenizer: @unchecked Sendable {
             self.toolCalls = []
             self.toolCallID = nil
             self.name = nil
+            self.toolImageCount = 0
         }
 
         public init(role: Role,
                     content: String?,
                     toolCalls: [HistoricalToolCall] = [],
                     toolCallID: String? = nil,
-                    name: String? = nil) {
+                    name: String? = nil,
+                    toolImageCount: Int = 0) {
             self.role = role
             self.content = content
             self.toolCalls = toolCalls
             self.toolCallID = toolCallID
             self.name = name
+            self.toolImageCount = toolImageCount
         }
     }
 
@@ -357,6 +378,18 @@ public struct GFTokenizer: @unchecked Sendable {
                 "role": message.role.rawValue,
                 "content": message.content,
             ]
+            guard message.toolImageCount >= 0,
+                  message.toolImageCount == 0 || message.role == .tool else {
+                throw GFTokenizerError.invalidChatTemplate("images require a tool-result message")
+            }
+            if message.toolImageCount > 0 {
+                var parts: [[String: any Sendable]] = [
+                    ["type": "text", "text": message.content ?? ""],
+                ]
+                parts.append(contentsOf: repeatElement(
+                    ["type": "image"], count: message.toolImageCount))
+                value["content"] = parts
+            }
             if !message.toolCalls.isEmpty {
                 value["tool_calls"] = try message.toolCalls.map { call -> [String: any Sendable] in
                     [
@@ -390,7 +423,7 @@ public struct GFTokenizer: @unchecked Sendable {
             truncation: false,
             maxLength: nil,
             tools: upstreamTools,
-            additionalContext: ["enable_thinking": false]
+            additionalContext: ["enable_thinking": enableToolThinking]
         ).map(Int32.init)
     }
 

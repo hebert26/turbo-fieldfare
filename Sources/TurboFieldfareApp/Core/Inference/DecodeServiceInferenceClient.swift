@@ -99,7 +99,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         let event = try await handles.responses.next(matching: request.requestID)
         switch event.kind {
         case .ready:
-            break
+            // Readiness must acknowledge the actual session setting, rather
+            // than inferring it from this app's launch environment.
+            guard event.toolThinkingEnabled == options.toolThinkingEnabled else {
+                throw AppInferenceError.modelLoadFailed(
+                    "decode service thinking mode does not match the requested setting")
+            }
         case .failed:
             throw AppInferenceError.modelLoadFailed(
                 event.error ?? "decode service load failed")
@@ -128,6 +133,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         -> AsyncThrowingStream<AppInferenceEvent, Error> {
         AsyncThrowingStream { continuation in
             let task = Task.detached(priority: .userInitiated) { [self] in
+                var pendingThinkingToken: AppTokenEvent?
                 do {
                     try request.validate()
                     guard let handles = currentHandles() else {
@@ -135,7 +141,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     }
                     let generationID = UUID()
                     generationTranscriptMailbox.reset()
-                    let command = DecodeGenerationRequest(
+                    var command = DecodeGenerationRequest(
                         prompt: request.prompt,
                         imageAttachments: request.imageAttachments.map {
                             DecodeImageAttachment(
@@ -154,7 +160,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         runtimeOptions: Self.decodeRuntimeOptions(request.runtimeOptions),
                         generationID: generationID,
                         conversationEpoch: request.conversationEpoch,
-                        turnIndex: request.turnIndex)
+                        turnIndex: request.turnIndex,
+                        toolTurn: try Self.decodeToolTurn(request.toolTurn))
+                    command.captureToolFailureEvidence = request.captureToolFailureEvidence ? true : nil
+                    command.captureGPUCompletionTiming = request.captureGPUCompletionTiming ? true : nil
                     try write(.generate(command), to: handles.input,
                               expecting: handles.responses)
 
@@ -174,6 +183,20 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         }
                         guard event.generationID == generationID else { continue }
 
+                        if event.kind == .toolCall {
+                            guard let call = event.toolCall,
+                                  let data = call.argumentsJSON.data(using: .utf8),
+                                  let arguments = try? JSONDecoder().decode(
+                                    JSONValue.self, from: data) else {
+                                throw AppInferenceError.unknown(
+                                    "decode service returned an invalid tool call")
+                            }
+                            continuation.yield(.toolCall(AppToolCall(
+                                id: call.id,
+                                name: call.name,
+                                arguments: arguments)))
+                            continue
+                        }
                         if event.kind == .memory {
                             // The stored reading is not observed by the UI, so
                             // yield an event that causes it to redraw.
@@ -195,6 +218,14 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         }
                         if event.kind == .snapshot {
                             generationTranscriptMailbox.append(event.textDelta)
+                            // Keep the newest snapshot, including nil clearing a
+                            // completed draft, until the UI cadence or terminal flush.
+                            pendingThinkingToken = AppTokenEvent(
+                                    index: max(0, event.tokenCount - 1), textDelta: "",
+                                    elapsedDecodeSeconds: event.decodeSeconds,
+                                    structuredProgress: event.structuredProgress,
+                                    thinkingPreview: event.thinkingPreview,
+                                    toolCallPreview: event.toolCallPreview)
                             let now = Date()
                             let beginsVisibleText = !hasYieldedVisibleText
                                 && event.textDelta.contains { !$0.isWhitespace }
@@ -205,11 +236,21 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                                 continuation.yield(.token(AppTokenEvent(
                                     index: max(0, event.tokenCount - 1),
                                     textDelta: beginsVisibleText ? event.textDelta : "",
-                                    elapsedDecodeSeconds: event.decodeSeconds)))
+                                    elapsedDecodeSeconds: event.decodeSeconds,
+                                    structuredProgress: event.structuredProgress,
+                                    thinkingPreview: event.thinkingPreview,
+                                    toolCallPreview: event.toolCallPreview)))
+                                pendingThinkingToken = nil
                             }
                             continue
                         }
 
+                        // Keep the last display window even when the terminal
+                        // event arrives inside the normal half-second UI throttle.
+                        if let pendingThinkingToken {
+                            continuation.yield(.token(pendingThinkingToken))
+                        }
+                        pendingThinkingToken = nil
                         let diagnostics = Self.diagnostics(
                             event, options: request.runtimeOptions)
                         switch event.kind {
@@ -220,8 +261,22 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             continuation.yield(.cancelled(diagnostics))
                             continuation.finish()
                         case .failed:
-                            let error = AppInferenceError.unknown(
-                                event.error ?? "decode service failed")
+                            let message = event.error ?? "decode service failed"
+                            let error: AppInferenceError
+                            var evidence: StructuredToolFailureEvidence?
+                            if request.captureToolFailureEvidence,
+                               let json = event.parserFailureJSON,
+                               let data = json.data(using: .utf8) {
+                                evidence = try? JSONDecoder().decode(
+                                    StructuredToolFailureEvidence.self, from: data)
+                            }
+                            if let canRegenerate = event.parserFailureCanRegenerateToolResult {
+                                error = .structuredToolFailure(
+                                    message: message, canRegenerateToolResult: canRegenerate,
+                                    evidence: evidence)
+                            } else {
+                                error = .unknown(message)
+                            }
                             continuation.yield(.failed(error, partial: diagnostics))
                             continuation.finish(throwing: error)
                         case .lineageLost:
@@ -239,10 +294,16 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         return
                     }
                 } catch {
+                    if let pendingThinkingToken {
+                        continuation.yield(.token(pendingThinkingToken))
+                    }
                     continuation.finish(throwing: error)
                 }
             }
-            continuation.onTermination = { [weak self] _ in
+            continuation.onTermination = { [weak self] termination in
+                // A completed old stream must not send an unscoped Stop that
+                // can arrive after the next generation has begun.
+                guard case .cancelled = termination else { return }
                 task.cancel()
                 self?.cancel()
             }
@@ -324,6 +385,11 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             "RunAtLoad": true,
             "KeepAlive": false,
             "ProcessType": "Interactive",
+            // Preserve the launch default for callers without explicit load
+            // settings. The app sends its saved thinking choice with each load.
+            "EnvironmentVariables": [
+                "TURBOFIELDFARE_AGENT_THINKING": GFTokenizer.toolThinkingEnabled ? "1" : "0",
+            ],
         ]
         let propertyListData = try PropertyListSerialization.data(
             fromPropertyList: propertyList, format: .xml, options: 0)
@@ -460,7 +526,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             visionTowerMappedBytes: event.visionTowerMappedBytes,
             runtimeOptions: options,
             prefill: prefillDiagnostics(event.prefill, options: options),
-            runner: event.runner.map(runnerDiagnostics))
+            runner: event.runner.map(runnerDiagnostics),
+            structuredProgress: event.structuredProgress)
     }
 
     private static func prefillDiagnostics(
@@ -483,6 +550,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         -> AppRunnerDiagnostics {
         AppRunnerDiagnostics(
             cb1MillisecondsPerToken: value.cb1MillisecondsPerToken,
+            routerWaitMillisecondsPerToken: value.routerWaitMillisecondsPerToken,
+            gpuCompletionTiming: value.gpuCompletionTiming,
             ioMillisecondsPerToken: value.ioMillisecondsPerToken,
             cb2MillisecondsPerToken: value.cb2MillisecondsPerToken,
             headMillisecondsPerToken: value.headMillisecondsPerToken,
@@ -502,7 +571,37 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: options.rdadvisePolicy.rawValue,
             modelVerification: options.modelVerification.rawValue,
-            visionResidencyPolicy: options.visionResidencyPolicy.rawValue)
+            visionResidencyPolicy: options.visionResidencyPolicy.rawValue,
+            toolThinkingEnabled: options.toolThinkingEnabled)
+    }
+
+    private static func decodeToolTurn(_ turn: AppToolTurn?) throws
+        -> DecodeToolTurn? {
+        switch turn {
+        case .user(let developerPrompt, let tools):
+            return .user(
+                developerPrompt: developerPrompt,
+                tools: try tools.map {
+                    DecodeToolDefinition(
+                        name: $0.name,
+                        description: $0.description,
+                        parametersJSON: try $0.parameters.encoded())
+                })
+        case .results(let results):
+            return .results(results.map {
+                    DecodeToolResult(
+                        callID: $0.callID,
+                        name: $0.name,
+                        content: $0.content,
+                        imageAttachments: $0.imageAttachments.isEmpty ? nil : $0.imageAttachments.map {
+                            DecodeImageAttachment(
+                                id: $0.id, path: $0.fileURL.path, displayName: $0.displayName,
+                                encodedBytes: $0.encodedBytes, sha256: $0.sha256)
+                        })
+            })
+        case nil:
+            return nil
+        }
     }
 
     private static func removeLaunchJob(label: String) {

@@ -11,6 +11,9 @@ struct RunnerDiagnosticsSection: View {
                 groupLabel("Result")
                 DiagnosticRow("Settings", diagnostics.runtimeOptions.resultSummary, multiline: true)
                 DiagnosticRow("Prompt tokens", diagnostics.promptTokenCount.map(String.init) ?? "unknown")
+                DiagnosticRow("Cached prefix", diagnostics.cachedPromptTokens.map(String.init) ?? "unknown")
+                DiagnosticRow("Prefilled tokens", diagnostics.computedPrefillTokens.map(String.init) ?? "unknown")
+                DiagnosticRow("Context after turn", diagnostics.conversationTokens.map(String.init) ?? "unknown")
                 DiagnosticRow("Output tokens", "\(diagnostics.generatedTokens)")
                 DiagnosticRow("Stop", diagnostics.stopReason.rawValue)
 
@@ -111,6 +114,9 @@ private struct AdvancedRunnerDiagnosticsView: View {
     var body: some View {
         VStack(spacing: 8) {
             DiagnosticRow("cb1 / token", MetricFormat.milliseconds(runner.cb1MillisecondsPerToken))
+            DiagnosticRow("Router wait / token",
+                          MetricFormat.milliseconds(runner.routerWaitMillisecondsPerToken))
+                .help("CPU time waiting for each layer's router results, including queued prior-layer work. Excludes the final routed drain and does not identify individual GPU kernel time.")
             DiagnosticRow("cb2 / token", MetricFormat.milliseconds(runner.cb2MillisecondsPerToken))
             DiagnosticRow("Head / token", MetricFormat.milliseconds(runner.headMillisecondsPerToken))
             if hasRDAdviceActivity {

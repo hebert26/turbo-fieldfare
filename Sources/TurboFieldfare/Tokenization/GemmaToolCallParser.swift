@@ -34,16 +34,34 @@ public struct GemmaToolCallParser: Sendable {
         }
     }
 
+    /// An opening inspection only. EOF can still be extended, and tool-name
+    /// validation remains the completed call's responsibility.
+    func hasInvalidOpeningPrefix(_ text: String) -> Bool {
+        var parser = Parser(text, allowsIncomplete: true)
+        do {
+            try parser.consume("call:")
+            _ = try parser.identifier()
+            _ = try parser.object()
+            parser.skipWhitespace()
+            return !parser.isAtEnd
+        } catch is IncompleteToolCallPrefix {
+            return false
+        } catch {
+            return true
+        }
+    }
+
     public func parse(_ text: String,
                       allowedTools: Set<String>,
-                      id: String) throws -> ParsedToolCall {
+                      id: String,
+                      acceptsUnknownToolNames: Bool = false) throws -> ParsedToolCall {
         guard text.utf8.count <= Self.maximumBytes else {
             throw GemmaToolCallParserError.oversized
         }
         var parser = Parser(text)
         try parser.consume("call:")
         let name = try parser.identifier()
-        guard allowedTools.contains(name) else {
+        guard acceptsUnknownToolNames || allowedTools.contains(name) else {
             throw GemmaToolCallParserError.unknownTool(name)
         }
         let arguments = try parser.object()
@@ -56,12 +74,16 @@ public struct GemmaToolCallParser: Sendable {
     }
 }
 
+private struct IncompleteToolCallPrefix: Error {}
+
 private struct Parser {
     private let characters: [Character]
+    private let allowsIncomplete: Bool
     private var index = 0
 
-    init(_ text: String) {
+    init(_ text: String, allowsIncomplete: Bool = false) {
         characters = Array(text)
+        self.allowsIncomplete = allowsIncomplete
     }
 
     var isAtEnd: Bool { index == characters.count }
@@ -73,6 +95,10 @@ private struct Parser {
     mutating func consume(_ literal: String) throws {
         skipWhitespace()
         let value = Array(literal)
+        if allowsIncomplete, index + value.count > characters.count,
+           characters[index...].elementsEqual(value.prefix(characters.count - index)) {
+            throw IncompleteToolCallPrefix()
+        }
         guard index + value.count <= characters.count,
               Array(characters[index..<(index + value.count)]) == value else {
             throw GemmaToolCallParserError.malformed
@@ -88,6 +114,7 @@ private struct Parser {
             guard character.isLetter || character.isNumber || character == "_" else { break }
             index += 1
         }
+        if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
         guard index > start else { throw GemmaToolCallParserError.malformed }
         return String(characters[start..<index])
     }
@@ -109,6 +136,16 @@ private struct Parser {
 
     mutating func value() throws -> JSONValue {
         skipWhitespace()
+        if allowsIncomplete {
+            let remaining = characters[index...]
+            for literal in ["<|\"|>", "true", "false", "null"] {
+                let expected = Array(literal)
+                if remaining.count < expected.count,
+                   remaining.elementsEqual(expected.prefix(remaining.count)) {
+                    throw IncompleteToolCallPrefix()
+                }
+            }
+        }
         if starts(with: "<|\"|>") { return .string(try gemmaString()) }
         if starts(with: "\"") { return .string(try jsonString()) }
         if starts(with: "{") { return try object() }
@@ -131,6 +168,7 @@ private struct Parser {
             }
             index += 1
         }
+        if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
         guard index > start else { throw GemmaToolCallParserError.malformed }
         return String(characters[start..<index])
     }
@@ -164,6 +202,7 @@ private struct Parser {
                 index += 1
             }
         }
+        if allowsIncomplete { throw IncompleteToolCallPrefix() }
         throw GemmaToolCallParserError.malformed
     }
 
@@ -172,6 +211,7 @@ private struct Parser {
         var result = ""
         while !isAtEnd {
             if take("\"") { return result }
+            if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
             if take("\\") {
                 result += try escapedFragment()
             } else {
@@ -179,10 +219,12 @@ private struct Parser {
                 index += 1
             }
         }
+        if allowsIncomplete { throw IncompleteToolCallPrefix() }
         throw GemmaToolCallParserError.malformed
     }
 
     mutating func escapedFragment() throws -> String {
+        if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
         guard index < characters.count else { throw GemmaToolCallParserError.malformed }
         let escape = characters[index]
         index += 1
@@ -199,6 +241,10 @@ private struct Parser {
             let first = try unicodeCodeUnit()
             let scalar: UInt32
             if (0xD800...0xDBFF).contains(first) {
+                if allowsIncomplete, index + 2 > characters.count,
+                   characters[index...].elementsEqual(Array("\\u").prefix(characters.count - index)) {
+                    throw IncompleteToolCallPrefix()
+                }
                 guard index + 2 <= characters.count,
                       characters[index] == "\\",
                       characters[index + 1] == "u" else {
@@ -227,6 +273,9 @@ private struct Parser {
     }
 
     mutating func unicodeCodeUnit() throws -> UInt16 {
+        if allowsIncomplete, index + 4 > characters.count {
+            throw IncompleteToolCallPrefix()
+        }
         guard index + 4 <= characters.count else {
             throw GemmaToolCallParserError.malformed
         }
@@ -247,6 +296,8 @@ private struct Parser {
               "-+0123456789.eE".contains(characters[index]) {
             index += 1
         }
+        // An exponent, fraction, sign, or large literal may still be growing.
+        if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
         guard index > start else {
             throw GemmaToolCallParserError.malformed
         }

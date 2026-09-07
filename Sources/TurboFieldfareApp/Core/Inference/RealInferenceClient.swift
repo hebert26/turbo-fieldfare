@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import TurboFieldfare
+import TurboFieldfareDecodeProtocol
 import Synchronization
 
 final class GenerationTaskRegistry: Sendable {
@@ -87,6 +88,10 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
         await session.unload()
     }
 
+    public var loadedToolThinkingEnabled: Bool? {
+        get async { await session.loadedToolThinkingEnabled }
+    }
+
     /// Drops the KV so the next turn starts a fresh lineage. The model stays
     /// loaded: this ends a conversation, it does not unload ~1.6 GB.
     public func resetConversation() async {
@@ -137,8 +142,9 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
             }
             generationTasks.attach(task, to: generationID)
 
-            continuation.onTermination = { [generationTasks] _ in
-                generationTasks.take(generationID)?.cancel()
+            continuation.onTermination = { [generationTasks] termination in
+                let task = generationTasks.take(generationID)
+                if case .cancelled = termination { task?.cancel() }
             }
         }
     }
@@ -263,6 +269,10 @@ actor RealInferenceSession {
 
     var hasConversation: Bool { conversation != nil }
 
+    var loadedToolThinkingEnabled: Bool? {
+        loadedKey == nil ? nil : tokenizer?.enableToolThinking
+    }
+
     var currentConversationTokens: Int {
         get async {
             let count = await conversation?.kvTokenCount ?? 0
@@ -301,6 +311,7 @@ actor RealInferenceSession {
                     throw AppInferenceError.tokenizerUnavailable("\(error)")
                 }
             }
+            tokenizer = tokenizer?.withToolThinking(enabled: key.options.toolThinkingEnabled)
             try Task.checkCancellation()
 
             onState(.loading(.verifyingWeights))
@@ -515,6 +526,7 @@ actor RealInferenceSession {
         var cachedTokens: Int?
         var computedPrefillTokens: Int?
         var conversationTokens: Int?
+        var toolCalls: [ParsedToolCall] = []
     }
 
     /// The open conversation, or a new one on the same runner.
@@ -586,14 +598,62 @@ actor RealInferenceSession {
         do {
             // `maxNewTokens` is clamped inside the conversation against what the
             // KV has room for, so it is passed through unmodified here.
-            let turn = try await conversation.send(
-                parts: parts, images: imageURLs,
-                config: Self.generationConfig(
-                    for: request, maxNewTokens: request.maxNewTokens),
-                prefillConfig: prefillConfig,
-                checkCancellation: { try Task.checkCancellation() },
-                shouldStop: stopFlagReader(),
-                onProgress: report)
+            let config = Self.generationConfig(
+                for: request, maxNewTokens: request.maxNewTokens)
+            // This is the immutable mode configured on the loaded tokenizer.
+            let invisibleTokenLimit: Int? = loadedToolThinkingEnabled == true
+                ? nil : VisionCaptureAgentProfile.maximumConsecutiveInvisibleTokens
+            let turn: MultimodalTurnResult
+            let toolCalls: [ParsedToolCall]
+            switch request.toolTurn {
+            case .user(let developerPrompt, let tools):
+                let completion = try await conversation.sendToolUser(
+                    parts: parts, images: imageURLs,
+                    developerPrompt: developerPrompt,
+                    tools: tools.map(\.tokenizerDefinition),
+                    config: config,
+                    prefillConfig: prefillConfig,
+                    checkCancellation: { try Task.checkCancellation() },
+                    shouldStop: stopFlagReader(),
+                    acceptsUnknownToolNames: true,
+                    captureToolFailureEvidence: request.captureToolFailureEvidence,
+                    maximumConsecutiveInvisibleTokens: invisibleTokenLimit,
+                    captureThoughtPreview: true,
+                    onProgress: report,
+                    onStructuredProgress: { progress.updateStructuredProgress($0) })
+                turn = completion.turn
+                toolCalls = completion.toolCalls
+            case .results(let results):
+                let completion = try await conversation.sendToolResults(
+                    results.map {
+                        ConversationToolResult(
+                            callID: $0.callID,
+                            name: $0.name,
+                            content: $0.content,
+                            images: $0.imageAttachments.map(\.fileURL))
+                    },
+                    config: config,
+                    prefillConfig: prefillConfig,
+                    checkCancellation: { try Task.checkCancellation() },
+                    shouldStop: stopFlagReader(),
+                    acceptsUnknownToolNames: true,
+                    captureToolFailureEvidence: request.captureToolFailureEvidence,
+                    maximumConsecutiveInvisibleTokens: invisibleTokenLimit,
+                    captureThoughtPreview: true,
+                    onProgress: report,
+                    onStructuredProgress: { progress.updateStructuredProgress($0) })
+                turn = completion.turn
+                toolCalls = completion.toolCalls
+            case nil:
+                turn = try await conversation.send(
+                    parts: parts, images: imageURLs,
+                    config: config,
+                    prefillConfig: prefillConfig,
+                    checkCancellation: { try Task.checkCancellation() },
+                    shouldStop: stopFlagReader(),
+                    onProgress: report)
+                toolCalls = []
+            }
             progress.promptTokenCount = turn.promptTokens
             // The conversation's own count. `promptTokens + completionTokens`
             // is one too many whenever a run stops on max tokens or is
@@ -605,7 +665,8 @@ actor RealInferenceSession {
                 decodeSeconds: turn.decodeSeconds, newTokens: turn.completionTokens,
                 cachedTokens: turn.cachedTokens,
                 computedPrefillTokens: turn.computedPrefillTokens,
-                conversationTokens: turn.kvTokens)
+                conversationTokens: turn.kvTokens,
+                toolCalls: toolCalls)
         } catch let error as MultimodalConversationError {
             // Mapped rather than flattened: a lineage that broke can only be
             // cleared, an exhausted context is the user's to act on, and an
@@ -621,7 +682,13 @@ actor RealInferenceSession {
                     maxContext: maxContext)
             case .imageUnavailable:
                 throw AppInferenceError.invalidRequest("\(error)")
-            case .closed, .busy, .emptyTurn:
+            case .noObservableToolProgress(let limit):
+                throw AppInferenceError.invalidRequest(
+                    "Agent Mode reached its invisible-output token limit (\(limit) tokens) "
+                        + "without visible answer text or a completed tool call. "
+                        + "No new VisionCapture request was dispatched from this model step.")
+            case .closed, .busy, .emptyTurn,
+                    .toolModeRequiresNewConversation, .invalidToolContinuation:
                 throw AppInferenceError.unknown("\(error)")
             }
         }
@@ -659,6 +726,8 @@ actor RealInferenceSession {
             guard let runner, let tokenizer, let ctx, let scratch else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
+            runner.captureGPUCompletionTiming = request.captureGPUCompletionTiming
+            defer { runner.captureGPUCompletionTiming = false }
             let executedPrefillMode: PrefillExecutedMode =
                 prefillConfig.mode == .chunked ? .chunked : .off
             let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
@@ -682,12 +751,18 @@ actor RealInferenceSession {
                     continuation.yield(.token(AppTokenEvent(
                         index: index,
                         textDelta: delta,
-                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds,
+                        structuredProgress: progress.structuredProgress,
+                        thinkingPreview: progress.thinkingPreview,
+                        toolCallPreview: progress.toolCallPreview)))
                 case .tail(let text):
                     continuation.yield(.token(AppTokenEvent(
                         index: max(progress.generated - 1, 0),
                         textDelta: text,
-                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds)))
+                        elapsedDecodeSeconds: progress.elapsedDecodeSeconds,
+                        structuredProgress: progress.structuredProgress,
+                        thinkingPreview: progress.thinkingPreview,
+                        toolCallPreview: progress.toolCallPreview)))
                 }
             }
 
@@ -706,6 +781,13 @@ actor RealInferenceSession {
             }
             let result = outcome
 
+            for call in result.toolCalls {
+                continuation.yield(.toolCall(AppToolCall(
+                    id: call.id,
+                    name: call.name,
+                    arguments: call.arguments)))
+            }
+
             let diagnostics = makeDiagnostics(request: request,
                                               memorySampler: memorySampler,
                                               progress: progress,
@@ -720,6 +802,15 @@ actor RealInferenceSession {
             continuation.yield(.finished(diagnostics))
             continuation.finish()
         } catch is CancellationError {
+            if progress.generated > 0,
+               progress.thinkingPreview != nil || progress.toolCallPreview != nil {
+                continuation.yield(.token(AppTokenEvent(
+                    index: progress.generated - 1, textDelta: "",
+                    elapsedDecodeSeconds: progress.elapsedDecodeSeconds,
+                    structuredProgress: progress.structuredProgress,
+                    thinkingPreview: progress.thinkingPreview,
+                    toolCallPreview: progress.toolCallPreview)))
+            }
             let diagnostics = makeDiagnostics(request: request,
                                               memorySampler: memorySampler,
                                               progress: progress,
@@ -745,6 +836,13 @@ actor RealInferenceSession {
                            continuation: continuation,
                            prefill: diagnostics,
                            forcePartialDiagnostics: true)
+        } catch let failure as StructuredToolFailure {
+            failGeneration(.structuredToolFailure(
+                message: failure.description,
+                canRegenerateToolResult: failure.canRegenerateToolResult,
+                evidence: failure.evidence),
+                request: request, memorySampler: memorySampler,
+                progress: progress, continuation: continuation)
         } catch let appError as AppInferenceError {
             failGeneration(appError, request: request, memorySampler: memorySampler,
                            progress: progress, continuation: continuation)
@@ -761,6 +859,17 @@ actor RealInferenceSession {
                                 continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation,
                                 prefill: PrefillExecutionDiagnostics? = nil,
                                 forcePartialDiagnostics: Bool = false) {
+        // A parsing error can follow held-back thought bytes on a control token.
+        // Flush their display window without counting another sampled token.
+        if progress.generated > 0,
+           progress.thinkingPreview != nil || progress.toolCallPreview != nil {
+            continuation.yield(.token(AppTokenEvent(
+                index: progress.generated - 1, textDelta: "",
+                elapsedDecodeSeconds: progress.elapsedDecodeSeconds,
+                structuredProgress: progress.structuredProgress,
+                thinkingPreview: progress.thinkingPreview,
+                toolCallPreview: progress.toolCallPreview)))
+        }
         let partial = progress.generated > 0 || forcePartialDiagnostics
             ? makeDiagnostics(request: request, memorySampler: memorySampler,
                               progress: progress, stopReason: .failed,
@@ -791,6 +900,10 @@ actor RealInferenceSession {
         } else {
             ttft = nil
         }
+        // A failure can follow a completed forward or interrupt one. Generated
+        // tokens do not establish its forward count, so omit normalized buckets.
+        let runnerTiming = stopReason == .failed
+            ? nil : runnerDiagnostics(progress: progress, generated: generated)
         return AppDiagnostics(
             generatedTokens: generated,
             stopReason: stopReason,
@@ -806,7 +919,8 @@ actor RealInferenceSession {
             visionTowerMappedBytes: visionRuntime.map { UInt64($0.retainedWeightBytes) },
             runtimeOptions: request.runtimeOptions,
             prefill: prefill,
-            runner: runnerDiagnostics(progress: progress, generated: generated))
+            runner: runnerTiming,
+            structuredProgress: progress.structuredProgress)
     }
 
     /// Per-token buckets as diffs of the runner's cumulative counters from the
@@ -820,8 +934,27 @@ actor RealInferenceSession {
         func ms(_ end: UInt64, _ start: UInt64) -> Double {
             Double(end &- start) / 1_000_000 / forwards
         }
+        func gpu(_ end: RealForwardRunner.GPUCompletionTiming,
+                 _ start: RealForwardRunner.GPUCompletionTiming) -> DecodeGPUCompletionTiming {
+            let valid = end.validCount &- start.validCount
+            let expected = end.expectedCount &- start.expectedCount
+            let elapsed = end.seconds - start.seconds
+            let complete = expected > 0 && valid == expected && elapsed.isFinite && elapsed >= 0
+            return DecodeGPUCompletionTiming(
+                millisecondsPerForward: complete ? elapsed * 1_000 / forwards : nil,
+                validCount: valid, expectedCount: expected)
+        }
+        let gpuTiming: [String: DecodeGPUCompletionTiming]? = base.gpuCompletionEnabled ? [
+            "attention_router": gpu(now.attentionRouterGPU, base.attentionRouterGPU),
+            "full_attention_router": gpu(now.fullAttentionRouterGPU, base.fullAttentionRouterGPU),
+            "sliding_attention_router": gpu(now.slidingAttentionRouterGPU, base.slidingAttentionRouterGPU),
+            "shared_experts": gpu(now.sharedExpertsGPU, base.sharedExpertsGPU),
+            "routed_experts": gpu(now.routedExpertsGPU, base.routedExpertsGPU),
+        ] : nil
         return AppRunnerDiagnostics(
             cb1MillisecondsPerToken: ms(now.cb1, base.cb1),
+            routerWaitMillisecondsPerToken: ms(now.routerWait, base.routerWait),
+            gpuCompletionTiming: gpuTiming,
             ioMillisecondsPerToken: ms(now.io, base.io),
             cb2MillisecondsPerToken: ms(now.cb2, base.cb2),
             headMillisecondsPerToken: ms(now.head, base.head),
@@ -856,6 +989,18 @@ actor RealInferenceSession {
 /// surrounding actor method. Single-threaded: the callback runs synchronously
 /// inside `runRawCompletion` on the session actor's task.
 private final class ProgressState: @unchecked Sendable {
+    var structuredProgress: DecodeStructuredProgress?
+    var thinkingPreview: DecodeThinkingPreview?
+    var toolCallPreview: DecodeToolCallPreview?
+
+    func updateStructuredProgress(_ value: StructuredAssistantProgress) {
+        structuredProgress = DecodeStructuredProgress(value)
+        thinkingPreview = value.recentThoughtText.isEmpty ? nil : DecodeThinkingPreview(
+            text: value.recentThoughtText, earlierTextOmitted: value.earlierThoughtTextOmitted)
+        toolCallPreview = value.toolCallPreview.map {
+            DecodeToolCallPreview(text: $0.text, middleTextOmitted: $0.middleTextOmitted)
+        }
+    }
     var generated = 0
     var promptTokenCount: Int?
     var prefillStart: Date?
@@ -876,7 +1021,14 @@ private final class ProgressState: @unchecked Sendable {
 }
 
 private struct RunnerCounterSnapshot {
+    let gpuCompletionEnabled: Bool
+    let attentionRouterGPU: RealForwardRunner.GPUCompletionTiming
+    let fullAttentionRouterGPU: RealForwardRunner.GPUCompletionTiming
+    let slidingAttentionRouterGPU: RealForwardRunner.GPUCompletionTiming
+    let sharedExpertsGPU: RealForwardRunner.GPUCompletionTiming
+    let routedExpertsGPU: RealForwardRunner.GPUCompletionTiming
     let cb1: UInt64
+    let routerWait: UInt64
     let io: UInt64
     let cb2: UInt64
     let head: UInt64
@@ -887,7 +1039,14 @@ private struct RunnerCounterSnapshot {
     let rdadviseSkipped: UInt64
 
     init(_ runner: RealForwardRunner) {
+        gpuCompletionEnabled = runner.captureGPUCompletionTiming
+        attentionRouterGPU = runner.attentionRouterGPUCompletion
+        fullAttentionRouterGPU = runner.fullAttentionRouterGPUCompletion
+        slidingAttentionRouterGPU = runner.slidingAttentionRouterGPUCompletion
+        sharedExpertsGPU = runner.sharedExpertsGPUCompletion
+        routedExpertsGPU = runner.routedExpertsGPUCompletion
         cb1 = runner.totalCb1Nanos
+        routerWait = runner.totalRouterWaitNanos
         io = runner.totalIoNanos
         cb2 = runner.totalCb2Nanos
         head = runner.totalHeadNanos &+ runner.totalHeadFusedNanos

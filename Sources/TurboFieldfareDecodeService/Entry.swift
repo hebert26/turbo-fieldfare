@@ -64,6 +64,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
         var modelDirectory: URL?
         var loadedOptions: DecodeRuntimeOptions?
         var conversation = DecodeConversationGate()
+        var pendingToolAdmission: DecodeConversationGate.Admission?
         while let command = await nextCommand(commands) {
             switch command {
             case .load(let request):
@@ -75,15 +76,22 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         maxContextTokens: request.maxContextTokens,
                         options: options,
                         forceLogitsHead: request.forceLogitsHead) { _ in }
+                    guard let thinkingEnabled = await client.loadedToolThinkingEnabled,
+                          thinkingEnabled == options.toolThinkingEnabled else {
+                        throw AppInferenceError.modelLoadFailed(
+                            "loaded tokenizer thinking mode does not match the requested setting")
+                    }
                     modelDirectory = directory
                     loadedOptions = request.runtimeOptions
                     // A load builds a new runner and a new KV, so whatever
                     // lineage was open no longer has tokens behind it.
                     conversation.endLineage()
+                    pendingToolAdmission = nil
                     let memory = AppMemorySampler().sample()
                     try write(DecodeServiceEvent(
                         kind: .ready, generationID: request.requestID,
-                        currentMemoryBytes: memory, peakMemoryBytes: memory),
+                        currentMemoryBytes: memory, peakMemoryBytes: memory,
+                        toolThinkingEnabled: thinkingEnabled),
                         to: handles.output)
                 } catch {
                     try? write(DecodeServiceEvent(
@@ -92,6 +100,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                 }
             case .resetConversation(let request):
                 conversation.reset(to: request.epoch)
+                pendingToolAdmission = nil
                 await client.resetConversation()
                 // Not `try?`. The gate has already reset; if the app never
                 // hears so it waits out the whole timeout for a reply that
@@ -135,15 +144,37 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                 // lives in `DecodeConversationGate`, where its boundary cases
                 // are tested without a socket or a model.
                 let admission: DecodeConversationGate.Admission
-                switch conversation.admit(request) {
-                case .success(let value):
-                    admission = value
-                case .failure(let rejection):
-                    try? write(DecodeServiceEvent(
-                        kind: .failed, generationID: request.generationID,
-                        error: rejection.message,
-                        conversationEpoch: conversation.openEpoch), to: handles.output)
-                    continue
+                if case .results = request.toolTurn {
+                    guard let pendingToolAdmission,
+                          Self.matches(
+                            pendingToolAdmission,
+                            epoch: request.conversationEpoch,
+                            index: request.turnIndex) else {
+                        try? write(DecodeServiceEvent(
+                            kind: .failed, generationID: request.generationID,
+                            error: "tool results do not match the pending app turn",
+                            conversationEpoch: conversation.openEpoch), to: handles.output)
+                        continue
+                    }
+                    admission = pendingToolAdmission
+                } else {
+                    guard pendingToolAdmission == nil else {
+                        try? write(DecodeServiceEvent(
+                            kind: .failed, generationID: request.generationID,
+                            error: "the pending tool turn needs results before another user turn",
+                            conversationEpoch: conversation.openEpoch), to: handles.output)
+                        continue
+                    }
+                    switch conversation.admit(request) {
+                    case .success(let value):
+                        admission = value
+                    case .failure(let rejection):
+                        try? write(DecodeServiceEvent(
+                            kind: .failed, generationID: request.generationID,
+                            error: rejection.message,
+                            conversationEpoch: conversation.openEpoch), to: handles.output)
+                        continue
+                    }
                 }
                 let isConversationTurn: Bool
                 if case .turn = admission { isConversationTurn = true }
@@ -183,7 +214,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     // that only fits an empty context.
                     let carried = await client.conversationTokenCount
                     let continues = isConversationTurn
-                    let generation = AppGenerationRequest(
+                    var generation = AppGenerationRequest(
                         modelDirectory: modelDirectory, prompt: request.prompt,
                         imageAttachments: (request.imageAttachments ?? []).map {
                             AppImageAttachment(
@@ -201,8 +232,19 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         repetitionPenalty: request.repetitionPenalty,
                         runtimeOptions: options,
                         continuesConversation: continues,
-                        conversationTokens: continues ? carried : 0)
-                    for try await event in client.generate(generation) { outbox.publish(event) }
+                        conversationTokens: continues ? carried : 0,
+                        conversationEpoch: request.conversationEpoch,
+                        turnIndex: request.turnIndex,
+                        toolTurn: try appToolTurn(request.toolTurn))
+                    generation.captureToolFailureEvidence = request.captureToolFailureEvidence == true
+                    generation.captureGPUCompletionTiming = request.captureGPUCompletionTiming == true
+                    var terminalStopReason: AppStopReason?
+                    for try await event in client.generate(generation) {
+                        if case .finished(let diagnostics) = event {
+                            terminalStopReason = diagnostics.stopReason
+                        }
+                        outbox.publish(event)
+                    }
                     // Reached only when the stream completed. A turn that threw
                     // was rewound by the conversation (or broke its lineage), so
                     // its tokens are not in the KV and it must not advance the
@@ -210,7 +252,13 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     // it either, and a one-sided count rejects every later turn.
                     // A turn stopped by the user does reach here: it ends at a
                     // token boundary with its partial reply committed.
-                    conversation.commit(admission)
+                    if request.toolTurn != nil,
+                       terminalStopReason == .toolCalls {
+                        pendingToolAdmission = admission
+                    } else {
+                        conversation.commit(admission)
+                        pendingToolAdmission = nil
+                    }
                     outbox.finish()
                 } catch {
                     outbox.finish(error: error)
@@ -228,6 +276,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                 modelDirectory = nil
                 loadedOptions = nil
                 conversation.endLineage()
+                pendingToolAdmission = nil
                 try? write(DecodeServiceEvent(
                     kind: .unloaded, generationID: requestID), to: handles.output)
             case .shutdown:
@@ -283,9 +332,55 @@ enum DecodeServiceError: Error, CustomStringConvertible {
             prefillChunkTokens: options.prefillChunkTokens,
             rdadvisePolicy: rdadvisePolicy,
             modelVerification: modelVerification,
-            visionResidencyPolicy: visionResidencyPolicy)
+            visionResidencyPolicy: visionResidencyPolicy,
+            toolThinkingEnabled: options.toolThinkingEnabled ?? GFTokenizer.toolThinkingEnabled)
         try resolved.validate()
         return resolved
+    }
+
+    private static func appToolTurn(_ turn: DecodeToolTurn?) throws
+        -> AppToolTurn? {
+        switch turn {
+        case .user(let developerPrompt, let tools):
+            return .user(
+                developerPrompt: developerPrompt,
+                tools: try tools.map { tool in
+                    guard let data = tool.parametersJSON.data(using: .utf8) else {
+                        throw AppInferenceError.invalidRequest(
+                            "tool parameters are not UTF-8 JSON")
+                    }
+                    return AppToolDefinition(
+                        name: tool.name,
+                        description: tool.description,
+                        parameters: try JSONDecoder().decode(
+                            JSONValue.self, from: data))
+                })
+        case .results(let results):
+            return .results(results.map {
+                AppToolResult(
+                    callID: $0.callID,
+                    name: $0.name,
+                    content: $0.content,
+                    imageAttachments: ($0.imageAttachments ?? []).map {
+                        AppImageAttachment(
+                            id: $0.id, fileURL: URL(fileURLWithPath: $0.path),
+                            displayName: $0.displayName, encodedBytes: $0.encodedBytes, sha256: $0.sha256)
+                    })
+            })
+        case nil:
+            return nil
+        }
+    }
+
+    private static func matches(
+        _ admission: DecodeConversationGate.Admission,
+        epoch: UUID?,
+        index: Int?
+    ) -> Bool {
+        guard case .turn(let admittedEpoch, let admittedIndex) = admission else {
+            return false
+        }
+        return admittedEpoch == epoch && admittedIndex == index
     }
 
     private static func argument(after name: String) -> String? {

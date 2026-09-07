@@ -427,6 +427,37 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
 
     public private(set) var totalIoNanos: UInt64 = 0
     public private(set) var totalCb1Nanos: UInt64 = 0
+    /// CPU time blocked for router results, including queued prior-layer work.
+    /// Excludes the final routed drain and is not individual GPU kernel time.
+    public private(set) var totalRouterWaitNanos: UInt64 = 0
+    /// Opt-in diagnostic only. Reading timestamps never changes command scheduling.
+    public var captureGPUCompletionTiming = false
+    public struct GPUCompletionTiming: Sendable {
+        public fileprivate(set) var seconds: Double = 0
+        public fileprivate(set) var validCount: UInt64 = 0
+        public fileprivate(set) var expectedCount: UInt64 = 0
+
+        fileprivate mutating func record(_ buffer: MTLCommandBuffer) {
+            expectedCount &+= 1
+            guard buffer.status == .completed else { return }
+            let start = buffer.gpuStartTime
+            let end = buffer.gpuEndTime
+            guard start.isFinite, end.isFinite, start > 0, end > 0,
+                  end >= start else { return }
+            seconds += end - start
+            validCount &+= 1
+        }
+    }
+    public private(set) var fullAttentionRouterGPUCompletion = GPUCompletionTiming()
+    public private(set) var slidingAttentionRouterGPUCompletion = GPUCompletionTiming()
+    public var attentionRouterGPUCompletion: GPUCompletionTiming {
+        GPUCompletionTiming(
+            seconds: fullAttentionRouterGPUCompletion.seconds + slidingAttentionRouterGPUCompletion.seconds,
+            validCount: fullAttentionRouterGPUCompletion.validCount &+ slidingAttentionRouterGPUCompletion.validCount,
+            expectedCount: fullAttentionRouterGPUCompletion.expectedCount &+ slidingAttentionRouterGPUCompletion.expectedCount)
+    }
+    public private(set) var sharedExpertsGPUCompletion = GPUCompletionTiming()
+    public private(set) var routedExpertsGPUCompletion = GPUCompletionTiming()
     public private(set) var totalCb2Nanos: UInt64 = 0
     public private(set) var totalHeadNanos: UInt64 = 0
     public private(set) var totalHeadFusedNanos: UInt64 = 0
@@ -1430,6 +1461,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             totalCb2Nanos &+= pending.encodeAndCommitNanos
         }
 
+        func recordPendingGPUCompletion(_ pending: PendingRoutedCommand) {
+            if captureGPUCompletionTiming {
+                if let sharedCB = pending.sharedCB {
+                    sharedExpertsGPUCompletion.record(sharedCB)
+                }
+                if let hitCB = pending.phase1HitCB {
+                    routedExpertsGPUCompletion.record(hitCB)
+                }
+                routedExpertsGPUCompletion.record(pending.cb)
+            }
+        }
+
         func writeActiveSlots(_ slots: [UInt32], into buffer: MTLBuffer) {
             let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
             for i in 0..<slots.count { ptr[i] = slots[i] }
@@ -1617,12 +1660,24 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitUntilCompleted(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
-            if let pending = pendingRoutedCommand {
+            let completedPending = pendingRoutedCommand
+            if let pending = completedPending {
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false)
                 pendingRoutedCommand = nil
             }
             try checkCommandBufferError(cb)
             totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+            totalRouterWaitNanos &+= waitNanos
+            if let pending = completedPending {
+                recordPendingGPUCompletion(pending)
+            }
+            if captureGPUCompletionTiming {
+                if isFull {
+                    fullAttentionRouterGPUCompletion.record(cb)
+                } else {
+                    slidingAttentionRouterGPUCompletion.record(cb)
+                }
+            }
 
             // CPU readback to fetch routed-expert blobs from disk.
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
@@ -1840,6 +1895,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
         if let pending = pendingRoutedCommand {
             try finishPendingRoutedCommand(pending, waitIfNeeded: true)
+            recordPendingGPUCompletion(pending)
             pendingRoutedCommand = nil
         }
 

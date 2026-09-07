@@ -107,10 +107,19 @@ public enum MultimodalPromptRenderer {
             let rendered = try tokenizer.applyChatTemplate(tokenizerMessages)
             templateTokens = tokenizer.encode(rendered, addBOS: false)
         }
+        return try expandingImageTokens(
+            templateTokens, features: orderedImages.map(\.1))
+    }
+
+    /// Expands only the supplied native prompt or continuation. Callers retain
+    /// past image tokens in their KV without retaining or re-encoding pixels.
+    static func expandingImageTokens(
+        _ templateTokens: [Int32], features: [VisionFeatures]
+    ) throws -> MultimodalPrefillInput {
         let placeholders = templateTokens.indices.filter {
             templateTokens[$0] == imageTokenID
         }
-        guard placeholders.count == orderedImages.count else {
+        guard placeholders.count == features.count else {
             throw MultimodalPromptRendererError.placeholderMismatch
         }
 
@@ -118,7 +127,7 @@ public enum MultimodalPromptRenderer {
         var embedding: [Int32] = []
         var spans: [MultimodalImageSpan] = []
         effective.reserveCapacity(
-            templateTokens.count + orderedImages.reduce(0) { $0 + $1.1.tokenCount + 1 })
+            templateTokens.count + features.reduce(0) { $0 + $1.tokenCount + 1 })
         embedding.reserveCapacity(effective.capacity)
         var imageIndex = 0
         for token in templateTokens {
@@ -127,15 +136,15 @@ public enum MultimodalPromptRenderer {
                 embedding.append(token)
                 continue
             }
-            let features = orderedImages[imageIndex].1
+            let imageFeatures = features[imageIndex]
             effective.append(beginImageTokenID)
             embedding.append(beginImageTokenID)
             let lower = effective.count
-            effective.append(contentsOf: repeatElement(imageTokenID, count: features.tokenCount))
-            embedding.append(contentsOf: repeatElement(Int32(0), count: features.tokenCount))
+            effective.append(contentsOf: repeatElement(imageTokenID, count: imageFeatures.tokenCount))
+            embedding.append(contentsOf: repeatElement(Int32(0), count: imageFeatures.tokenCount))
             spans.append(MultimodalImageSpan(
                 tokenRange: lower..<effective.count,
-                features: features))
+                features: imageFeatures))
             effective.append(endImageTokenID)
             embedding.append(endImageTokenID)
             imageIndex += 1

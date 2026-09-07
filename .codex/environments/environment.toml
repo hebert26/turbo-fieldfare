@@ -6,6 +6,11 @@ name = "VisionOS"
 script = ""
 
 [[actions]]
+name = "Run"
+icon = "run"
+command = "./script/build_and_run.sh"
+
+[[actions]]
 name = "deploy-visionOS"
 icon = "tool"
 command = "bash /Users/dev-machine/Dev/VisionOS/VisionCapture/scripts/deploy-app.sh"

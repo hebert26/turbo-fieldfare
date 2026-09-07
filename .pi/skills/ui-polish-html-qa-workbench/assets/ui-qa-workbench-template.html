@@ -1,0 +1,1074 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>UI QA Workbench</title>
+    <style>
+      :root {
+        --bg: #f3f3f1;
+        --surface: #ffffff;
+        --surface-2: #f8f8f6;
+        --surface-3: #ededeb;
+        --ink: #171717;
+        --muted: #626266;
+        --soft: #8a8a8f;
+        --rule: #d9d9d4;
+        --rule-strong: #c8c8c2;
+        --accent: #2f6df6;
+        --accent-soft: #e7eefc;
+        --ok: #167a3f;
+        --warn: #a15c13;
+        --danger: #b42318;
+        --focus: #1d4ed8;
+        --radius: 8px;
+        --row-h: 32px;
+        --row-inset: 12px;
+        --row-gap: 8px;
+        --sans:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 14px/1.45 var(--sans);
+      }
+
+      main {
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 28px 18px 56px;
+      }
+
+      header {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 16px;
+        align-items: start;
+        margin-bottom: 18px;
+      }
+
+      h1,
+      h2,
+      h3,
+      p {
+        margin-top: 0;
+      }
+      h1 {
+        margin-bottom: 8px;
+        font-size: 28px;
+        line-height: 1.15;
+        font-weight: 680;
+      }
+      h2 {
+        margin-bottom: 10px;
+        font-size: 17px;
+        line-height: 1.25;
+        font-weight: 680;
+      }
+      h3 {
+        margin-bottom: 8px;
+        font-size: 14px;
+        line-height: 1.25;
+        font-weight: 680;
+      }
+      p {
+        color: var(--muted);
+        max-width: 84ch;
+      }
+      a {
+        color: var(--accent);
+      }
+
+      code,
+      pre,
+      .mono {
+        font-family: var(--mono);
+      }
+      pre {
+        white-space: pre-wrap;
+        background: var(--surface-2);
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        padding: 12px;
+        overflow: auto;
+      }
+
+      .label {
+        font: 11px/1.3 var(--mono);
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+      .small {
+        font-size: 12px;
+      }
+      .stack {
+        display: grid;
+        gap: 12px;
+      }
+      .grid {
+        display: grid;
+        gap: 14px;
+      }
+      .two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+      .three {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      .four {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+
+      .panel {
+        background: var(--surface);
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        padding: 14px;
+      }
+
+      .band {
+        background: var(--surface-2);
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        padding: 14px;
+      }
+
+      .chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        min-height: 24px;
+        padding: 3px 8px;
+        border-radius: 999px;
+        background: var(--surface);
+        border: 1px solid var(--rule);
+        color: var(--muted);
+        font-size: 12px;
+      }
+      .chip.ok {
+        color: var(--ok);
+        border-color: color-mix(in srgb, var(--ok) 30%, var(--rule));
+      }
+      .chip.warn {
+        color: var(--warn);
+        border-color: color-mix(in srgb, var(--warn) 35%, var(--rule));
+      }
+      .chip.danger {
+        color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 30%, var(--rule));
+      }
+      .chip.accent {
+        color: var(--accent);
+        background: var(--accent-soft);
+        border-color: color-mix(in srgb, var(--accent) 25%, var(--rule));
+      }
+
+      .hero-meta {
+        min-width: 280px;
+        display: grid;
+        gap: 8px;
+        font-size: 12px;
+      }
+      .meta-row {
+        display: grid;
+        grid-template-columns: 92px minmax(0, 1fr);
+        gap: 8px;
+        align-items: baseline;
+      }
+      .meta-row span:first-child {
+        color: var(--muted);
+      }
+
+      .section {
+        margin-top: 14px;
+      }
+
+      .artifact-picker {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .artifact {
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        padding: 10px;
+        background: var(--surface);
+        min-height: 112px;
+      }
+      .artifact strong {
+        display: block;
+        margin-bottom: 6px;
+      }
+      .artifact p {
+        margin-bottom: 0;
+        font-size: 12px;
+      }
+
+      .screen {
+        min-height: 300px;
+        border: 1px dashed var(--rule-strong);
+        border-radius: var(--radius);
+        background: #fafafa;
+        padding: 14px;
+        overflow: auto;
+      }
+
+      .screenshot-slot {
+        min-height: 220px;
+        display: grid;
+        place-items: center;
+        text-align: center;
+        color: var(--muted);
+        border: 1px dashed var(--rule);
+        border-radius: var(--radius);
+        background:
+          linear-gradient(90deg, transparent calc(100% - 1px), rgba(0, 0, 0, 0.035) 0),
+          linear-gradient(180deg, transparent calc(100% - 1px), rgba(0, 0, 0, 0.035) 0);
+        background-size: 24px 24px;
+      }
+
+      .sidebar-demo {
+        width: 300px;
+        min-height: 245px;
+        background: #e9e9e7;
+        border: 1px solid var(--rule-strong);
+        border-radius: 8px;
+        padding: 12px 10px;
+      }
+      .sidebar-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        height: 28px;
+        padding: 0 var(--row-inset);
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 650;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+      }
+      .row {
+        height: var(--row-h);
+        display: grid;
+        grid-template-columns: 16px minmax(0, 1fr) auto;
+        align-items: center;
+        gap: var(--row-gap);
+        border-radius: 8px;
+        padding: 0 10px;
+        margin: 2px 0;
+      }
+      .row.reference {
+        margin-left: var(--row-inset);
+      }
+      .row.target {
+        margin-left: 0;
+      }
+      .row.after {
+        margin-left: var(--row-inset);
+      }
+      .row.hover {
+        background: #f2f2ef;
+      }
+      .row.selected {
+        background: #d8d8d3;
+      }
+      .row.focus {
+        outline: 2px solid var(--focus);
+        outline-offset: 1px;
+      }
+      .row.disabled {
+        opacity: 0.48;
+      }
+      .row.loading .text {
+        color: transparent;
+        background: #d8d8d3;
+        border-radius: 4px;
+        height: 12px;
+      }
+      .icon {
+        width: 16px;
+        height: 16px;
+        border-radius: 4px;
+        background: #7d7d83;
+      }
+      .text {
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        font-weight: 560;
+      }
+      .badge {
+        min-width: 22px;
+        padding: 2px 6px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.55);
+        color: var(--muted);
+        text-align: center;
+        font-size: 12px;
+      }
+
+      .ruler {
+        position: relative;
+        height: 36px;
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        background: var(--surface-2);
+        overflow: hidden;
+      }
+      .ruler::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, rgba(47, 109, 246, 0.12) 0 1px, transparent 1px 24px);
+      }
+      .mark {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: var(--danger);
+      }
+      .mark.reference {
+        background: var(--ok);
+      }
+      .mark.after {
+        background: var(--accent);
+      }
+
+      .state-matrix {
+        display: grid;
+        grid-template-columns: repeat(6, minmax(150px, 1fr));
+        gap: 10px;
+        overflow-x: auto;
+        padding-bottom: 2px;
+      }
+      .state-cell {
+        min-width: 150px;
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        background: var(--surface-2);
+        padding: 10px;
+      }
+      .state-cell .row {
+        margin: 8px 0 0;
+        background-color: transparent;
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+      th,
+      td {
+        text-align: left;
+        vertical-align: top;
+        padding: 9px 8px;
+        border-bottom: 1px solid var(--rule);
+      }
+      th {
+        color: var(--muted);
+        font: 11px/1.2 var(--mono);
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+      }
+      tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .status {
+        display: inline-flex;
+        align-items: center;
+        min-height: 22px;
+        padding: 3px 7px;
+        border-radius: 999px;
+        font: 11px/1 var(--mono);
+        border: 1px solid var(--rule);
+      }
+      .pass {
+        color: var(--ok);
+        background: color-mix(in srgb, var(--ok) 10%, white);
+      }
+      .fail {
+        color: var(--danger);
+        background: color-mix(in srgb, var(--danger) 10%, white);
+      }
+      .unknown {
+        color: var(--warn);
+        background: color-mix(in srgb, var(--warn) 10%, white);
+      }
+
+      .token-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+      }
+      .swatch {
+        min-height: 72px;
+        border: 1px solid var(--rule);
+        border-radius: var(--radius);
+        overflow: hidden;
+        background: var(--surface);
+      }
+      .swatch-color {
+        height: 34px;
+        border-bottom: 1px solid var(--rule);
+      }
+      .swatch-body {
+        padding: 8px;
+        font-size: 12px;
+      }
+      .spacing-sample {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-height: 30px;
+        font-size: 12px;
+      }
+      .bar {
+        height: 12px;
+        background: var(--accent);
+        border-radius: 3px;
+      }
+
+      .controls {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+      }
+      .control {
+        display: grid;
+        gap: 4px;
+        min-width: 170px;
+      }
+      input[type="range"] {
+        width: 100%;
+      }
+      button {
+        border: 1px solid var(--rule-strong);
+        background: var(--surface);
+        border-radius: var(--radius);
+        color: var(--ink);
+        min-height: 34px;
+        padding: 7px 10px;
+        font: inherit;
+        cursor: pointer;
+      }
+      button:hover {
+        background: var(--surface-2);
+      }
+      button:focus-visible {
+        outline: 2px solid var(--focus);
+        outline-offset: 2px;
+      }
+
+      .copy-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 10px;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+
+      .toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        padding: 9px 12px;
+        background: var(--ink);
+        color: white;
+        border-radius: var(--radius);
+        opacity: 0;
+        transform: translateY(6px);
+        transition:
+          opacity 160ms ease-out,
+          transform 160ms ease-out;
+        pointer-events: none;
+      }
+      .toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+
+      @media (max-width: 980px) {
+        header {
+          grid-template-columns: 1fr;
+        }
+        .artifact-picker,
+        .four {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+        .three,
+        .two {
+          grid-template-columns: 1fr;
+        }
+        .token-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+
+      @media (max-width: 560px) {
+        main {
+          padding: 18px 12px 40px;
+        }
+        .artifact-picker,
+        .four,
+        .token-grid {
+          grid-template-columns: 1fr;
+        }
+        .hero-meta {
+          min-width: 0;
+        }
+        .screen {
+          padding: 10px;
+        }
+        .sidebar-demo {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <div class="label">UI QA workbench</div>
+          <h1>Screen or component visual comparison</h1>
+          <p>
+            Replace placeholders with real screenshots, measurements, component states, and source
+            evidence. The goal is to compare the target UI against the correct reference pattern
+            before and after implementation.
+          </p>
+          <div class="chips">
+            <span class="chip accent">artifact: visual QA</span>
+            <span class="chip warn">status: draft</span>
+            <span class="chip">evidence: schematic</span>
+          </div>
+        </div>
+        <div class="panel hero-meta">
+          <div class="meta-row"><span>Target</span><strong>replace with target surface</strong></div>
+          <div class="meta-row">
+            <span>Reference</span><strong>replace with reference surface</strong>
+          </div>
+          <div class="meta-row"><span>Owner</span><strong>row container / class</strong></div>
+          <div class="meta-row"><span>Updated</span><strong>replace with date</strong></div>
+        </div>
+      </header>
+
+      <section class="section band">
+        <h2>Artifact Mode</h2>
+        <p>
+          Choose the smallest artifact that makes the UI decision visible. Delete unused modes when
+          filling this workbench.
+        </p>
+        <div class="artifact-picker">
+          <div class="artifact">
+            <strong>Visual QA</strong>
+            <p>
+              Before/after comparison for spacing, alignment, color, selected states, and polish.
+            </p>
+          </div>
+          <div class="artifact">
+            <strong>Design System Sheet</strong>
+            <p>Tokens, type, spacing, radius, shadows, and component rules pulled from the repo.</p>
+          </div>
+          <div class="artifact">
+            <strong>Variant Contact Sheet</strong>
+            <p>
+              One component shown across default, hover, selected, focus, disabled, loading, and
+              long text.
+            </p>
+          </div>
+          <div class="artifact">
+            <strong>Interaction Sandbox</strong>
+            <p>A tiny prototype for scroll, drag, collapse, motion, keyboard, or resize feel.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section grid two">
+        <div class="panel">
+          <h2>Problem Statement</h2>
+          <p>
+            <strong>Visible mismatch:</strong> Describe what looks wrong in product language.
+            Example: the cards on the target page sit at a tighter gutter than the cards on the
+            reference page, and their active border does not share the same inset.
+          </p>
+          <p>
+            <strong>Reference pattern:</strong> Name the existing screen, component, or screenshot
+            that defines the correct result.
+          </p>
+          <p>
+            <strong>Complete object:</strong> Name every part that must move together: selected
+            background, hover background, focus ring, icon, label, badge, disclosure indicator, and
+            hit area.
+          </p>
+        </div>
+        <div class="panel">
+          <h2>Evidence Sources</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Source</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Screenshot</td>
+                <td>Target screen before patch</td>
+                <td><span class="status unknown">needed</span></td>
+              </tr>
+              <tr>
+                <td>Screenshot</td>
+                <td>Reference screen</td>
+                <td><span class="status unknown">needed</span></td>
+              </tr>
+              <tr>
+                <td>Source</td>
+                <td>Component/CSS file controlling row geometry</td>
+                <td><span class="status unknown">find</span></td>
+              </tr>
+              <tr>
+                <td>Token</td>
+                <td>Spacing/radius/color token used by reference</td>
+                <td><span class="status unknown">find</span></td>
+              </tr>
+              <tr>
+                <td>Measurement</td>
+                <td>DOM/computed x positions</td>
+                <td><span class="status unknown">optional</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section grid three">
+        <div class="panel">
+          <div class="label">Reference: correct pattern</div>
+          <div class="screen">
+            <div class="sidebar-demo">
+              <div class="sidebar-title"><span class="icon"></span><span>Reference</span></div>
+              <div class="row reference">
+                <span class="icon"></span><span class="text">Item one</span
+                ><span class="badge">2</span>
+              </div>
+              <div class="row reference selected">
+                <span class="icon"></span><span class="text">Item two</span><span></span>
+              </div>
+              <div class="row reference">
+                <span class="icon"></span><span class="text">Item three</span><span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="label">Target: current or broken</div>
+          <div class="screen">
+            <div class="sidebar-demo">
+              <div class="sidebar-title"><span class="icon"></span><span>Target</span></div>
+              <div class="row target">
+                <span class="icon"></span><span class="text">Item one</span><span></span>
+              </div>
+              <div class="row target selected">
+                <span class="icon"></span><span class="text">Item two</span><span></span>
+              </div>
+              <div class="row target">
+                <span class="icon"></span><span class="text">A longer item label</span><span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="label">After: expected result</div>
+          <div class="screen">
+            <div class="sidebar-demo">
+              <div class="sidebar-title"><span class="icon"></span><span>Target</span></div>
+              <div class="row after">
+                <span class="icon"></span><span class="text">Item one</span><span></span>
+              </div>
+              <div class="row after selected">
+                <span class="icon"></span><span class="text">Item two</span><span></span>
+              </div>
+              <div class="row after">
+                <span class="icon"></span><span class="text">A longer item label</span><span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section panel">
+        <h2>Gutter And Geometry Check</h2>
+        <div class="grid three">
+          <div>
+            <div class="copy-row">
+              <strong>Reference x</strong><span class="chip ok">measured/token</span>
+            </div>
+            <div class="ruler"><span class="mark reference" style="left: 48px"></span></div>
+            <p class="small muted">Replace with the reference row background x-position.</p>
+          </div>
+          <div>
+            <div class="copy-row">
+              <strong>Target before x</strong><span class="chip danger">mismatch</span>
+            </div>
+            <div class="ruler"><span class="mark" style="left: 20px"></span></div>
+            <p class="small muted">Replace with the broken row background x-position.</p>
+          </div>
+          <div>
+            <div class="copy-row">
+              <strong>Target after x</strong><span class="chip accent">expected</span>
+            </div>
+            <div class="ruler"><span class="mark after" style="left: 48px"></span></div>
+            <p class="small muted">Replace after implementation.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="section panel">
+        <h2>Component State Matrix</h2>
+        <p>
+          Use real component screenshots where possible. If this is a schematic, keep it labeled and
+          use actual token values.
+        </p>
+        <div class="state-matrix">
+          <div class="state-cell">
+            <div class="label">Default</div>
+            <div class="row">
+              <span class="icon"></span><span class="text">Row item</span><span></span>
+            </div>
+          </div>
+          <div class="state-cell">
+            <div class="label">Hover</div>
+            <div class="row hover">
+              <span class="icon"></span><span class="text">Row item</span><span></span>
+            </div>
+          </div>
+          <div class="state-cell">
+            <div class="label">Selected</div>
+            <div class="row selected">
+              <span class="icon"></span><span class="text">Row item</span><span></span>
+            </div>
+          </div>
+          <div class="state-cell">
+            <div class="label">Focus</div>
+            <div class="row focus">
+              <span class="icon"></span><span class="text">Row item</span><span></span>
+            </div>
+          </div>
+          <div class="state-cell">
+            <div class="label">Long Text</div>
+            <div class="row selected">
+              <span class="icon"></span><span class="text">A longer item label that truncates</span
+              ><span></span>
+            </div>
+          </div>
+          <div class="state-cell">
+            <div class="label">Loading</div>
+            <div class="row loading">
+              <span class="icon"></span><span class="text">Row item</span><span></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section grid two">
+        <div class="panel">
+          <h2>Design Tokens Used</h2>
+          <div class="token-grid">
+            <div class="swatch">
+              <div class="swatch-color" style="background: #e9e9e7"></div>
+              <div class="swatch-body">
+                <strong>surface</strong><br /><span class="muted">from token/source</span>
+              </div>
+            </div>
+            <div class="swatch">
+              <div class="swatch-color" style="background: #d8d8d3"></div>
+              <div class="swatch-body">
+                <strong>selected</strong><br /><span class="muted">from token/source</span>
+              </div>
+            </div>
+            <div class="swatch">
+              <div class="swatch-color" style="background: #2f6df6"></div>
+              <div class="swatch-body">
+                <strong>accent</strong><br /><span class="muted">from token/source</span>
+              </div>
+            </div>
+            <div class="swatch">
+              <div class="swatch-color" style="background: #171717"></div>
+              <div class="swatch-body">
+                <strong>text</strong><br /><span class="muted">from token/source</span>
+              </div>
+            </div>
+            <div class="swatch">
+              <div class="swatch-color" style="background: #d9d9d4"></div>
+              <div class="swatch-body">
+                <strong>rule</strong><br /><span class="muted">from token/source</span>
+              </div>
+            </div>
+          </div>
+          <div class="stack" style="margin-top: 12px">
+            <div class="spacing-sample">
+              <span class="mono">4</span><span class="bar" style="width: 4px"></span
+              ><span class="muted">micro gap</span>
+            </div>
+            <div class="spacing-sample">
+              <span class="mono">8</span><span class="bar" style="width: 8px"></span
+              ><span class="muted">icon/text gap</span>
+            </div>
+            <div class="spacing-sample">
+              <span class="mono">12</span><span class="bar" style="width: 12px"></span
+              ><span class="muted">row inset</span>
+            </div>
+            <div class="spacing-sample">
+              <span class="mono">16</span><span class="bar" style="width: 16px"></span
+              ><span class="muted">section padding</span>
+            </div>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Measurement Table</h2>
+          <table>
+            <thead>
+              <tr>
+                <th>Check</th>
+                <th>Reference</th>
+                <th>Before</th>
+                <th>After</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Row container x</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td><span class="status unknown">check</span></td>
+              </tr>
+              <tr>
+                <td>Selected background x</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td><span class="status unknown">check</span></td>
+              </tr>
+              <tr>
+                <td>Icon x</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td><span class="status unknown">check</span></td>
+              </tr>
+              <tr>
+                <td>Text x</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td><span class="status unknown">check</span></td>
+              </tr>
+              <tr>
+                <td>Row height/radius</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td>replace</td>
+                <td><span class="status unknown">check</span></td>
+              </tr>
+              <tr>
+                <td>Evidence label</td>
+                <td>measured/token</td>
+                <td>measured/source</td>
+                <td>measured</td>
+                <td><span class="status unknown">check</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section panel">
+        <h2>Interaction Sandbox</h2>
+        <p>
+          Use this area when the UI issue depends on feel. Keep the prototype tiny and delete it if
+          it is not relevant.
+        </p>
+        <div class="controls">
+          <label class="control">
+            <span class="label">Row inset</span>
+            <input id="insetControl" type="range" min="0" max="28" value="12" />
+          </label>
+          <label class="control">
+            <span class="label">Row height</span>
+            <input id="heightControl" type="range" min="28" max="44" value="32" />
+          </label>
+          <label class="control">
+            <span class="label">Gap</span>
+            <input id="gapControl" type="range" min="4" max="16" value="8" />
+          </label>
+          <button type="button" id="resetControls">Reset</button>
+        </div>
+        <div class="screen" style="margin-top: 12px; min-height: 180px">
+          <div class="sidebar-demo" id="sandboxSidebar">
+            <div class="sidebar-title"><span class="icon"></span><span>Target</span></div>
+            <div class="row after">
+              <span class="icon"></span><span class="text">Item one</span><span></span>
+            </div>
+            <div class="row after selected">
+              <span class="icon"></span><span class="text">Item two</span><span></span>
+            </div>
+            <div class="row after hover">
+              <span class="icon"></span><span class="text">Item three</span><span></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section grid two">
+        <div class="panel">
+          <h2>Fix Hypothesis</h2>
+          <p>Change the owner of the complete row geometry. Do not move only the text or icon.</p>
+          <pre>
+Layout owner:
+Files:
+Design tokens:
+Expected state impact:
+Risk:</pre
+          >
+        </div>
+        <div class="panel">
+          <h2>Verification Checklist</h2>
+          <table>
+            <tbody>
+              <tr>
+                <td>Reference gutter matched</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+              <tr>
+                <td>Selected background moved with row</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+              <tr>
+                <td>Hover geometry checked</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+              <tr>
+                <td>Focus geometry checked</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+              <tr>
+                <td>Hit area checked</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+              <tr>
+                <td>Responsive/narrow layout checked</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+              <tr>
+                <td>Rendered UI inspected after patch</td>
+                <td><span class="status unknown">unknown</span></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section grid two">
+        <div class="panel">
+          <div class="copy-row">
+            <h2>Export Acceptance Criteria</h2>
+            <button type="button" data-copy="#acceptanceText">Copy</button>
+          </div>
+          <pre id="acceptanceText">
+Acceptance criteria:
+- Target container uses the same left gutter as the reference pattern.
+- Selected, hover, focus, icon, label, badge/disclosure, and hit area move together as one object.
+- Selected background starts at the same inset as comparable selected items.
+- Hover and focus states use the same geometry as selected.
+- Long labels truncate cleanly without shifting the object's geometry.
+- Rendered UI is visually checked against the reference after implementation.</pre
+          >
+        </div>
+        <div class="panel">
+          <div class="copy-row">
+            <h2>Export Review Note</h2>
+            <button type="button" data-copy="#reviewText">Copy</button>
+          </div>
+          <pre id="reviewText">
+Review focus:
+- Compare before/after screenshots for the affected screen.
+- Check default, hover, selected, focus, and long-text states.
+- Confirm the changed code owns the container/background/hit area, not only a child element.
+- Confirm no unrelated navigation or layout behavior changed.
+- Note any checks that were schematic rather than measured.</pre
+          >
+        </div>
+      </section>
+    </main>
+    <div class="toast" id="toast">Copied</div>
+    <script>
+      const root = document.documentElement;
+      const controls = [
+        ["insetControl", "--row-inset", "px"],
+        ["heightControl", "--row-h", "px"],
+        ["gapControl", "--row-gap", "px"],
+      ];
+
+      for (const [id, token, unit] of controls) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        input.addEventListener("input", () => {
+          root.style.setProperty(token, input.value + unit);
+        });
+      }
+
+      document.getElementById("resetControls")?.addEventListener("click", () => {
+        const defaults = { insetControl: 12, heightControl: 32, gapControl: 8 };
+        for (const [id, value] of Object.entries(defaults)) {
+          const input = document.getElementById(id);
+          if (!input) continue;
+          input.value = value;
+          input.dispatchEvent(new Event("input"));
+        }
+      });
+
+      const toast = document.getElementById("toast");
+      function showToast() {
+        toast?.classList.add("show");
+        setTimeout(() => toast?.classList.remove("show"), 1200);
+      }
+
+      document.querySelectorAll("[data-copy]").forEach((button) => {
+        button.addEventListener("click", async () => {
+          const target = document.querySelector(button.getAttribute("data-copy"));
+          const text = target?.textContent ?? "";
+          if (navigator.clipboard) {
+            await navigator.clipboard.writeText(text);
+            showToast();
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

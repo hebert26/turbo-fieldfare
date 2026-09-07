@@ -67,12 +67,16 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
     private func readFrames(from output: FileHandle) {
         do {
             while true {
-                let event = try DecodeFrameCodec.read(
-                    DecodeServiceEvent.self, from: output)
-                condition.lock()
-                state.pending[event.generationID, default: []].append(event)
-                condition.broadcast()
-                condition.unlock()
+                // This thread lives for the service connection. Drain Foundation's
+                // temporary read/decode objects after each frame, not at thread exit.
+                try autoreleasepool {
+                    let event = try DecodeFrameCodec.read(
+                        DecodeServiceEvent.self, from: output)
+                    condition.lock()
+                    state.pending[event.generationID, default: []].append(event)
+                    condition.broadcast()
+                    condition.unlock()
+                }
             }
         } catch {
             condition.lock()

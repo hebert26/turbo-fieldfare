@@ -3,7 +3,7 @@ import TurboFieldfare
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 2
+    static let currentVersion = 4
 
     var version: Int = currentVersion
     var contextTokens: Int = AppContextLengthOption.eightK.tokens
@@ -19,6 +19,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var visionResidencyPolicy: VisionResidencyPolicy = .onDemand
     var rdadvisePolicy: AppRDAdvicePolicy = .off
     var loadModelOnLaunch: Bool = false
+    var agentModeEnabled: Bool = false
+    var toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -35,6 +37,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case visionResidencyPolicy
         case rdadvisePolicy
         case loadModelOnLaunch
+        case agentModeEnabled
+        case toolThinkingEnabled
     }
 
     init(version: Int = currentVersion,
@@ -50,7 +54,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          showPromptExamples: Bool = true,
          visionResidencyPolicy: VisionResidencyPolicy = .onDemand,
          rdadvisePolicy: AppRDAdvicePolicy = .off,
-         loadModelOnLaunch: Bool = false) {
+         loadModelOnLaunch: Bool = false,
+         agentModeEnabled: Bool = false,
+         toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled) {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
@@ -65,6 +71,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.visionResidencyPolicy = visionResidencyPolicy
         self.rdadvisePolicy = rdadvisePolicy
         self.loadModelOnLaunch = loadModelOnLaunch
+        self.agentModeEnabled = agentModeEnabled
+        self.toolThinkingEnabled = toolThinkingEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -93,6 +101,12 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         loadModelOnLaunch = try container.decodeIfPresent(
             Bool.self,
             forKey: .loadModelOnLaunch) ?? false
+        agentModeEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .agentModeEnabled) ?? false
+        toolThinkingEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .toolThinkingEnabled) ?? GFTokenizer.toolThinkingEnabled
     }
 
     func isValid() -> Bool {
