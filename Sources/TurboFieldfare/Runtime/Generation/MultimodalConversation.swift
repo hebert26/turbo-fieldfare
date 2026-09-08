@@ -142,6 +142,7 @@ public struct ConversationCheckpointReceipt: Sendable {
     public let retainedImageCount: Int
     public let retainedImageRows: Int
     public let retainedFeatureBytes: Int
+    public let performanceMinimumSavingsTokens: Int?
 }
 
 /// A stateful multi-turn conversation that owns its own KV lineage.
@@ -288,7 +289,7 @@ public actor MultimodalConversation {
         id: UUID, pendingCall: GFTokenizer.HistoricalToolCall,
         result: ConversationToolResult, record: String, imageProvenance: [String],
         generationAllowance: Int, finalAnswerAllowance: Int, permitsScreenshot: Bool,
-        force: Bool, commit: Bool,
+        force: Bool, performanceRequested: Bool, commit: Bool,
         checkCancellation: @escaping @Sendable () throws -> Void = {}
     ) throws -> ConversationCheckpointReceipt {
         guard !closed, !lineageBroken else { throw MultimodalConversationError.lineageBroken }
@@ -349,13 +350,25 @@ public actor MultimodalConversation {
                                     largestCheckpointGenerationTokens * 2)
         let finalReserve = min(finalAnswerAllowance, max(1, maxContext / 32))
         let reserve = generationReserve + resultReserve + finalReserve
-        let needed = force || existingCount >= maxContext - reserve
+        let capacityNeeded = existingCount >= maxContext - reserve
         var replacementCount: Int?
-        if commit {
-            var openingText = record
-            for (index, source) in imageProvenance.enumerated() {
-                openingText += "\nRetained image \(index + 1). \(source)\n" + MultimodalPromptRenderer.placeholder
+        var performanceMinimumSavingsTokens: Int?
+        var performanceCandidateAccepted = false
+        var preparedReplacement: (messages: [GFTokenizer.Message], template: [Int32])?
+        if commit || performanceRequested {
+            // Retain the same images in the same feature order, but place
+            // historical pixels before the current checkpoint record. Ending
+            // on an old screenshot can make it appear to be the current view.
+            var openingText = ""
+            if !imageProvenance.isEmpty {
+                openingText = "Historical image evidence retained from earlier inputs. These images are not a new screenshot of the current screen. Their original provenance follows. Read the later checkpoint record for current state.\n"
+                for (index, source) in imageProvenance.enumerated() {
+                    openingText += "\nHistorical image \(index + 1). \(source)\n"
+                        + MultimodalPromptRenderer.placeholder + "\nEnd historical image \(index + 1).\n"
+                }
+                openingText += "\nEnd of historical image evidence. A difference from the later current screen does not by itself invalidate that screen's observed facts. The current checkpoint record follows.\n\n"
             }
+            openingText += record
             var messages = state.messages.filter { $0.role == .system || $0.role == .developer }
             messages.append(GFTokenizer.Message(role: .user, content: openingText))
             let template = try tokenizer.encodeToolChat(messages: messages, tools: state.tools)
@@ -363,9 +376,24 @@ public actor MultimodalConversation {
                 throw MultimodalPromptRendererError.placeholderMismatch
             }
             let count = template.count + rowCounts.reduce(0) { $0 + $1 + 1 }
+            preparedReplacement = (messages, template)
             replacementCount = count
-            guard needed, !record.isEmpty, count < existingCount, count < maxContext - reserve else {
-                throw MultimodalConversationError.contextExhausted(prompt: count + reserve, maxContext: maxContext)
+            if performanceRequested {
+                let minimumSavings = max(4_096, existingCount / 5)
+                performanceMinimumSavingsTokens = minimumSavings
+                performanceCandidateAccepted = !record.isEmpty
+                    && existingCount - count >= minimumSavings
+                    && count < maxContext - reserve
+            }
+        }
+        let needed = force || capacityNeeded || performanceCandidateAccepted
+        if commit {
+            guard needed, !record.isEmpty, let count = replacementCount,
+                  count < existingCount, count < maxContext - reserve,
+                  let preparedReplacement else {
+                throw MultimodalConversationError.contextExhausted(
+                    prompt: (replacementCount ?? existingCount) + reserve,
+                    maxContext: maxContext)
             }
             var features = oldFeatures
             for plan in plans {
@@ -378,7 +406,8 @@ public actor MultimodalConversation {
                 }
                 features.append(encoded)
             }
-            let input = try MultimodalPromptRenderer.expandingImageTokens(template, features: features)
+            let input = try MultimodalPromptRenderer.expandingImageTokens(
+                preparedReplacement.template, features: features)
             guard input.effectiveTokenIDs.count == count else {
                 throw MultimodalPromptRendererError.placeholderMismatch
             }
@@ -395,10 +424,11 @@ public actor MultimodalConversation {
             assessedResultBridge = nil
             checkpointOpening = (id, EncodedTurn(effectiveTokenIDs: input.effectiveTokenIDs,
                 prefillInput: features.isEmpty ? nil : input),
-                ToolState(messages: messages, tools: state.tools, awaitingResults: false))
+                ToolState(messages: preparedReplacement.messages, tools: state.tools,
+                          awaitingResults: false))
         } else {
-            // Reuse the exact suffix on ordinary continuation. Assess does not
-            // construct or tokenize the growing replacement ledger.
+            // Reuse the exact suffix on ordinary continuation. Capacity assess
+            // does not construct or tokenize the growing replacement ledger.
             assessedResultBridge = (result, assistant.toolCalls, bridge)
         }
         return ConversationCheckpointReceipt(needed: needed, existingPromptTokens: existingCount,
@@ -406,7 +436,8 @@ public actor MultimodalConversation {
             resultAllowanceTokens: resultReserve, retainedImageCount: rowCounts.count,
             retainedImageRows: rowCounts.reduce(0, +),
             retainedFeatureBytes: oldFeatures.reduce(0) { $0 + $1.buffer.length }
-                + plans.reduce(0) { $0 + $1.geometry.softTokenCount * model.config.hiddenSize * MemoryLayout<Float16>.stride })
+                + plans.reduce(0) { $0 + $1.geometry.softTokenCount * model.config.hiddenSize * MemoryLayout<Float16>.stride },
+            performanceMinimumSavingsTokens: performanceMinimumSavingsTokens)
     }
 
     public func resumeCheckpoint(
@@ -414,6 +445,7 @@ public actor MultimodalConversation {
         checkCancellation: @escaping @Sendable () throws -> Void,
         shouldStop: (@Sendable () -> Bool)?, captureToolFailureEvidence: Bool,
         maximumConsecutiveInvisibleTokens: Int?, captureThoughtPreview: Bool,
+        detectThoughtRepetition: Bool = false,
         onProgress: (@Sendable (RawDecodeProgress) -> Void)?,
         onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)?
     ) async throws -> StructuredConversationTurnResult {
@@ -430,7 +462,8 @@ public actor MultimodalConversation {
             shouldStop: shouldStop, allowedTools: Set(opening.state.tools.map(\.name)),
             acceptsUnknownToolNames: true, captureToolFailureEvidence: captureToolFailureEvidence,
             maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
-            captureThoughtPreview: captureThoughtPreview, onProgress: onProgress,
+            captureThoughtPreview: captureThoughtPreview, detectThoughtRepetition: detectThoughtRepetition,
+            onProgress: onProgress,
             onStructuredProgress: onStructuredProgress)
         opening.state.messages.append(Self.assistantMessage(for: completion))
         opening.state.awaitingResults = !completion.toolCalls.isEmpty
@@ -616,6 +649,7 @@ public actor MultimodalConversation {
         captureToolFailureEvidence: Bool = false,
         maximumConsecutiveInvisibleTokens: Int? = nil,
         captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
         onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
         onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
     ) async throws -> StructuredConversationTurnResult {
@@ -679,6 +713,7 @@ public actor MultimodalConversation {
             captureToolFailureEvidence: captureToolFailureEvidence,
             maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
             captureThoughtPreview: captureThoughtPreview,
+            detectThoughtRepetition: detectThoughtRepetition,
             onProgress: onProgress,
             onStructuredProgress: onStructuredProgress)
         state.messages.append(Self.assistantMessage(for: completion))
@@ -699,6 +734,7 @@ public actor MultimodalConversation {
         captureToolFailureEvidence: Bool = false,
         maximumConsecutiveInvisibleTokens: Int? = nil,
         captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
         onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
         onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
     ) async throws -> StructuredConversationTurnResult {
@@ -801,6 +837,7 @@ public actor MultimodalConversation {
             captureToolFailureEvidence: captureToolFailureEvidence,
             maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
             captureThoughtPreview: captureThoughtPreview,
+            detectThoughtRepetition: detectThoughtRepetition,
             onProgress: onProgress,
             onStructuredProgress: onStructuredProgress)
         state.messages.append(contentsOf: toolMessages)
@@ -834,6 +871,7 @@ public actor MultimodalConversation {
         captureToolFailureEvidence: Bool = false,
         maximumConsecutiveInvisibleTokens: Int? = nil,
         captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
         onProgress: (@Sendable (RawDecodeProgress) -> Void)?,
         onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
     ) async throws -> StructuredConversationTurnResult {
@@ -942,6 +980,7 @@ public actor MultimodalConversation {
         var calls: [ParsedToolCall] = []
         var structuredError: Error?
         var consecutiveInvisibleTokens = 0
+        var generatedTokenCount = 0
         let decoder = allowedTools.map {
             StructuredAssistantDecoder(
                 tokenizer: tokenizer,
@@ -949,7 +988,8 @@ public actor MultimodalConversation {
                 startsInThoughtChannel: tokenizer.promptEndsInThoughtChannel(turn.effectiveTokenIDs),
                 acceptsUnknownToolNames: acceptsUnknownToolNames,
                 captureFailureEvidence: captureToolFailureEvidence,
-                captureThoughtPreview: captureThoughtPreview)
+                captureThoughtPreview: captureThoughtPreview,
+                detectThoughtRepetition: detectThoughtRepetition)
         }
         // Marked only once the run has actually written to the KV. Setting it
         // before the attempt condemned the conversation for failures that never
@@ -988,6 +1028,7 @@ public actor MultimodalConversation {
                     do {
                         switch progress {
                         case .token(let index, let tokenID, let delta):
+                            generatedTokenCount = index + 1
                             if let decoder {
                                 var visible = ""
                                 let events: [StructuredAssistantEvent]
@@ -995,6 +1036,9 @@ public actor MultimodalConversation {
                                     events = try decoder.consume(tokenID: tokenID, delta: delta)
                                 } catch {
                                     onStructuredProgress?(decoder.progress)
+                                    if error is RepeatedThoughtDetected {
+                                        onProgress?(.token(index: index, id: tokenID, delta: ""))
+                                    }
                                     throw error
                                 }
                                 onStructuredProgress?(decoder.progress)
@@ -1050,7 +1094,7 @@ public actor MultimodalConversation {
                             onProgress?(progress)
                         }
                     } catch {
-                        structuredError = error
+                        if structuredError == nil { structuredError = error }
                     }
                 }
             if captureToolFailureEvidence { originalStopReason = String(describing: result.reason) }
@@ -1102,6 +1146,40 @@ public actor MultimodalConversation {
                     runner.reset()
                     kvNeedsRebuild = !kvTokenIDs.isEmpty
                 }
+            }
+            if let repetition = generationError as? RepeatedThoughtDetected {
+                // Stop/teardown wins even when it races detection. A recovery
+                // receipt is never a cancellation acknowledgement.
+                try Task.checkCancellation()
+                try checkCancellation()
+                if shouldStop?() == true { throw CancellationError() }
+                guard !closed, !resetting, !lineageBroken, calls.isEmpty else {
+                    throw MultimodalConversationError.invalidToolContinuation
+                }
+                // The reusable prefix is the committed record, not a failed
+                // format retry's provisional prompt. Retain every image span.
+                provisionalToolResultPrefix = nil
+                if !kvNeedsRebuild, runner.continuationPosition != kvTokenIDs.count {
+                    do { try runner.rewind(to: kvTokenIDs.count) }
+                    catch { runner.reset(); kvNeedsRebuild = !kvTokenIDs.isEmpty }
+                }
+                guard kvNeedsRebuild || runner.continuationPosition == kvTokenIDs.count else {
+                    throw MultimodalConversationError.lineageRecoveryFailed(
+                        reason: "The repeated generation did not restore its committed prefix.")
+                }
+                provisionalNeedsCleanup = false
+                try Task.checkCancellation()
+                try checkCancellation()
+                if shouldStop?() == true { throw CancellationError() }
+                let pendingCall = pendingToolCalls?.count == 1 ? pendingToolCalls?.first : nil
+                throw ThoughtRepetitionRecovery(
+                    canRetryToolResult: pendingCall != nil,
+                    pendingCallID: pendingCall?.id, pendingToolName: pendingCall?.name,
+                    restoredTokenCount: kvTokenIDs.count, requiresRebuild: kvNeedsRebuild,
+                    generatedTokens: generatedTokenCount,
+                    thinkingTokens: decoder?.progress.thinkingTokens ?? 0,
+                    blockTokens: repetition.blockTokens,
+                    repetitions: ThoughtRepetitionDetector.repetitions)
             }
             if let parserError = generationError as? GemmaToolCallParserError {
                 var evidence = decoder?.failureEvidence

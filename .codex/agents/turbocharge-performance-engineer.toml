@@ -1,7 +1,7 @@
 # Project agent format: https://learn.chatgpt.com/docs/agent-configuration/subagents
 name = "turbocharge-performance-engineer"
 description = "Astra coding specialist for TurboCharge: Apple Silicon, Swift and Metal, Gemma expert streaming, efficient app-testing goal loops, vision, and VisionCapture integration. Pursues measured sustained 25 tokens/second with low memory. Use for concrete implementation assignments."
-model = "gpt-6-astra"
+model = "gpt-6-sol"
 model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 

@@ -1,5 +1,62 @@
 import Foundation
 
+/// A failed attempt, never a completed assistant turn or an instruction to replay input.
+public struct ThoughtRepetitionRecovery: Error, Codable, Equatable, Sendable {
+    public let canRetryToolResult: Bool
+    public let pendingCallID: String?
+    public let pendingToolName: String?
+    public let restoredTokenCount: Int
+    public let requiresRebuild: Bool
+    public let generatedTokens: Int
+    public let thinkingTokens: Int
+    public let blockTokens: Int
+    public let repetitions: Int
+}
+
+struct RepeatedThoughtDetected: Error {
+    let blockTokens: Int
+}
+
+/// Exact periodic token matching, independent of words, app names or elapsed time.
+/// At most 1,024 token IDs. Check every four tokens, with early mismatches.
+struct ThoughtRepetitionDetector {
+    static let capacity = 1_024
+    static let repetitions = 8
+    static let minimumBlock = 16
+    static let maximumBlock = 128
+    private var ring = [Int32](repeating: 0, count: capacity)
+    private var count = 0
+    private var next = 0
+
+    mutating func reset() { count = 0; next = 0 }
+
+    mutating func append(_ token: Int32) -> Int? {
+        ring[next] = token
+        next = (next + 1) % Self.capacity
+        count = min(count + 1, Self.capacity)
+        guard count >= Self.minimumBlock * Self.repetitions, next.isMultiple(of: 4) else { return nil }
+        func previous(_ distance: Int) -> Int32 {
+            ring[(next - 1 - distance + Self.capacity) % Self.capacity]
+        }
+        for width in Self.minimumBlock...min(Self.maximumBlock, count / Self.repetitions) {
+            var matches = true
+            for offset in width..<(width * Self.repetitions) {
+                if previous(offset) != previous(offset % width) { matches = false; break }
+            }
+            guard matches else { continue }
+            // A long block made entirely of a short common phrase is not eligible.
+            guard Set((0..<width).map(previous)).count >= 8 else { continue }
+            let shortPeriod = (1..<Self.minimumBlock).contains { period in
+                width.isMultiple(of: period) && (period..<width).allSatisfy {
+                    previous($0) == previous($0 % period)
+                }
+            }
+            if !shortPeriod { return width }
+        }
+        return nil
+    }
+}
+
 /// Diagnostic-only rejected call span. Never includes surrounding channel text.
 public struct StructuredToolFailureEvidence: Codable, Equatable, Sendable {
     public let phase: String
@@ -70,6 +127,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     private var failed = false
     private let captureFailureEvidence: Bool
     private let captureThoughtPreview: Bool
+    private var thoughtRepetition: ThoughtRepetitionDetector?
     private var previewTokenCount = 0
     private var openingDetokenizer: GFDetokenizer?
     private var openingText = ""
@@ -81,6 +139,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                 acceptsUnknownToolNames: Bool = false,
                 captureFailureEvidence: Bool = false,
                 captureThoughtPreview: Bool = false,
+                detectThoughtRepetition: Bool = false,
                 idGenerator: @escaping @Sendable () -> String = {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                 }) {
@@ -89,6 +148,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         self.acceptsUnknownToolNames = acceptsUnknownToolNames
         self.captureFailureEvidence = captureFailureEvidence
         self.captureThoughtPreview = captureThoughtPreview
+        self.thoughtRepetition = detectThoughtRepetition ? ThoughtRepetitionDetector() : nil
         self.idGenerator = idGenerator
         // The opener belongs to the prompt, not generated output. Seed state
         // directly so its tokens cannot inflate generated progress counters.
@@ -115,6 +175,11 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             || tokenID == tokenizer.toolCallEndID
             || tokenID == tokenizer.toolResponseID
             || tokenID == tokenizer.toolResponseEndID
+        if isControl || channel != .thought || !isKnownThoughtChannel || toolTokens != nil {
+            thoughtRepetition?.reset()
+        } else if emittedCalls == 0, let width = thoughtRepetition?.append(tokenID) {
+            throw RepeatedThoughtDetected(blockTokens: width)
+        }
         var events: [StructuredAssistantEvent] = []
         if isControl, !delta.isEmpty, toolTokens == nil {
             events = routeText(delta)

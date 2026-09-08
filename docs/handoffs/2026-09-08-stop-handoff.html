@@ -1,0 +1,620 @@
+<!-- Styles adapted from "Know your unknowns" — Copyright 2026 Anthropic PBC. SPDX-License-Identifier: Apache-2.0. Source: https://thariqs.github.io/html-effectiveness/unknowns/09-implementation-notes.html -->
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>TurboCharge stop handoff — Implementation notes</title><style>
+  :root {
+    --ivory:  #FAF9F5;
+    --paper:  #FFFFFF;
+    --slate:  #141413;
+    --clay:   #D97757;
+    --clay-d: #B85C3E;
+    --oat:    #E3DACC;
+    --olive:  #788C5D;
+    --g100:   #F0EEE6;
+    --g200:   #E6E3DA;
+    --g300:   #D1CFC5;
+    --g500:   #87867F;
+    --g700:   #3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", Times, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px 100px; }
+
+  /* ── header ── */
+  header.page { padding: 56px 0 8px; position: relative; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--g500);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .eyebrow::before { content: ""; width: 24px; height: 1.5px; background: var(--clay); flex: none; }
+  a.back {
+    position: absolute;
+    top: 60px; right: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    text-decoration: none;
+  }
+  a.back:hover { color: var(--clay-d); }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 10px;
+  }
+  .lede { font-size: 16.5px; color: var(--g700); max-width: 640px; margin: 0 0 30px; }
+
+  /* ── scope box ── */
+  .promptcard {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 22px 26px 24px;
+    position: relative;
+  }
+  .promptcard .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 12px;
+  }
+  .promptcard blockquote {
+    margin: 0;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 17.5px;
+    line-height: 1.6;
+    color: var(--slate);
+    max-width: 62ch;
+  }
+  button.copybtn {
+    position: absolute;
+    top: 18px; right: 18px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--g700);
+    background: var(--g100);
+    border: 1.5px solid var(--g300);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  button.copybtn:hover { border-color: var(--g500); }
+  button.copybtn.done { color: var(--olive); border-color: var(--olive); background: var(--paper); }
+
+  /* ── divider ── */
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 48px 0 30px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--g500);
+    white-space: nowrap;
+  }
+  .divider::before, .divider::after { content: ""; height: 1.5px; background: var(--g300); flex: 1; }
+
+  /* ── the document card ── */
+  .doc {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .doc-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    padding: 14px 22px;
+    border-bottom: 1.5px solid var(--g200);
+    background: var(--g100);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g700);
+  }
+  .doc-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--olive); flex: none; }
+  .doc-head .path { overflow-wrap: anywhere; }
+  .doc-head .meta { margin-left: auto; color: var(--g500); }
+
+  .doc-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 22px 22px 0;
+  }
+  .stat {
+    flex: 1 1 130px;
+    background: var(--ivory);
+    border: 1.5px solid var(--g200);
+    border-radius: 10px;
+    padding: 12px 16px 10px;
+  }
+  .stat .n { font-family: var(--serif); font-weight: 500; font-size: 30px; line-height: 1.1; letter-spacing: -0.02em; }
+  .stat .t { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--g500); margin-top: 3px; }
+  .stat.dev .n { color: var(--clay-d); }
+  .stat.you .n { color: var(--slate); }
+  .stat.you { border-color: var(--oat); background: #F6F0E4; }
+
+  /* filter chips */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 18px 22px 4px;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1.5px solid var(--g300);
+    background: var(--paper);
+    color: var(--g700);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--g500); }
+  .chip.on { background: var(--slate); border-color: var(--slate); color: var(--ivory); }
+  .chip .ct { color: var(--g500); }
+  .chip.on .ct { color: var(--g300); }
+
+  /* timeline */
+  .timeline { padding: 16px 22px 26px; }
+  .entry {
+    display: grid;
+    grid-template-columns: 52px 14px 1fr;
+    gap: 0 14px;
+    position: relative;
+  }
+  .entry .ts {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    padding-top: 4px;
+    text-align: right;
+  }
+  .entry .rail { position: relative; }
+  .entry .rail::before {
+    content: "";
+    position: absolute;
+    left: 50%; top: 0; bottom: 0;
+    width: 1.5px;
+    background: var(--g200);
+    transform: translateX(-50%);
+  }
+  .entry.rail-first .rail::before { top: 10px; }
+  .entry.rail-last .rail::before { bottom: auto; height: 10px; }
+  .entry.rail-first.rail-last .rail::before { display: none; }
+  .entry .node {
+    position: absolute;
+    left: 50%; top: 8px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    background: var(--g300);
+    border: 2px solid var(--paper);
+    box-shadow: 0 0 0 1.5px var(--g300);
+  }
+  .entry.t-plan .node    { background: var(--olive); box-shadow: 0 0 0 1.5px var(--olive); }
+  .entry.t-dev .node     { background: var(--clay);  box-shadow: 0 0 0 1.5px var(--clay); }
+  .entry.t-disc .node    { background: var(--oat);   box-shadow: 0 0 0 1.5px var(--g500); }
+  .entry.t-human .node   { background: var(--slate); box-shadow: 0 0 0 1.5px var(--slate); }
+  .entry .body { padding: 0 0 22px; min-width: 0; }
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2.5px 9px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .t-plan  .badge { color: var(--olive); background: #EEF1E8; border: 1px solid #C9D4B8; }
+  .t-dev   .badge { color: #fff; background: var(--clay); border: 1px solid var(--clay); }
+  .t-disc  .badge { color: var(--g700); background: var(--g100); border: 1px solid var(--g300); }
+  .t-human .badge { color: var(--ivory); background: var(--slate); border: 1px solid var(--slate); }
+  .entry h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 15px;
+    margin: 0 0 4px;
+    letter-spacing: -0.005em;
+  }
+  .entry p { margin: 0; font-size: 14px; color: var(--g700); max-width: 68ch; }
+  .entry code, .devgrid code, .n2 code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--g100);
+    border: 1px solid var(--g200);
+    border-radius: 5px;
+    padding: 1px 5px;
+    overflow-wrap: anywhere;
+  }
+  .ts-mobile { display: none; }
+
+  /* per-entry sub-fields */
+  .devgrid {
+    margin-top: 10px;
+    border: 1.5px solid var(--oat);
+    border-left: 3px solid var(--clay);
+    border-radius: 10px;
+    background: #FBF6EC;
+    overflow: hidden;
+  }
+  .devgrid .row {
+    display: grid;
+    grid-template-columns: 158px 1fr;
+    gap: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    color: var(--g700);
+  }
+  .devgrid .row + .row { border-top: 1px solid #EFE5D2; }
+  .devgrid .k {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--clay-d);
+    padding-top: 2px;
+  }
+  .devgrid .row.chosen .k { color: var(--olive); }
+  .devgrid .row.chosen .v { color: var(--slate); font-weight: 500; }
+  @media (max-width: 560px) {
+    .entry { grid-template-columns: 14px 1fr; }
+    .entry .ts { display: none; }
+    .ts-mobile { display: inline; font-family: var(--mono); font-size: 11px; color: var(--g500); margin-left: 8px; }
+  }
+  /* Below ~860px the 158px key column starves the value column: every task wraps to
+     three or four lines while the key column sits empty. Stack the key above instead. */
+  @media (max-width: 860px) {
+    .devgrid .row { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  /* needs-your-decision block */
+  .next {
+    margin-top: 26px;
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 24px 26px 22px;
+    position: relative;
+  }
+  .next .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 8px;
+  }
+  .next h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .next .sub { font-size: 14px; color: var(--g500); margin: 0 0 14px; max-width: 60ch; }
+  .next ol { margin: 0; padding-left: 22px; }
+  .next li { font-size: 14.5px; color: var(--g700); margin-bottom: 10px; max-width: 70ch; }
+  .next li strong { color: var(--slate); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 22px;
+    border-top: 1.5px solid var(--g300);
+    font-size: 13.5px;
+    color: var(--g500);
+  }
+  footer a { color: var(--clay-d); text-decoration-color: var(--oat); text-underline-offset: 3px; }
+
+
+  /* ── task-tracker build additions ── */
+  /* ── changes 1-4 ── */
+  .waits { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: var(--g500); margin: 0 0 8px; }
+  .tasklist, .acclist { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  /* a list row is a tall block, not a one-line key/value - give it more room than the
+     short rows above and below it, or the first and last task touch the card edge */
+  .devgrid .row:has(.tasklist), .devgrid .row:has(.acclist) { padding-top: 16px; padding-bottom: 18px; }
+  .tasklist li, .acclist li {
+    display: grid; grid-template-columns: 18px auto 1fr; gap: 8px;
+    align-items: baseline; font-size: 13px; line-height: 1.45;
+  }
+  .acclist li { grid-template-columns: 18px 1fr; }
+  .tasklist .tx, .acclist li { min-width: 0; overflow-wrap: anywhere; }
+  .tasklist .d, .tasklist .nodate { margin-left: 6px; }
+  .tasklist .bx, .acclist .bx {
+    font-family: var(--mono); font-size: 10px; text-align: center;
+    border: 1.5px solid var(--g300); border-radius: 4px; background: var(--paper);
+    color: var(--g500); padding: 1px 0; line-height: 1.3;
+  }
+  .tasklist .id { font-family: var(--mono); font-size: 11px; color: var(--g500); font-variant-numeric: tabular-nums; }
+  .tasklist .tx { min-width: 0; }
+  .tasklist .d { font-family: var(--mono); font-size: 10.5px; color: var(--g500); white-space: nowrap; }
+  .tasklist .nodate {
+    font-family: var(--mono); font-size: 10px; font-style: normal; white-space: nowrap;
+    color: var(--clay-d); border: 1px dashed var(--clay); border-radius: 4px; padding: 0 5px;
+  }
+  .tasklist .m-ok .bx  { border-color: var(--olive); background: #EEF1E8; color: var(--olive); }
+  .tasklist .m-ok .tx  { color: var(--g500); }
+  .tasklist .m-doing .bx  { border-color: var(--clay); background: #FBEDE6; color: var(--clay-d); }
+  .tasklist .m-doing .tx  { color: var(--slate); font-weight: 600; }
+  .tasklist .m-skip .bx  { border-style: dashed; }
+  .tasklist .m-skip .tx, .tasklist .m-skip .d { color: var(--g500); text-decoration: line-through; text-decoration-color: var(--g300); }
+  .acclist .ok .bx { border-color: var(--olive); background: #EEF1E8; color: var(--olive); }
+  .acclist .ok { color: var(--g500); }
+
+  .pips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .pip {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 7px; border-radius: 5px;
+    border: 1.5px solid var(--g300); background: var(--paper); color: var(--g500);
+  }
+  .pip i { font-style: normal; font-size: 11px; line-height: 1; }
+  .pip.ok      { border-color: var(--olive);  background: #EEF1E8; color: var(--olive); }
+  .pip.bad     { border-color: var(--clay-d); background: #FBEDE6; color: var(--clay-d); }
+  .pip.unknown { border-style: dashed; }
+  .legend {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+    padding: 14px 22px 0; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.06em; color: var(--g500);
+  }
+  .legend .lgt { text-transform: uppercase; letter-spacing: 0.12em; margin-right: 4px; }
+  .legend .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .legend .pip { padding: 2px 5px; }
+  .why { font-size: 12.5px; color: var(--g700); }
+  .why.blk { margin-top: 4px; color: var(--clay-d); }
+
+  /* ── cleanup ── */
+  .finalchip {
+    display: inline-block; font-family: var(--mono); font-size: 9.5px;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    padding: 2.5px 8px; border-radius: 6px; margin-bottom: 6px;
+    color: var(--clay-d); background: #FBEDE6; border: 1px solid var(--clay);
+  }
+  .row.cleanup .k { color: var(--clay-d); }
+  .row.cleanup.calm { background: rgba(255,255,255,.45); }
+  .row.cleanup.calm .k, .row.cleanup.calm .v { color: var(--g500); }
+  .tasklist .tag {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em;
+    text-transform: uppercase; white-space: nowrap;
+    padding: 1px 6px; border-radius: 5px; margin-left: 4px;
+    color: var(--clay-d); background: #FBEDE6; border: 1px solid var(--oat);
+  }
+  .tasklist .tag.ghost { color: var(--g500); background: var(--g100); border-color: var(--g200); }
+  .tasklist .is-cleanup .bx { border-color: var(--clay); color: var(--clay-d); }
+  .tasklist .is-cleanup .tx { color: var(--slate); }
+  .tasklist .is-pointer .tx { text-decoration: none; color: var(--g500); }
+  .tasklist .is-pointer .bx { border-style: dotted; }
+
+  /* ── collapsible phases ── */
+  details.fold > summary {
+    list-style: none; cursor: pointer; display: block;
+    padding: 8px 34px 8px 0; margin: -8px 0 0; position: relative;
+    border-radius: 8px;
+  }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary:hover { background: rgba(0,0,0,.02); }
+  details.fold > summary:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; }
+  details.fold > summary h3 { margin: 2px 0 3px; }
+  details.fold > summary .waits { display: block; }
+  .chev {
+    position: absolute; right: 6px; top: 12px;
+    width: 9px; height: 9px; border-right: 1.8px solid var(--g500); border-bottom: 1.8px solid var(--g500);
+    transform: rotate(45deg); transition: transform .15s ease;
+  }
+  details[open] > summary .chev { transform: rotate(-135deg); }
+  .mini { display: none; align-items: center; gap: 8px; margin-top: 5px; }
+  details:not([open]) > summary .mini { display: flex; }
+  .mini-pips { gap: 3px; }
+  .dot { width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--g300); background: var(--paper); }
+  .dot.ok  { border-color: var(--olive);  background: var(--olive); }
+  .dot.bad { border-color: var(--clay-d); background: var(--clay); }
+  .dot.unknown { border-style: dotted; }
+  .minitask { font-family: var(--mono); font-size: 10.5px; color: var(--g500); }
+  .foldbody { padding-top: 2px; }
+
+  /* ── bottom jump bar ── */
+  .jump {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: flex; justify-content: center;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, var(--ivory) 62%, rgba(250,249,245,0));
+    pointer-events: none;
+  }
+  .jump .bar {
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 4px;
+    padding: 5px; border-radius: 999px;
+    background: var(--paper); border: 1.5px solid var(--g300);
+    box-shadow: 0 4px 16px rgba(20,20,19,.10);
+    max-width: 100%; overflow-x: auto; scrollbar-width: none;
+  }
+  .jump .bar::-webkit-scrollbar { display: none; }
+  .jump a, .jump button {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    min-width: 38px; height: 38px; padding: 0 10px;
+    border-radius: 999px; border: 1.5px solid transparent; background: transparent;
+    font-family: var(--mono); font-size: 13px; color: var(--g700);
+    text-decoration: none; cursor: pointer; position: relative;
+  }
+  .jump a::after {
+    content: ""; position: absolute; bottom: 5px; left: 50%; transform: translateX(-50%);
+    width: 5px; height: 5px; border-radius: 50%; background: var(--g300);
+  }
+  .jump a[data-state="done"]::after  { background: var(--olive); }
+  .jump a[data-state="doing"]::after { background: var(--clay); }
+  .jump a.here { background: var(--slate); color: var(--ivory); }
+  .jump a.here::after { background: var(--ivory); }
+  .jump a.flag { color: var(--clay-d); font-size: 15px; }
+  .jump a.run { color: var(--olive); font-size: 12px; }
+  .jump a.flag::after { display: none; }
+  .jump .sep { width: 1.5px; height: 20px; background: var(--g200); margin: 0 2px; flex: none; }
+  .jump button:focus-visible, .jump a:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; }
+  .wrap { padding-bottom: 120px; }
+  @media (min-width: 900px) { .wrap { padding-bottom: 140px; } }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .chev { transition: none; } }
+  html { scroll-behavior: smooth; scroll-padding-top: 16px; }
+
+  /* ── prompts ── */
+  .pbody { padding: 20px 22px 24px; }
+  .pbody .sub { font-size: 13.5px; color: var(--g500); margin: 0 0 16px; max-width: 68ch; }
+  .pbody .sub.foot { margin: 18px 0 0; padding-top: 14px; border-top: 1.5px solid var(--g200); }
+  .pgroup { margin-bottom: 18px; }
+  .pgroup h3 {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--g500); margin: 0 0 8px; font-weight: 400;
+  }
+  .pcard { border: 1.5px solid var(--g200); border-radius: 10px; background: var(--paper); margin-bottom: 6px; }
+  .pcard.whole { border-color: var(--oat); background: #FBF6EC; }
+  .pcard > summary {
+    list-style: none; cursor: pointer; position: relative;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 11px 34px 11px 12px; min-height: 44px; border-radius: 9px;
+  }
+  .pcard > summary::-webkit-details-marker { display: none; }
+  .pcard > summary:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; }
+  .ptag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 5px; flex: none;
+    color: var(--clay-d); background: #FBEDE6; border: 1px solid var(--oat);
+  }
+  .ptag.t { color: var(--g700); background: var(--g100); border-color: var(--g300); text-transform: none; letter-spacing: 0.04em; }
+  .pname { font-size: 13.5px; color: var(--slate); min-width: 0; flex: 1 1 auto; }
+  .pstate { font-family: var(--mono); font-size: 10px; color: var(--g500); flex: none; }
+  .pcard .chev { top: 18px; }
+  .pwrap { position: relative; padding: 0 12px 12px; }
+  .pwrap pre {
+    margin: 0; padding: 12px 14px; border-radius: 8px;
+    border: 1.5px solid var(--g200); background: var(--g100); color: var(--g700);
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
+    white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  button.copyp {
+    position: absolute; top: -38px; right: 12px; z-index: 2;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+    color: var(--g700); background: var(--paper); border: 1.5px solid var(--g300);
+    border-radius: 8px; padding: 7px 12px; min-height: 32px; cursor: pointer;
+  }
+  button.copyp:hover { border-color: var(--g500); }
+  button.copyp.ok { color: var(--olive); border-color: var(--olive); }
+
+  @media (max-width: 560px) {
+    /* wrap so it is readable on a phone. This is visual only - the copy button
+       reads textContent, so the pasted prompt keeps its real line breaks and the
+       VERIFY command stays on one line. */
+    .pwrap pre { font-size: 10.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    button.copyp { top: -36px; right: 12px; padding: 6px 10px; }
+    .pcard > summary { padding-right: 30px; }
+    /* the whole bar must fit a 390px phone, or the decision flag falls off the end */
+    .jump { padding-left: 6px; padding-right: 6px; }
+    .jump .bar { gap: 1px; padding: 4px; }
+    .jump a, .jump button { min-width: 31px; height: 36px; padding: 0 3px; font-size: 12.5px; }
+    .jump .sep { display: none; }
+    .jump a.flag { font-size: 14px; }
+    .tasklist .tag { display: inline-block; margin: 2px 0 0; white-space: normal; }
+  }
+
+  .hidden { display: none; }
+
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--clay); outline-offset: 3px; }
+</style></head>
+<body>
+<div class="wrap">
+<header class="page"><div class="eyebrow">Owner stop · 8 September 2026</div><h1>TurboCharge handoff</h1><p class="lede">Work stopped. Navigation improved, but reliable interruption, context continuity and full exploration remain unfinished.</p></header>
+<div class="promptcard"><div class="label">Read first</div><p>At 19:21 UTC (20:21 London), Hebert asked for this handoff and an end to work. Gemma was already idle. The app and loaded model were left intact. The owned sampler and reliability schedule were stopped.</p><p><strong>Next priority: let the user stop exploration, give a new instruction and retain the task context.</strong> This document records remaining work. It does not start it.</p></div>
+<p>Coverage: approximately 23:21 UTC on 7 September to 19:21 UTC on 8 September 2026. Earlier accepted work is identified separately. Saved receipts are more precise than broad phase labels. Dirty files alone do not prove authorship or when a change happened.</p>
+<nav><a href="#findings">findings</a> · <a href="#stop-resume">stop resume</a> · <a href="#turbocharge">turbocharge</a> · <a href="#visioncapture">visioncapture</a> · <a href="#gemma">gemma</a> · <a href="#compaction">compaction</a> · <a href="#experiments">experiments</a> · <a href="#installed">installed</a> · <a href="#pending">pending</a> · <a href="#state">state</a></nav>
+<section id="findings"><details class="fold" open><summary><h2>1. What was achieved</h2></summary><div class="handoff-body"><p>Gemma repeatedly completed onboarding and profile work and reached todos and bookmarks. Several runs showed the requested todo names and bookmark entries. These are partial journeys, not proof that every requested tag, search, video and playlist task completed.</p>
+<p>TurboCharge now has host-managed task checkpoints, retained image/history handling, clearer progress and request/response visibility, and several narrow recovery corrections. Automatic compaction was observed once reducing the active context and resuming a read.</p>
+<p>Important failures remain: long repeated thinking, recovery that has not yet succeeded in a live accepted case, an app text-layout freeze, and loss of task continuity after stopping/reloading. The latest run ended with Gemma asking what task to perform.</p>
+<p>No Gemma weights were changed. No sustained speed gain or 25 tokens/second result was established. The tested Metal candidate is not installed. The owner's latest priority is reliability and compaction; speed experiments are parked.</p></div></details></section>
+<section id="stop-resume"><details class="fold" open><summary><h2>2. Highest priority: Stop and resume lose the task</h2></summary><div class="handoff-body"><p><strong>Owner report:</strong> once exploration starts, stopping does not provide a useful way to give Gemma a new instruction. The owner has to unload and reload, which loses the previous conversation context.</p>
+<p><strong>Observed:</strong> the chat displayed “Earlier turns are no longer in the model’s context.” The new input was only “continue”. Gemma answered: “I'm ready to proceed. Please let me know what task you would like me to perform or provide more instructions so I can continue.”</p>
+<p>Capture 18 records original conversation <code>B84D068D-B3CF-4DF5-9F78-6D369E40B9BE</code> from 19:03:48–19:18:11 UTC, then <code>C35D041F-7DFC-4757-9592-D34F792F5C65</code> from 19:18:53–19:21:05. Final context was 2,263 tokens. There was no committed automatic checkpoint in this run.</p>
+<p>This confirms missing task context in the new conversation. The trace and UI alone do not establish the exact user action sequence or root cause. Earlier successful Stop checks did not cover this entire flow.</p>
+<p><strong>Required future outcome:</strong> Stop settles or cancels current work safely, preserves the host task record and relevant history, and enables a new instruction without unloading. If a model reload requires rebuilding context, the original task and verified progress must be restored explicitly. An uncertain app action must never be replayed.</p>
+<p>Start the source review at <code>AppModel.swift</code>, <code>VisionCaptureToolLoop.swift</code>, <code>AgentTaskCheckpoint.swift</code>, <code>DecodeServiceInferenceClient.swift</code> and <code>MultimodalConversation.swift</code>. Compare Stop, generation cancellation, unload and new-conversation paths before proposing a change.</p><p><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-18/README.md">Capture 18 closeout</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-18/model-trace.jsonl">Exact model input/output trace</a></p></div></details></section>
+<section id="turbocharge"><details class="fold"><summary><h2>3. TurboCharge changes during the work</h2></summary><div class="handoff-body"><table><thead><tr><th>Area and files</th><th>Change and evidence limit</th></tr></thead><tbody>
+<tr><td>Tool loop<br><code>Core/Tools/VisionCaptureToolLoop.swift</code>, <code>VisionCaptureScreenFacts.swift</code>, <code>VisionCaptureToolDefinitions.swift</code>, <code>VisionCaptureMCPClient.swift</code></td><td>Shorter model facts, recovery feedback for proposals that were not sent, current/historical state handling, no-progress warnings and restricted visual refresh. Several later failures show recovery coverage remains incomplete. Preserve MCP refusals and uncertain-delivery restrictions.</td></tr>
+<tr><td>Host memory<br><code>AgentTaskCheckpoint.swift</code>, <code>RealInferenceClient.swift</code>, <code>MultimodalConversation.swift</code></td><td>Task/action history, historical lookup and image retention across replacement; capacity and performance checkpoint assessment. Capture 17 proves automatic replacement and resumed read, not complete task continuity.</td></tr>
+<tr><td>Repeated thinking<br><code>StructuredAssistantDecoder.swift</code>, <code>AppInferenceError.swift</code>, <code>DecodeServiceInferenceClient.swift</code>, <code>DecodeProtocol.swift</code>, service <code>Entry.swift</code> / <code>DecodeServiceOutbox.swift</code></td><td>Detect sustained exact repetition, preserve a settled pending tool result, restrict recovery and avoid replay. Capture 17 exposed missing conversation identity in the service terminal. Identity fix installed at 18:52 UTC. Successful live recovery is still pending.</td></tr>
+<tr><td>Progress and chat<br><code>AppModel.swift</code>, <code>AgentInferenceTrace.swift</code>, <code>VisionCaptureActivity.swift</code>, <code>LiveGenerationPreviewText.swift</code>, <code>OutputPaneView.swift</code>, <code>InstructionTranscriptDocumentController.swift</code></td><td>Bounded thinking display, following/copy controls, trace/status visibility and compaction progress. A later AppKit layout stall required a narrow geometry correction. Capture 17 remained responsive beyond the earlier failure, but broad freeze-free reliability is unproved.</td></tr>
+</tbody></table>
+<p>App-relative files above are under <code>Sources/TurboFieldfareApp/</code>. Runtime, protocol and service files are under their corresponding <code>Sources/</code> modules.</p>
+<p>Generic repeated instructions were moved out of per-result facts where standing developer instructions already covered them. Four sites were shortened, preserving current facts and safety restrictions. Saved captures showed 8,081 and 9,236 payload bytes removed in bounded comparisons. These are byte reductions, not measured speed gains.</p>
+<p><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/prompt-instruction-deduplication.md">Instruction deduplication receipt</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-15/repeated-thinking-recovery.md">Repeated-thinking recovery</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-16/chat-layout-geometry-correction.md">Text-layout correction</a></p></div></details></section>
+<section id="visioncapture"><details class="fold"><summary><h2>4. VisionCapture changes and outstanding MCP issues</h2></summary><div class="handoff-body"><p>The component inventory is maintained in the linked evidence note. It distinguishes earlier Phases 1–4 work, source changes in this time window, installed evidence and unresolved issues. Do not attribute every dirty VisionCapture file to this session.</p>
+<p><strong>Earlier baseline:</strong> concise Release responses, Debug diagnostics, one final outgoing projection and packaging checks were already exercised before this 20-hour window. On 7 September at 21:19–21:20 UTC, packaged Release/Debug returned identical public schemas; the validation response was 284 bytes in Release and 546 bytes in Debug. This is narrow coverage, not all response families.</p>
+<p><strong>Current source, timing and installation unproved:</strong> <code>ScreenDescriber+Payload.swift</code>, <code>ScreenDescriber.swift</code> and <code>DescribeScreenTransportFormatter.swift</code> add explicit empty/omitted/secure/redacted field-value states. <code>SimulatorFrameFrameworkProvenance.swift</code> adds macOS 26.6.2 build 25G83 to the supported-host list. No matching build/live receipt was found for these hunks. Preserve them as source-only until verified.</p>
+<p>VisionOS is on <code>codex/live-test-action-replay</code>, commit <code>96dab6ca6cbd0a792d78690177330f058ee172a7</code>. There are no commits inside the review window. The dirty tree cannot establish when or by whom each edit was made.</p>
+<p><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/handoffs/2026-09-08-stop-handoff-visioncapture-evidence.md">VisionCapture file-by-file handoff</a></p>
+<p>VisionCapture remains the source of truth for action results, current capabilities, refusals and uncertain delivery. TurboCharge translates those facts for Gemma. It must not invent success or bypass a terminal restriction.</p>
+<p>Retain the review items around misleading/incomplete screen summaries, unnamed or duplicate controls, stale cached targets and multiple devices in parallel. These need evidence-led follow-up, not application-specific navigation code.</p>
+<p>The missing activity notch was resolved by the owner identifying their own toggle. No notch code change was made for that report. The simulator-pixel checkbox controls preview permission, not notch visibility.</p></div></details></section>
+<section id="gemma"><details class="fold"><summary><h2>5. What changed for Gemma</h2></summary><div class="handoff-body"><p>Gemma receives an app-independent navigation interface, compact current facts and choices, supported screenshots, a standing instruction set and host-maintained task history. Internal device/session/grant handling belongs to TurboCharge and VisionCapture. The model chooses the navigation action.</p>
+<p>The same task prompt asked for onboarding, profile, tagged todos, tagged bookmarks, real videos/playlists and search, while avoiding the Assistant. Root prepared fresh installations and observed results. Individual live taps were chosen by Gemma unless a receipt explicitly records a diagnostic intervention.</p>
+<p>Images were actually supplied in recorded runs, including capture 18 input 2. Image support is therefore more than an advertised tool. Gemma still did not reliably request images when confused; one initial screenshot does not prove sustained visual recovery.</p>
+<p>Thinking was enabled at the owner's request. It produced useful decisions but also long exact repetition. No fine-tuning, model weight change or fixed set of “navigation experts” was introduced. We cannot infer details of Gemma's training from these tests.</p></div></details></section>
+<section id="compaction"><details class="fold"><summary><h2>6. Compaction: implemented, observed, still limited</h2></summary><div class="handoff-body"><p>The host builds a replacement context from the original goal, recorded actions, retained history and actual images. It resets and rebuilds the same model conversation at a settled tool boundary. Gemma is not asked to write a summary.</p>
+<p>The installed optional performance trigger requires three completed non-history tool decisions, at least 128 generated tokens, latest context of at least 20,480 tokens, and weighted generation below 15 tokens/second. It waits six completed decisions before another performance trigger. Capacity protection takes priority.</p>
+<p>A replacement must fit the configured reserve and save at least 4,096 tokens or 20%, whichever is larger. If it does not, the existing state remains. The UI reports assessment, rebuild and outcome.</p>
+<p><strong>Capture 17:</strong> settled input fell from 20,989 to 8,001 tokens, saving 12,988. The checkpoint retained the original task, 52 execution records, 28 history references and one actual image. Rebuild took 162 seconds. A read resumed successfully.</p>
+<p><strong>Limit:</strong> the first resumed decision was 9.77 tokens/second versus 12.35 in the pre-trigger window. Different decisions make this an uncontrolled comparison. It proves neither speed gain nor reduced overall task time. Long thinking can still consume context before a safe boundary.</p>
+<p>A new, unbuilt source change adds up to three recent historical observations, within 6,144 UTF-8 bytes, to make prior facts easier to use. Capture 17's example adds 4,542 bytes. It excludes executable IDs and marks these facts historical. It may help continuity, but its benefit is unverified.</p>
+<p><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/performance-compaction/implementation-receipt.md">Exact policy, build receipt and pending continuity change</a></p></div></details></section>
+<section id="experiments"><details class="fold"><summary><h2>7. Experiment ledger</h2></summary><div class="handoff-body"><p>Each link contains the detailed commands, settings, timings, failures and protocol deviations. Some early captures establish baseline context for this roughly 20-hour window. Later conclusions supersede optimistic interim notes.</p><table><thead><tr><th>Capture</th><th>Result and limitation</th></tr></thead><tbody><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-1/README.md">1. Baseline and counters</a></td><td>Long context baseline and measurement collection. Useful numeric evidence, no sustained 25 tokens/second result.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-2/README.md">2. Tool image cancellation</a></td><td>Cancelled image-related answers and an incomplete closing footer. The failed request remains failed.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-3/README.md">3. Image memory</a></td><td>Completed image request. Expert scratch release about 3.003 GiB, 960 slots refilled, image prefill 40.533 s. Logical read bytes are not physical disk traffic.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-4/README.md">4. Cancellation receipts</a></td><td>Installed cancellation delivery and measurement-flush corrections. Acceptance is limited to those recorded checks.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-5/README.md">5. Chat responsiveness</a></td><td>Bounded 8 KiB thinking preview, manual scroll pauses following, Follow Latest and copy support. Stop measured 1.530 s in that check, not proof for every exploration state.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-6/README.md">6. Image build recovery</a></td><td>Installed image-path/build corrections and a completed single-image case. This does not establish all screenshot or cancellation paths.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-7/README.md">7. Checkpoint replacement</a></td><td>Forced conversation replacement and resumed verified field entry. Full journey still incomplete.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-8/README.md">8. Checkpoint deduplication</a></td><td>Reduced repetition in checkpoint material. Follow the linked receipt for exact retained content.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-9/README.md">9. Task history</a></td><td>Host task record and bounded local historical observation lookup. History access exists, but the model may fail to request it.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-10/README.md">10. Unknown tool name</a></td><td>76 attempts, 13.2897 tokens/s, context 31,850. Onboarding/profile, three tagged todos and two bookmarks observed. Stopped on unknown tool name. Video/search and complete bookmark tagging unverified.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-11/README.md">11. Historical image confusion</a></td><td>Detected confusion between historical image and current screen. Cancelled; ordering correction followed.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-12/README.md">12. Image ordering and loop</a></td><td>Forced checkpoint 7,821 → 6,640 tokens. Original task, 24 action records, 14 history references and one image retained. Repeated Todos taps revealed no-progress accounting weakness.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-13/README.md">13. Recoverable malformed call</a></td><td>Unknown-name proposal corrected without app input. 86 attempts, 12.2705 tokens/s, context 43,495. Later unchanged observations exposed a dropped warning and visual-refresh gap.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-14/README.md">14. Expired targets</a></td><td>Ended after three expired target proposals were locally rejected. 71 attempts, 12.81075 tokens/s, context 32,781. No automatic checkpoint.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-15/README.md">15. Repeated thinking</a></td><td>Long repetition caused a stop. Three todo names and Shopping List evidence existed, but the full goal did not complete. Repetition detector/recovery implemented afterward.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-16/README.md">16. App freeze</a></td><td>Main thread sampled in text layout while decode helper was idle. App memory rose 398 → 435 MiB. Exact owned app terminated after normal Quit failed. Narrow geometry correction followed.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-17/README.md">17. Automatic compaction</a></td><td>20,989 → 8,001 tokens, 162 s rebuild, then a resumed read. Later repetition recovery failed because the service omitted conversation identity. Fixed and installed, successful live recovery still unproved.</td></tr><tr><td><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-18/README.md">18. Final run and context loss</a></td><td>Fresh test began 19:03 UTC. Later a new conversation contained only “continue”; Gemma asked what task to perform. Owner requested stop at 19:21 UTC. No full journey or automatic checkpoint in this run.</td></tr></tbody></table>
+<p>Separate Metal investigation tested a query-register candidate: 26 direct numerical cases and 24 production-wrapper cases matched their baselines. Isolated timing across nine shapes and 432 samples showed about 16% median attention GPU reduction. That is not whole-model speed. Baseline kernels were restored for the live app.</p>
+<p>Full-model short/long comparison fixtures were prepared but not run to acceptance. No Metal candidate was adopted. Server numeric-footer changes remain separate unbuilt work.</p>
+<p><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/query-register-candidate.md">Metal candidate</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/query-register-production-selection.md">Production selection evidence</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/query-register-timing-preparation.md">Timing scope</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/server-comparison-fixtures/README.md">Unrun full-model fixtures</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/memory-measurements.md">Memory report</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/prefill-measurements.md">Prefill report</a></p></div></details></section>
+<section id="installed"><details class="fold"><summary><h2>8. Installed versus source-only</h2></summary><div class="handoff-body"><p><strong>Installed:</strong> release app and decode helper built, signed, installed and launched using <code>./script/build_and_run.sh --verify</code>, exit 0, at approximately 18:52 UTC. App build 33.40 s; helper build 4.47 s. Source base commit <code>9a33992fe246e2c282f2c6b3c14238e9a17f09f5</code> plus recorded dirty changes.</p>
+<pre>App SHA-256
+6c8bc57b36cdf9f5ae55f1d6e10b1d85fefdfbf9b17ce90e3e029f70d8eb3e13
+Decode helper SHA-256
+6d18dfe0f3fb3737a27cefd6605f74422cd0398017567c0c562c8708ad73ccd9</pre>
+<p>Includes automatic compaction, prior chat corrections, repeated-thinking recovery machinery, conversation-identity fix and instruction deduplication. Installed at <code>/Applications/TurboFieldfare.app</code>.</p>
+<p><strong>Source only:</strong> the latest <code>AgentTaskCheckpoint.swift</code> recent-observation addition, SHA-256 <code>86ee29340a9862b014df40282e5c9aa6dc119126c16c93a0e493930c0aeebc47</code>. Parsing and whitespace checks passed. Root review is incomplete. It has not been built, installed or tested live.</p>
+<p><strong>Separate pending source:</strong> <code>Sources/TurboFieldfareServer/Core/ServerInference.swift</code> and <code>ServerLog.swift</code> comparison/footer preparation. No accepted full-model comparison. Preserve these and other user changes.</p></div></details></section>
+<section id="pending"><details class="fold"><summary><h2>9. Remaining work, in priority order</h2></summary><div class="handoff-body"><ol>
+<li><strong>Stop and new instruction:</strong> reproduce the capture 18 continuity problem through the Stop/unload/new-conversation paths. Required result: new instructions retain the original goal and verified progress without unnecessary reload.</li>
+<li><strong>Recovery acceptance:</strong> exercise the installed identity fix during repeated thinking. Prove a useful resumed decision and no duplicate app action. Initial-user and checkpoint-generation repetition currently lack the tool-result retry path.</li>
+<li><strong>Checkpoint continuity:</strong> review the source-only recent-observation addition and verify retained goals, completed actions, images and safety state through a real automatic compaction.</li>
+<li><strong>Finish the task:</strong> complete a fresh visible NestMind journey covering the requested tags, todos, bookmarks, videos, playlists and search. Verify saved results. Avoid the Assistant.</li>
+<li><strong>App reliability:</strong> watch separate app and helper memory during a long transcript and Stop/resume. The prior freeze was app text layout, not active model decoding.</li>
+<li><strong>MCP defects:</strong> follow the component inventory and fix confirmed generic defects without adding NestMind-specific code.</li>
+</ol><p>These are handoff priorities, not work in progress. Performance and Metal comparisons remain parked under the latest owner decision. The earlier 25 tokens/second goal is unmet.</p></div></details></section>
+<section id="state"><details class="fold"><summary><h2>10. Environment, stop state and evidence</h2></summary><div class="handoff-body"><p>Machine: M2 Pro, 32 GiB RAM; macOS 26.6.2; Swift 6.3.2. Visible iPhone 17 simulator, iOS 26.5. No headless simulator was required. Target bundle <code>com.hebertgo.nestmind.debug</code>, simulator UDID <code>7BE1EC4B-8A9F-4C00-8A2C-D4321F9AB382</code>.</p>
+<p>Settings: 64K context, 32 LFU slots, Thinking ON, temperature 0.2, Top-K 64, Top-P 0.95, prefill 128 ON, RDADVISE OFF. Text and vision packs remain in the owner's Application Support location. No model duplicate or download was needed for the latest runs.</p>
+<p>At stop: TurboCharge PID 32400 and helper 32944 were idle/loaded. Final HUD approximately 11.3 tokens/second, 2.3K/66K context, 4.7 GB helper memory. Sampler PID 34623 was interrupted and confirmed absent; session 26586 exited 0. The reliability heartbeat was deleted. Previous renewed-work heartbeat had already been deleted. The existing incomplete goal was not marked complete.</p>
+<p>At capture 18's early slowdown, rates of 7.38–12.31 tokens/second occurred around 5–6.4K context. App memory was about 232 MiB, helper 4,810 MiB; system memory was heavily used/compressed. Long history alone cannot explain that early slowdown. Neither a source regression nor memory causation was proved.</p>
+<p>All fresh runs reset only the disposable debug app under the owner's instruction. Existing code changes and evidence remain intact. The engineer was stopped after the documentation inventory. No implementation, deployment or model run follows this handoff.</p>
+<p><a href="/Users/dev-machine/dev/turbo-fieldfare-personal/Project-files/human/mcp-concise-responses-and-turbo-context-implementation-notes.html">Existing phase plan</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/README.md">Runtime evidence index</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-18/model-top.txt">Last memory samples</a> · <a href="/Users/dev-machine/dev/turbo-fieldfare-personal/docs/experiments/phase5-runtime-measurement-20260907/capture-18/original-prompt.txt">Exact last exploration task</a></p>
+<p><strong>Resume only when Hebert asks. Begin with Stop/resume context continuity.</strong></p></div></details></section>
+</div><style>summary h2{display:inline;font-size:21px}section{margin:25px 0}summary{cursor:pointer;padding:16px 0}.handoff-body{padding:0 0 16px}table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;vertical-align:top;border-bottom:1px solid #d1cfc5;padding:12px 8px}th{background:#e6e3da}td:first-child{width:28%}pre,code{overflow-wrap:anywhere;white-space:pre-wrap;font-size:12px}p,li{max-width:80ch}li{margin:12px 0}nav{line-height:2}a{color:#93482f}</style></body></html>

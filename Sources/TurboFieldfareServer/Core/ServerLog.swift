@@ -22,11 +22,23 @@ enum ServerLog {
                           duration: Duration,
                           completion: ServerCompletion) {
         let usage = completion.usage
-        write("request \(id) completed in \(format(duration)) "
+        let message = "request \(id) completed in \(format(duration)) "
             + "prompt=\(usage.promptTokens) "
             + "cached=\(usage.promptTokensDetails.cachedTokens) "
             + "completion=\(usage.completionTokens) "
-            + "finish=\(completion.finishReason)")
+            + "finish=\(completion.finishReason) "
+            + (completion.numericReceipt?.logDescription ?? "numeric_receipt=unavailable")
+        // A diagnostic sink failure must not change a completed HTTP response.
+        // Only a complete, newline-terminated receipt is comparison evidence.
+        do {
+            let line = "[\(Date().formatted(.iso8601))] \(message)\n"
+            try FileHandle.standardError.write(contentsOf: Data(line.utf8))
+        } catch {
+            let failure = "request \(id) numeric_receipt=write_failed\n"
+            // The same sink may be unavailable. Missing output remains unavailable
+            // evidence, never an inferred successful numeric receipt.
+            try? FileHandle.standardError.write(contentsOf: Data(failure.utf8))
+        }
     }
 
     /// The session is an actor, so generation is serialized: this line always

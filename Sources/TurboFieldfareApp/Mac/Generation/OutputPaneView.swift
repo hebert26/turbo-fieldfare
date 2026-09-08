@@ -182,6 +182,16 @@ private struct LiveGenerationPreviews: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            Text(model.contextCompactionStatusText ?? "")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.bottom, model.contextCompactionStatusText == nil ? 0 : 8)
+                .frame(height: model.contextCompactionStatusText == nil ? 0 : nil)
+                .opacity(model.contextCompactionStatusText == nil ? 0 : 1)
+                .accessibilityHidden(model.contextCompactionStatusText == nil)
+                .accessibilityIdentifier("history-compaction-status")
             if let preview = model.thinkingPreview, !preview.text.isEmpty {
                 LiveGenerationPreviewPanel(
                     title: "Gemma thinking",
@@ -901,7 +911,12 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
 
-        let textView = TranscriptTextView()
+        let contentSize = scrollView.contentSize
+        let textView = TranscriptTextView(frame: NSRect(origin: .zero, size: contentSize))
+        textView.minSize = NSSize(width: 0, height: contentSize.height)
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude)
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
@@ -911,6 +926,9 @@ private struct IncrementalTranscriptView: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.containerSize = NSSize(
+            width: contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.lineFragmentPadding = 0
         textView.isAutomaticLinkDetectionEnabled = false
         textView.isAutomaticDataDetectionEnabled = false

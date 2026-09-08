@@ -492,6 +492,7 @@ actor AgentInferenceTrace {
         diagnostics: AppDiagnostics?, error: String? = nil,
         cancelled: Bool = false,
         parserFailure: StructuredToolFailureEvidence? = nil,
+        thoughtRepetitionRecovery: ThoughtRepetitionRecovery? = nil,
         structuredProgress: DecodeStructuredProgress? = nil,
         toolCallPreview: DecodeToolCallPreview? = nil
     ) {
@@ -564,6 +565,11 @@ actor AgentInferenceTrace {
            let data = try? JSONEncoder().encode(parserFailure),
            let value = try? JSONDecoder().decode(JSONValue.self, from: data) {
             output["parser_failure"] = value
+        }
+        if let thoughtRepetitionRecovery,
+           let data = try? JSONEncoder().encode(thoughtRepetitionRecovery),
+           let value = try? JSONDecoder().decode(JSONValue.self, from: data) {
+            output["thought_repetition_recovery"] = value
         }
         append(
             step: step, event: cancelled ? "cancelled" : error == nil ? "output" : "error",
@@ -641,19 +647,20 @@ actor AgentInferenceTrace {
     }
 
     func checkpoint(_ receipt: DecodeContextCheckpointReceipt, callID: String,
-                    sourceEpoch: UUID, forced: Bool) {
+                    sourceEpoch: UUID, trigger: DecodeContextCheckpointTrigger,
+                    performanceEvidence: DecodePerformanceCheckpointEvidence?) {
         if receipt.committed {
             confirmedConversation = receipt.replacementEpoch
             confirmedRetainedTokens = 0
         }
         guard let step = latestStep else { return }
-        append(step: step, event: "context_checkpoint", body: [
+        var body: [String: JSONValue] = [
             "checkpoint_id": .string(receipt.checkpointID.uuidString),
             "settled_call_id": .string(callID),
             "source_epoch": .string(sourceEpoch.uuidString),
             "replacement_epoch": .string(receipt.replacementEpoch.uuidString),
             "committed": .bool(receipt.committed), "needed": .bool(receipt.needed),
-            "trigger": .string(forced ? "explicit_comparison" : "capacity_forecast"),
+            "trigger": .string(trigger.rawValue),
             "existing_prompt_tokens": Self.integer(receipt.existingPromptTokens),
             "replacement_prompt_tokens": Self.integer(receipt.replacementPromptTokens),
             "forecast_reserve_tokens": Self.integer(receipt.reserveTokens),
@@ -661,10 +668,49 @@ actor AgentInferenceTrace {
             "retained_image_count": Self.integer(receipt.retainedImageCount),
             "retained_image_rows": Self.integer(receipt.retainedImageRows),
             "retained_feature_bytes": Self.integer(receipt.retainedFeatureBytes),
+            "performance_minimum_savings_tokens": Self.integer(
+                receipt.performanceMinimumSavingsTokens),
             "released_feature_bytes": .integer(0),
             "preparation_seconds": .number(receipt.preparationSeconds),
             "rebuild_timing": .string("reported by the following checkpoint_resume prefill"),
             "latency_prediction": .null,
+        ]
+        if let performanceEvidence {
+            body["performance_window_decisions"] = Self.integer(
+                performanceEvidence.completedDecisions)
+            body["performance_window_generated_tokens"] = Self.integer(
+                performanceEvidence.generatedTokens)
+            body["performance_window_decode_seconds"] = .number(
+                performanceEvidence.decodeSeconds)
+            body["performance_window_context_tokens"] = Self.integer(
+                performanceEvidence.conversationTokens)
+            body["performance_window_weighted_tokens_per_second"] = .number(
+                performanceEvidence.weightedTokensPerSecond)
+        }
+        append(step: step, event: "context_checkpoint", body: body)
+    }
+
+    func checkpointCompleted(
+        id: UUID, before: DecodePerformanceCheckpointEvidence?,
+        replacementPromptTokens: Int, after: AppDiagnostics
+    ) {
+        guard let step = latestStep else { return }
+        let rate = after.generatedTokens > 0 && after.decodeSeconds.isFinite
+            && after.decodeSeconds > 0
+            ? Double(after.generatedTokens) / after.decodeSeconds : nil
+        append(step: step, event: "performance_context_checkpoint_completed", body: [
+            "checkpoint_id": .string(id.uuidString),
+            "trigger": .string(DecodeContextCheckpointTrigger.sustainedSlowDecode.rawValue),
+            "before_context_tokens": Self.integer(before?.conversationTokens),
+            "before_weighted_tokens_per_second": before.map {
+                .number($0.weightedTokensPerSecond)
+            } ?? .null,
+            "replacement_prompt_tokens": Self.integer(replacementPromptTokens),
+            "after_context_tokens": Self.integer(after.conversationTokens),
+            "after_generated_tokens": Self.integer(after.generatedTokens),
+            "after_decode_seconds": .number(after.decodeSeconds),
+            "after_tokens_per_second": rate.map(JSONValue.number) ?? .null,
+            "measurement_scope": .string("first completed decision after rebuild"),
         ])
     }
 

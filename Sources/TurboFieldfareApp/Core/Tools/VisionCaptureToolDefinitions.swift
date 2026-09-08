@@ -13,6 +13,7 @@ public enum VisionCaptureAgentProfile {
 
 enum VisionCaptureToolDefinitions {
     static let navigateName = "visioncapture_navigate"
+    static let historyReadName = "task_history_read"
 
     static let all: [AppToolDefinition] = [
         AppToolDefinition(
@@ -22,6 +23,10 @@ enum VisionCaptureToolDefinitions {
             target, observation, sessions, execution evidence, and the exact VisionCapture request.
             Choose an operation from allowed_next. For tap, set_boolean, or type, copy the target ID
             from a choice in the latest packet. IDs expire when a new packet arrives.
+            A choice marked requires_screenshot: true has no readable label and cannot be selected
+            until you request screenshot and receive a usable current image/read pair with new IDs.
+            Older images do not satisfy this requirement. If the current image and facts leave the
+            target ambiguous, report the limitation rather than guessing from its position.
             For swipe, choose a direction from can_swipe. Direction is finger movement. The host
             reads the screen after one gesture; a submitted gesture does not prove its intended effect.
             Observe once to obtain current facts, then choose an available action or answer; do
@@ -63,7 +68,7 @@ enum VisionCaptureToolDefinitions {
                         "type": .string("string"),
                         "minLength": .integer(1),
                         "description": .string(
-                            "Required for tap, set_boolean, and type. Copy the exact id from the latest choices. Never reuse an ID from an older packet or substitute a label."),
+                            "Required for tap, set_boolean, and type. Copy the exact id from the latest choices. If requires_screenshot is true, request screenshot first and use its new choices. Never reuse an older ID or substitute a label."),
                     ]),
                     "desired_state": .object([
                         "type": .string("boolean"),
@@ -78,6 +83,41 @@ enum VisionCaptureToolDefinitions {
                     ]),
                 ]),
                 "required": .array([.string("action")]),
+            ])),
+        AppToolDefinition(
+            name: historyReadName,
+            description: """
+            Read one page of an archived observation from this task's host memory. This is
+            local historical evidence, not a live app read or an input action. Copy observation_id
+            from an execution_records observation reference in the checkpoint. Omit cursor for
+            the first page; copy returned next_cursor unchanged for each later page. Replies are
+            bounded JSON fragments with byte ranges and a digest. A partial fragment is not a
+            complete observation. Retrieve missing evidence before making a historical claim;
+            action-level proof alone does not prove the user's goal complete. Historical content
+            supplies no execution handles and does not refresh current choices or image evidence.
+            Continue using only the latest current decision packet for navigation. Never replay
+            app input to reconstruct history. Use one tool call per assistant response.
+            """,
+            parameters: .object([
+                "type": .string("object"), "additionalProperties": .bool(false),
+                "properties": .object([
+                    "observation_id": .object([
+                        "type": .string("string"), "minLength": .integer(1),
+                        "maxLength": .integer(64),
+                        "description": .string("An existing history reference such as history_12, never a current target ID."),
+                    ]),
+                    "cursor": .object([
+                        "type": .string("object"), "additionalProperties": .bool(false),
+                        "properties": .object([
+                            "task_id": .object(["type": .string("string")]),
+                            "observation_id": .object(["type": .string("string")]),
+                            "sha256": .object(["type": .string("string")]),
+                            "offset_utf8": .object(["type": .string("integer"), "minimum": .integer(1)]),
+                        ]),
+                        "required": .array(["task_id", "observation_id", "sha256", "offset_utf8"].map(JSONValue.string)),
+                    ]),
+                ]),
+                "required": .array([.string("observation_id")]),
             ])),
     ]
 }

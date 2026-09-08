@@ -17,7 +17,12 @@ struct LiveGenerationPreviewText: NSViewRepresentable {
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
-        let view = NSTextView()
+        let contentSize = scroll.contentSize
+        let view = NSTextView(frame: NSRect(origin: .zero, size: contentSize))
+        view.minSize = NSSize(width: 0, height: contentSize.height)
+        view.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude)
         view.isEditable = false
         view.isSelectable = true
         view.isRichText = false
@@ -28,6 +33,9 @@ struct LiveGenerationPreviewText: NSViewRepresentable {
         view.autoresizingMask = [.width]
         view.textContainerInset = .zero
         view.textContainer?.widthTracksTextView = true
+        view.textContainer?.containerSize = NSSize(
+            width: contentSize.width,
+            height: CGFloat.greatestFiniteMagnitude)
         view.textContainer?.lineFragmentPadding = 0
         view.layoutManager?.allowsNonContiguousLayout = true
         view.isAutomaticLinkDetectionEnabled = false

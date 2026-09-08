@@ -197,6 +197,39 @@ public enum DecodeToolTurn: Codable, Equatable, Sendable {
     case checkpoint(UUID)
 }
 
+public enum DecodeContextCheckpointTrigger: String, Codable, Equatable, Sendable {
+    case capacityForecast = "capacity_forecast"
+    case explicitComparison = "explicit_comparison"
+    case sustainedSlowDecode = "sustained_slow_decode"
+}
+
+/// Exact completed-generation measurements used by the host's optional
+/// performance policy. Rates are derived from totals, never averaged from the
+/// rounded per-step display values.
+public struct DecodePerformanceCheckpointEvidence: Codable, Equatable, Sendable {
+    public static let requiredDecisions = 3
+    public static let minimumGeneratedTokens = 128
+    public static let minimumContextTokens = 20_480
+    public static let maximumWeightedTokensPerSecond = 15.0
+
+    public var completedDecisions: Int
+    public var generatedTokens: Int
+    public var decodeSeconds: Double
+    public var conversationTokens: Int
+
+    public init(completedDecisions: Int, generatedTokens: Int,
+                decodeSeconds: Double, conversationTokens: Int) {
+        self.completedDecisions = completedDecisions
+        self.generatedTokens = generatedTokens
+        self.decodeSeconds = decodeSeconds
+        self.conversationTokens = conversationTokens
+    }
+
+    public var weightedTokensPerSecond: Double {
+        decodeSeconds > 0 ? Double(generatedTokens) / decodeSeconds : 0
+    }
+}
+
 /// Two-phase, idle-only replacement of a satisfied tool handoff. The request
 /// identity is transport-only. checkpointID identifies the immutable transaction.
 public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
@@ -210,6 +243,8 @@ public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
     public var record: String
     public var commit: Bool
     public var force: Bool
+    public var trigger: DecodeContextCheckpointTrigger
+    public var performanceEvidence: DecodePerformanceCheckpointEvidence?
     public var generationAllowance: Int
     public var finalAnswerAllowance: Int
     public var permitsScreenshot: Bool
@@ -217,6 +252,8 @@ public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
     public init(requestID: UUID = UUID(), checkpointID: UUID, sourceEpoch: UUID,
                 sourceTurnIndex: Int, replacementEpoch: UUID, pendingCall: DecodeToolCall,
                 result: DecodeToolResult, record: String, commit: Bool, force: Bool = false,
+                trigger: DecodeContextCheckpointTrigger? = nil,
+                performanceEvidence: DecodePerformanceCheckpointEvidence? = nil,
                 generationAllowance: Int = 8_192, finalAnswerAllowance: Int = 2_048,
                 permitsScreenshot: Bool = true) {
         self.requestID = requestID
@@ -229,6 +266,8 @@ public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
         self.record = record
         self.commit = commit
         self.force = force
+        self.trigger = trigger ?? (force ? .explicitComparison : .capacityForecast)
+        self.performanceEvidence = performanceEvidence
         self.generationAllowance = generationAllowance
         self.finalAnswerAllowance = finalAnswerAllowance
         self.permitsScreenshot = permitsScreenshot
@@ -247,12 +286,14 @@ public struct DecodeContextCheckpointReceipt: Codable, Equatable, Sendable {
     public var retainedImageCount: Int
     public var retainedImageRows: Int
     public var retainedFeatureBytes: Int
+    public var performanceMinimumSavingsTokens: Int?
     public var preparationSeconds: Double
 
     public init(checkpointID: UUID, replacementEpoch: UUID, committed: Bool, needed: Bool,
                 existingPromptTokens: Int, replacementPromptTokens: Int?, reserveTokens: Int,
                 resultAllowanceTokens: Int, retainedImageCount: Int, retainedImageRows: Int,
-                retainedFeatureBytes: Int, preparationSeconds: Double) {
+                retainedFeatureBytes: Int, performanceMinimumSavingsTokens: Int? = nil,
+                preparationSeconds: Double) {
         self.checkpointID = checkpointID
         self.replacementEpoch = replacementEpoch
         self.committed = committed
@@ -264,6 +305,7 @@ public struct DecodeContextCheckpointReceipt: Codable, Equatable, Sendable {
         self.retainedImageCount = retainedImageCount
         self.retainedImageRows = retainedImageRows
         self.retainedFeatureBytes = retainedFeatureBytes
+        self.performanceMinimumSavingsTokens = performanceMinimumSavingsTokens
         self.preparationSeconds = preparationSeconds
     }
 }
@@ -477,6 +519,9 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var parserFailureJSON: String?
     /// Runtime-confirmed rollback and zero captured calls. Absent means no retry.
     public var parserFailureCanRegenerateToolResult: Bool?
+    /// Typed runtime receipt after discarding only an unfinished repeated response.
+    /// The event generation/epoch still bind it to the owning request.
+    public var thoughtRepetitionRecoveryJSON: String?
     /// Process-captured tool-template choice, acknowledged on model readiness.
     public var toolThinkingEnabled: Bool?
     public var structuredProgress: DecodeStructuredProgress?

@@ -198,6 +198,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             let task = Task.detached(priority: .userInitiated) { [self] in
                 var pendingThinkingToken: AppTokenEvent?
                 var measurementReceiver: (id: UUID, responses: DecodeServiceResponseRouter)?
+                var recoveryTerminal: (error: AppInferenceError, diagnostics: AppDiagnostics)?
                 do {
                     try request.validate()
                     guard let handles = currentHandles() else {
@@ -400,15 +401,37 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                                 evidence = try? JSONDecoder().decode(
                                     StructuredToolFailureEvidence.self, from: data)
                             }
-                            if let canRegenerate = event.parserFailureCanRegenerateToolResult {
+                            if let json = event.thoughtRepetitionRecoveryJSON {
+                                if json.utf8.count <= 4_096,
+                                   event.parserFailureCanRegenerateToolResult == nil,
+                                   event.parserFailureJSON == nil,
+                                   event.conversationEpoch == request.conversationEpoch,
+                                   let data = json.data(using: .utf8),
+                                   let recovery = try? JSONDecoder().decode(ThoughtRepetitionRecovery.self, from: data),
+                                   recovery.restoredTokenCount >= 0,
+                                   recovery.restoredTokenCount <= request.maxContextTokens,
+                                   (16...128).contains(recovery.blockTokens), recovery.repetitions == 8,
+                                   recovery.generatedTokens > 0,
+                                   recovery.generatedTokens <= request.maxContextTokens,
+                                   recovery.generatedTokens >= recovery.thinkingTokens,
+                                   recovery.thinkingTokens >= recovery.blockTokens * 8 {
+                                    error = .repeatedThought(recovery)
+                                } else {
+                                    error = .invalidRequest("The repeated-generation recovery receipt was invalid. No retry was admitted.")
+                                }
+                            } else if let canRegenerate = event.parserFailureCanRegenerateToolResult {
                                 error = .structuredToolFailure(
                                     message: message, canRegenerateToolResult: canRegenerate,
                                     evidence: evidence)
                             } else {
                                 error = .unknown(message)
                             }
-                            continuation.yield(.failed(error, partial: diagnostics))
-                            continuation.finish(throwing: error)
+                            if case .repeatedThought = error {
+                                recoveryTerminal = (error, diagnostics)
+                            } else {
+                                continuation.yield(.failed(error, partial: diagnostics))
+                                continuation.finish(throwing: error)
+                            }
                         case .lineageLost:
                             // Carried across as its own case, not flattened into
                             // `.unknown`: the app has to clear the conversation
@@ -445,6 +468,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                     await AgentInferenceTrace.shared?.runtimeMeasurementReceptionEnded(
                         capture: capture, conversation: request.conversationEpoch,
                         turn: request.turnIndex)
+                }
+                if let recoveryTerminal {
+                    continuation.yield(.failed(recoveryTerminal.error, partial: recoveryTerminal.diagnostics))
+                    continuation.finish(throwing: recoveryTerminal.error)
                 }
             }
             continuation.onTermination = { [weak self] termination in

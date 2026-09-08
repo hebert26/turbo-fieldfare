@@ -18,6 +18,7 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
     case unknown(String)
     case structuredToolFailure(
         message: String, canRegenerateToolResult: Bool, evidence: StructuredToolFailureEvidence?)
+    case repeatedThought(ThoughtRepetitionRecovery)
 
     public var description: String { userMessage }
 
@@ -45,6 +46,10 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
             return "This conversation can no longer continue: \(message) Start a new chat."
         case .unknown(let message), .structuredToolFailure(let message, _, _):
             return message
+        case .repeatedThought(let recovery):
+            return recovery.canRetryToolResult
+                ? "The unfinished model response repeated itself. Its prior tool boundary was restored. No action from that response was executed."
+                : "The unfinished model response repeated itself at a boundary that does not support automatic recovery. No action from that response was executed."
         }
     }
 

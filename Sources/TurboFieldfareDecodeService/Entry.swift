@@ -277,6 +277,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     && measurementSupported ? RuntimeMeasurementCapture() : nil
                 let outbox = DecodeServiceOutbox(
                     generationID: request.generationID,
+                    conversationEpoch: request.conversationEpoch,
                     towerBytes: { client.currentVisionTowerBytes },
                     conversationTokens: {
                         isConversationTurn ? client.currentConversationTokens : nil

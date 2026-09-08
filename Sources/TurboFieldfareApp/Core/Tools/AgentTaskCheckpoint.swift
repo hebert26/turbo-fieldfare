@@ -11,6 +11,8 @@ struct AgentContextCheckpointProposal: Sendable {
     let record: String
     let commit: Bool
     let force: Bool
+    let trigger: DecodeContextCheckpointTrigger
+    let performanceEvidence: DecodePerformanceCheckpointEvidence?
     let permitsScreenshot: Bool
 }
 
@@ -18,6 +20,28 @@ struct AgentContextCheckpointProposal: Sendable {
 /// Exact user data and every settled execution record survive. Repeated screen
 /// facts share a reference; historical choice IDs and private handles do not.
 struct AgentTaskCheckpoint: Sendable {
+    static let maximumAssessmentBytes = 2_048
+    static let maximumHistoryReplyBytes = 4_096
+    static let maximumRecentHistoricalObservationBytes = 6_144
+    static let maximumRecentHistoricalObservationCount = 3
+    /// The existing model-only format correction appends short host feedback.
+    /// Reserve its space so even that corrected history result stays bounded.
+    static let historyFeedbackReserveBytes = 512
+
+    enum AssessmentCapture: String, Sendable {
+        case absent
+        case retained = "model_partial_assessment"
+        case oversized = "not_retained_oversize"
+
+        var description: String {
+            switch self {
+            case .absent: "No optional progress note was supplied. The retained task facts remain available."
+            case .retained: "A whole optional model progress note was retained. It is partial and unverified, not a goal-completion certificate."
+            case .oversized: "The model note exceeded 2,048 UTF-8 bytes. Its full text remains in the transcript and audit; no truncated summary was retained. This does not stop navigation."
+            }
+        }
+    }
+
     let taskID = UUID()
     private(set) var revision = 0
     private var userInstructions: [JSONValue] = []
@@ -29,18 +53,148 @@ struct AgentTaskCheckpoint: Sendable {
     private var observations: [String: JSONValue] = [:]
     private var observationIDs: [String: String] = [:]
     private var assessments: [JSONValue] = []
+    private var latestAssessment: JSONValue?
+    private var assessmentCapture = AssessmentCapture.absent
+    /// Local evidence reads are auditable but are not app execution or new
+    /// observations. Results share their existing strings, not a copied history.
+    private var historyReads: [(call: AppToolCall, result: AppToolResult)] = []
+    private var interruptedGenerations: [ThoughtRepetitionRecovery] = []
+    private var recoveryObservations: [(afterCallID: String, result: AppToolResult,
+        outcome: String, requestIDs: [UUID], session: String?)] = []
+    private struct HistoryCursor: Hashable, Sendable {
+        let observationID: String
+        let digest: String
+        let offset: Int
+    }
+    private var issuedHistoryCursors: Set<HistoryCursor> = []
 
     mutating func appendUser(_ text: String, images: [AppImageAttachment]) {
         userInstructions.append(.object([
             "text_verbatim": .string(text),
             "images": .array(images.map(Self.imageReference)),
         ]))
+        latestAssessment = nil
+        assessmentCapture = .absent
     }
 
-    mutating func appendAssessment(_ text: String, source: String) {
-        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        assessments.append(.object(["source": .string(source), "text": .string(text),
-            "status": .string("model assessment, not independently verified")]))
+    @discardableResult
+    mutating func appendAssessment(_ text: String, source: String) -> AssessmentCapture {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .absent }
+        let value = JSONValue.object(["source": .string(source), "text": .string(text),
+            "revision": .integer(Int64(revision)),
+            "status": .string(AssessmentCapture.retained.rawValue),
+            "scope": .string("Partial model assessment, not exhaustive or independently verified. Newer user instructions and execution facts take precedence.")])
+        assessments.append(value)
+        if text.utf8.count <= Self.maximumAssessmentBytes {
+            latestAssessment = value
+            assessmentCapture = .retained
+        } else {
+            latestAssessment = nil
+            assessmentCapture = .oversized
+        }
+        return assessmentCapture
+    }
+
+    mutating func appendHistoryRead(call: AppToolCall, result: AppToolResult) {
+        historyReads.append((call, result))
+    }
+
+    /// Pages one existing sanitized projection. No private selectors, old
+    /// choice IDs, raw transport payloads or live app reads enter this route.
+    mutating func historyReply(arguments: JSONValue) throws -> (content: String, invalidReason: String?) {
+        try Task.checkCancellation()
+        guard let arguments = arguments.objectValue,
+              (Set(arguments.keys) == ["observation_id"]
+                || Set(arguments.keys) == ["observation_id", "cursor"]),
+              case .string(let observationID)? = arguments["observation_id"],
+              let observation = observations[observationID] else {
+            return try historyFailure("Use an existing execution_records observation reference as observation_id, with only an optional returned cursor.")
+        }
+        let serialized = try Self.modelObservation(observation).encoded()
+        let bytes = Array(serialized.utf8)
+        let digest = Self.digest(serialized)
+        var offset = 0
+        if let supplied = arguments["cursor"] {
+            guard let cursor = supplied.objectValue,
+                  Set(cursor.keys) == ["task_id", "observation_id", "sha256", "offset_utf8"],
+                  cursor["task_id"] == .string(taskID.uuidString),
+                  cursor["observation_id"] == .string(observationID),
+                  cursor["sha256"] == .string(digest),
+                  case .integer(let value)? = cursor["offset_utf8"],
+                  let position = Int(exactly: value), position > 0, position < bytes.count,
+                  bytes[position] & 0xC0 != 0x80,
+                  issuedHistoryCursors.contains(HistoryCursor(
+                    observationID: observationID, digest: digest, offset: position)) else {
+                return try historyFailure("The cursor does not identify a UTF-8 boundary in this task's exact immutable observation. Copy its returned next_cursor unchanged, or omit cursor for the first page.")
+            }
+            offset = position
+        }
+        let sourceEvent = events.first {
+            $0.objectValue?["observation"] == .string(observationID)
+        }?.objectValue?["event"] ?? .null
+        func page(endingAt end: Int) throws -> String {
+            let next: JSONValue = end == bytes.count ? .null : .object([
+                "task_id": .string(taskID.uuidString), "observation_id": .string(observationID),
+                "sha256": .string(digest), "offset_utf8": .integer(Int64(end)),
+            ])
+            return try JSONValue.object([
+                "origin": .string("host_local_history"), "historical_only": .bool(true),
+                "task_id": .string(taskID.uuidString), "observation_id": .string(observationID),
+                "source_event": sourceEvent, "projection_sha256": .string(digest),
+                "total_utf8_bytes": .integer(Int64(bytes.count)),
+                "start_utf8": .integer(Int64(offset)), "end_utf8": .integer(Int64(end)),
+                "record_complete_in_this_reply": .bool(offset == 0 && end == bytes.count),
+                "page_is_final": .bool(end == bytes.count), "next_cursor": next,
+                "content_json_fragment": .string(String(decoding: bytes[offset..<end], as: UTF8.self)),
+                "instruction": .string("Historical evidence only, not a new screen or action result. Incomplete fragments must not be treated as a full record. Read remaining pages needed for a claim. Use only choices from the latest current decision packet. No app input was sent or replayed."),
+            ]).encoded()
+        }
+        // Bound the encoded reply, including escaped fragment/cursor metadata,
+        // rather than assuming a byte of source text is a byte of JSON output.
+        // A final page replaces its cursor with null, so it can fit even when
+        // a shorter partial page cannot. Check that bounded remainder first.
+        if bytes.count - offset <= Self.maximumHistoryReplyBytes {
+            let final = try page(endingAt: bytes.count)
+            if final.utf8.count <= Self.maximumHistoryReplyBytes - Self.historyFeedbackReserveBytes {
+                return (final, nil)
+            }
+        }
+        var lower = 1
+        var upper = min(Self.maximumHistoryReplyBytes, bytes.count - offset)
+        var fitting: String?
+        var fittingEnd = offset
+        while lower <= upper {
+            try Task.checkCancellation()
+            let count = lower + (upper - lower) / 2
+            var end = offset + count
+            while end < bytes.count, end > offset, bytes[end] & 0xC0 == 0x80 { end -= 1 }
+            guard end > offset else { lower = count + 1; continue }
+            let candidate = try page(endingAt: end)
+            if candidate.utf8.count <= Self.maximumHistoryReplyBytes - Self.historyFeedbackReserveBytes {
+                fitting = candidate
+                fittingEnd = end
+                lower = count + 1
+            } else {
+                upper = count - 1
+            }
+        }
+        guard let fitting else {
+            return try historyFailure("This historical page could not fit the reply bound. Its evidence remains in the host audit and has not been provided. Leave claims requiring it unverified.", invalidRequest: false)
+        }
+        if fittingEnd < bytes.count {
+            issuedHistoryCursors.insert(HistoryCursor(
+                observationID: observationID, digest: digest, offset: fittingEnd))
+        }
+        return (fitting, nil)
+    }
+
+    private func historyFailure(_ reason: String, invalidRequest: Bool = true) throws -> (content: String, invalidReason: String?) {
+        let content = try JSONValue.object(["origin": .string("host_local_history"),
+            "historical_only": .bool(true),
+            "status": .string(invalidRequest ? "invalid_history_request" : "history_page_unavailable"),
+            "instruction": .string(reason),
+            "app_input_sent": .bool(false)]).encoded()
+        return (content, invalidRequest ? reason : nil)
     }
 
     mutating func appendSettled(call: AppToolCall, result: AppToolResult,
@@ -93,24 +247,210 @@ struct AgentTaskCheckpoint: Sendable {
 
     mutating func nextRevision() { revision += 1 }
 
-    func render(currentPacket: String, safety: JSONValue) throws -> String {
+    mutating func recordInterruptedGeneration(_ receipt: ThoughtRepetitionRecovery) {
+        interruptedGenerations.append(receipt)
+    }
+
+    /// Additional host observation, not another execution of the preceding call.
+    mutating func appendRecoveryObservation(afterCallID: String, result: AppToolResult,
+        outcome: String, requestIDs: [UUID], session: String?) throws {
+        recoveryObservations.append((afterCallID, result, outcome, requestIDs, session))
+        let packet = try Self.decodePacket(result.content).packet
+        let observation = Self.historicalObservation(packet)
+        let digest = Self.digest(try observation.encoded())
+        let id = observationIDs[digest] ?? "history_\(observations.count + 1)"
+        observationIDs[digest] = id
+        observations[id] = observation
+        events.append(.object([
+            "event": .integer(Int64(events.count + 1)),
+            "origin": .string("host_read_only_generation_recovery"),
+            "result": .object(["instruction": .string("The host obtained additional observation evidence after discarding an unfinished repeated model response. No application action was replayed. The earlier action retains its original verdict and delivery scope.")]),
+            "observation": .string(id),
+            "guidance": packet.objectValue?["guidance"] ?? .null,
+            "image_source_call": .string(afterCallID),
+        ]))
+    }
+
+    func render(currentPacket: String, safety: JSONValue,
+                pendingHistoryResult: AppToolResult? = nil,
+                currentPacketWasRefreshed: Bool = true) throws -> String {
+        try Task.checkCancellation()
         let decoded = try Self.decodePacket(currentPacket)
+        let pendingHistory: JSONValue
+        let pendingHistoryFeedback: JSONValue
+        if let pendingHistoryResult {
+            guard pendingHistoryResult.name == VisionCaptureToolDefinitions.historyReadName,
+                  pendingHistoryResult.imageAttachments.isEmpty,
+                  pendingHistoryResult.content.utf8.count <= Self.maximumHistoryReplyBytes else {
+                throw VisionCaptureAgentError.malformedCall("The pending local history result was invalid.")
+            }
+            // The real call/result binding remains in the checkpoint proposal.
+            // Keep the complete local page, including its required cursor and
+            // fragment metadata, without repeating that transport wrapper.
+            let pending = try Self.decodePacket(pendingHistoryResult.content)
+            pendingHistory = pending.packet
+            pendingHistoryFeedback = pending.feedback.map(JSONValue.string) ?? .null
+        } else {
+            pendingHistory = .null
+            pendingHistoryFeedback = .null
+        }
+        let executionRecords = try events.map { event in
+            try Task.checkCancellation()
+            return Self.modelExecutionRecord(event)
+        }
+        let recentHistoricalObservations = try recentHistoricalObservations()
         let value = JSONValue.object([
-            "schema_version": .integer(1), "task_id": .string(taskID.uuidString),
+            "schema_version": .integer(2), "task_id": .string(taskID.uuidString),
             "revision": .integer(Int64(revision)),
             "user_instructions_in_order": .array(userInstructions),
-            "execution_records": .array(events),
-            "historical_observations": .object(observations.mapValues(Self.modelObservation)),
-            "model_assessments": .array(assessments),
+            "execution_records": .array(executionRecords),
+            "history_access": .object(["tool": .string(VisionCaptureToolDefinitions.historyReadName),
+                "observation_count": .integer(Int64(observations.count)),
+                "instruction": .string("Full historical observations remain in the host audit. Use each execution_records observation reference as observation_id with task_history_read before relying on an omitted fact. Historical references are not execution targets. A missing observation or partial page cannot establish completion.")]),
+            "recent_historical_observations": recentHistoricalObservations,
+            "model_progress_note": latestAssessment ?? .null,
+            "progress_note_capture": .string(assessmentCapture.rawValue),
+            "pending_history_result": pendingHistory,
+            "pending_history_feedback": pendingHistoryFeedback,
             "unfinished_work": .string("Continue the latest user goal under every retained constraint. A tool action verdict proves only that action at its recorded scope. Requested outcomes remain unverified unless their saved observation evidence establishes them. Check missing, incorrect, disputed and unfinished outcomes. Do not repeat submitted input merely because context was condensed."),
-            "safety_state": safety,
+            "safety_state": Self.modelSafety(
+                safety, currentPacketWasRefreshed: currentPacketWasRefreshed),
             "current_decision_packet": decoded.packet,
             "current_packet_feedback": decoded.feedback.map(JSONValue.string) ?? .null,
         ])
+        try Task.checkCancellation()
+        let currentEvidenceNote = currentPacketWasRefreshed
+            ? "No old screenshot is claimed to agree with the fresh read."
+            : "The current decision packet is the latest settled tool result. It was not produced by an extra compaction read. Retained historical images are not claimed as current evidence."
+        let continuationNote = currentPacketWasRefreshed
+            ? "Continue from current_decision_packet, the current screen read and its allowed choices."
+            : "Continue from current_decision_packet, the latest settled observation and its allowed choices. Normal host capability checks still apply before any mutation."
         return """
-        Host checkpoint of an interrupted inference segment at a settled tool result. No final answer or goal completion was generated at this boundary. Resume the original user task. The following JSON separates user instructions from untrusted observed app content and model assessments. Historical observations describe what was seen then, not current state. Only current_decision_packet supplies current choices. Historical references and image labels are never executable targets. Preserve unknown delivery, failed proof and non-replay restrictions. Pixels retain their original observation provenance; no old screenshot is claimed to agree with the fresh read. All original images follow as actual image input.
+        Host checkpoint of an interrupted inference segment at a settled tool result. No final answer or goal completion was generated at this boundary. Resume the original user task. The following JSON separates user instructions from untrusted observed app content and partial model assessments. Only current_decision_packet supplies current choices. Full historical observations are available through task_history_read; retrieve evidence needed for a historical claim instead of replaying input. A pending_history_result is the actual local reply owed at this boundary. Historical references and image labels are never executable targets. Preserve unknown delivery, failed proof and non-replay restrictions. Any retained original images precede this record as actual historical image input with their original provenance. \(currentEvidenceNote)
+        If useful, include a brief visible progress note (about 60–100 words) before your next ordinary tool call: evidenced progress, uncertainty, and remaining work. Cite event/observation references for historical claims and retrieve omitted evidence when needed. This optional note is partial model assessment, never proof of goal completion. Omission does not block navigation. Do not repeat an action to reconstruct history or end the task merely because context was condensed.
         \(try value.encoded())
+
+        \(continuationNote) Historical screenshots describe earlier inputs; do not treat them as the current screen or return to an earlier screen to reconcile them. When current_image_evidence is false, no retained screenshot supplies current visual evidence. If a current target needs an image to be understood, request a new screenshot through the offered action. Preserve refusals and non-replay restrictions. An optional progress note may be omitted; it must not delay the next supported decision or turn an action verdict into goal completion.
         """
+    }
+
+    /// A small, computed continuity window for checkpoint rebuilds. These are
+    /// historical facts only; current_decision_packet remains the sole source
+    /// of executable choices.
+    private func recentHistoricalObservations() throws -> JSONValue {
+        var selectedIDs: Set<String> = []
+        var newestFirst: [JSONValue] = []
+        for event in events.reversed() {
+            try Task.checkCancellation()
+            guard newestFirst.count < Self.maximumRecentHistoricalObservationCount,
+                  let body = event.objectValue,
+                  case .string(let observationID)? = body["observation"],
+                  selectedIDs.insert(observationID).inserted,
+                  let observation = observations[observationID],
+                  observation.objectValue?["observation"]?.objectValue?["state"]
+                    == .string("current") else { continue }
+            let item = JSONValue.object([
+                "historical_only": .bool(true),
+                "observation_id": .string(observationID),
+                "source_event": body["event"] ?? .null,
+                "content": Self.modelObservation(observation),
+            ])
+            let candidate = JSONValue.object([
+                "recent_historical_observations": .array(
+                    Array((newestFirst + [item]).reversed()))
+            ])
+            guard try candidate.encoded().utf8.count
+                    <= Self.maximumRecentHistoricalObservationBytes else { continue }
+            newestFirst.append(item)
+        }
+        return .array(Array(newestFirst.reversed()))
+    }
+
+    /// Render decision facts only. Stored events and exact audit handoffs stay
+    /// unchanged, including the private evidence used by the live tool loop.
+    private static func modelExecutionRecord(_ event: JSONValue) -> JSONValue {
+        let source = event.objectValue ?? [:]
+        var record = source.filter {
+            ["event", "request", "target", "observation", "origin", "guidance",
+             "host_feedback", "image_source_call"].contains($0.key)
+        }
+        let original = source["result"]?.objectValue ?? [:]
+        var result = original.filter {
+            ["outcome", "observation_outcome", "outcome_note", "instruction", "guidance",
+             "navigation_fact", "direction", "dispatch_attempted", "submission_started",
+             "delivery_acknowledged", "delivery_unknown", "is_error", "recoverable",
+             "message", "screen_changed"].contains($0.key)
+        }
+        // Retain action-level proof and readable explanations. Provider names
+        // and diagnostic reason codes are not additional execution verdicts.
+        result["proof"] = modelFields(original["proof"], keys: ["verdict", "action", "reason"])
+        result["launch"] = modelFields(original["launch"], keys: ["verdict", "disposition",
+            "mutation_sent", "device_readiness", "failed_proof_stage", "process_state", "foreground_state"])
+        result["current_observation"] = modelFields(original["current_observation"],
+            keys: ["outcome", "requested_foreground_app_proven"])
+        result["image_observation"] = modelFields(original["image_observation"],
+            keys: ["state", "order", "visual_agreement", "image_source", "read_source"])
+        result["system_alert"] = original["system_alert"]
+        if let refusal = original["refusal"]?.objectValue {
+            // Each currently produced refusal also carries its plain instruction.
+            // Keep its specific meaning without exposing cache or routing codes.
+            let fact: String
+            switch refusal["code"] {
+            case .string("GUARDED_TARGET_REJECTED")?:
+                fact = "The exact target was rejected before submission. It must not be sent again."
+            case .string("CACHE_ACTION_CAPABILITY_INVALID")?:
+                fact = "The action's permission expired before input was sent."
+            case .string("OBSERVED_TARGET_NOT_PUBLISHED")?:
+                fact = "The observed target was not offered as a current executable action."
+            default:
+                fact = "A refusal was recorded. Its detailed cause is not represented here. Retain the accompanying instructions and do not infer successful execution."
+            }
+            result["refusal"] = .object(["fact": .string(fact)])
+        }
+        if let refusal = original["observation_refusal"]?.objectValue {
+            var facts = refusal.filter {
+                ["dispatch_attempted", "submission_started", "delivery_acknowledged", "delivery_unknown"].contains($0.key)
+            }
+            facts["fact"] = .string(refusal["recovery_reason"] == .string("observation_topology_changed_before_completion")
+                ? "The screen changed before the read could complete. These delivery facts belong to that read, not to the preceding input."
+                : "A read was refused. Its detailed cause is not represented here. These delivery facts do not describe the preceding input.")
+            result["observation_refusal"] = .object(facts)
+        }
+        if let recovery = original["stale_recovery"]?.objectValue {
+            result["stale_recovery"] = .object(recovery.filter {
+                ["dispatch_attempted", "screen_changed"].contains($0.key)
+            })
+            if recovery["screen_changed"] == .bool(false) {
+                let instruction = JSONValue.string("The action was not sent. A follow-up read found unchanged screen content. The refused input was not retried. Any historical confirmation offer is expired. Use only the current choices.")
+                result["instruction"] = instruction
+                if record["guidance"] == original["instruction"] { record["guidance"] = instruction }
+            }
+        }
+        record["result"] = .object(result)
+        return .object(record)
+    }
+
+    private static func modelSafety(
+        _ safety: JSONValue, currentPacketWasRefreshed: Bool
+    ) -> JSONValue {
+        let original = safety.objectValue ?? [:]
+        var facts: [String: JSONValue] = [:]
+        facts["read_only_recovery_required"] = original["read_only_recovery_required"]
+        facts["uncertain_alert_press"] = modelFields(original["uncertain_alert_press"], keys: ["button"])
+        let targetRestriction = currentPacketWasRefreshed
+            ? "Earlier targets and confirmation offers are expired."
+            : "Historical targets and confirmation offers are expired. Targets in current_decision_packet remain choices only for their listed operations and still require normal host capability checks."
+        facts["restrictions"] = .string(targetRestriction + " Previous refusals and retry limits remain in force. Do not retry or replace delivery-unknown input. Use only permitted current read-only recovery. An action verdict alone does not complete a user goal.")
+        return .object(facts)
+    }
+
+    /// Preserve explicit null and missing as distinct facts. Never manufacture
+    /// a new value/status when the original did not supply it.
+    private static func modelFields(_ value: JSONValue?, keys: Set<String>) -> JSONValue? {
+        guard let value else { return nil }
+        if value == .null { return .null }
+        guard let object = value.objectValue else { return nil }
+        return .object(object.filter { keys.contains($0.key) })
     }
 
     private static func historicalObservation(_ packet: JSONValue) -> JSONValue {
@@ -179,8 +519,13 @@ struct AgentTaskCheckpoint: Sendable {
     private static func readableTarget(_ target: JSONValue?) -> JSONValue? {
         guard let target = target?.objectValue else { return nil }
         var result: [String: JSONValue] = [:]
-        for key in ["label", "role", "value", "position", "selected", "enabled", "current_state"] {
+        for key in ["label", "role", "position", "selected", "enabled", "current_state"] {
             if let value = target[key], value != .null { result[key] = value }
+        }
+        // Already-sanitized field facts: preserve supplied status and explicit
+        // null without turning an absent value into empty or available text.
+        for key in ["value", "value_status"] {
+            if let value = target[key] { result[key] = value }
         }
         if result["label"] == nil, target["selector_kind"] == .string("placeholder") {
             result["label"] = target["selector_at_that_time"]

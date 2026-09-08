@@ -366,7 +366,9 @@ actor RealInferenceSession {
             record: request.record, imageProvenance: conversationImageProvenance + addedProvenance,
             generationAllowance: request.generationAllowance,
             finalAnswerAllowance: request.finalAnswerAllowance, permitsScreenshot: request.permitsScreenshot,
-            force: request.force, commit: request.commit, checkCancellation: check)
+            force: request.force,
+            performanceRequested: request.trigger == .sustainedSlowDecode,
+            commit: request.commit, checkCancellation: check)
         if request.commit {
             conversationImageProvenance.append(contentsOf: addedProvenance)
             conversationTokens.withLock { $0 = 0 }
@@ -380,6 +382,7 @@ actor RealInferenceSession {
             resultAllowanceTokens: receipt.resultAllowanceTokens,
             retainedImageCount: receipt.retainedImageCount, retainedImageRows: receipt.retainedImageRows,
             retainedFeatureBytes: receipt.retainedFeatureBytes,
+            performanceMinimumSavingsTokens: receipt.performanceMinimumSavingsTokens,
             preparationSeconds: Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
     }
 
@@ -734,6 +737,7 @@ actor RealInferenceSession {
                     checkCancellation: { try Task.checkCancellation() }, shouldStop: stopFlagReader(),
                     captureToolFailureEvidence: request.captureToolFailureEvidence,
                     maximumConsecutiveInvisibleTokens: invisibleTokenLimit, captureThoughtPreview: true,
+                    detectThoughtRepetition: true,
                     onProgress: report,
                     onStructuredProgress: { progress.updateStructuredProgress($0) })
                 turn = completion.turn
@@ -751,6 +755,7 @@ actor RealInferenceSession {
                     captureToolFailureEvidence: request.captureToolFailureEvidence,
                     maximumConsecutiveInvisibleTokens: invisibleTokenLimit,
                     captureThoughtPreview: true,
+                    detectThoughtRepetition: true,
                     onProgress: report,
                     onStructuredProgress: { progress.updateStructuredProgress($0) })
                 turn = completion.turn
@@ -772,6 +777,7 @@ actor RealInferenceSession {
                     captureToolFailureEvidence: request.captureToolFailureEvidence,
                     maximumConsecutiveInvisibleTokens: invisibleTokenLimit,
                     captureThoughtPreview: true,
+                    detectThoughtRepetition: true,
                     onProgress: report,
                     onStructuredProgress: { progress.updateStructuredProgress($0) })
                 turn = completion.turn
@@ -990,6 +996,11 @@ actor RealInferenceSession {
                            continuation: continuation,
                            prefill: diagnostics,
                            forcePartialDiagnostics: true)
+        } catch let recovery as ThoughtRepetitionRecovery {
+            clearMeasurementCapture(measurementCapture)
+            failGeneration(.repeatedThought(recovery),
+                           request: request, memorySampler: memorySampler,
+                           progress: progress, continuation: continuation)
         } catch let failure as StructuredToolFailure {
             clearMeasurementCapture(measurementCapture)
             failGeneration(.structuredToolFailure(

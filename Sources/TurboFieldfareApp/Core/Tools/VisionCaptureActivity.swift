@@ -27,6 +27,9 @@ public struct AppAgentActivity: Identifiable, Equatable, Sendable {
         case localProposal
         case modelInput(attempt: Int, isFormatCorrection: Bool)
         case modelResult(callID: String, toolName: String, imageCount: Int)
+        /// Host display status, never a tool result or model instruction.
+        case contextCompaction
+        case generationRecovery
     }
 
     public enum Status: Equatable, Sendable {
@@ -77,6 +80,7 @@ enum VisionCaptureActivityEvent: Sendable {
         elapsedSeconds: Double)
     case localRejection(id: UUID, call: AppToolCall, reason: String)
     case screenshot(id: UUID, image: AppImageAttachment)
+    case generationRecovery(id: UUID, text: String, status: AppAgentActivity.Status)
 }
 
 extension AppAgentActivity {

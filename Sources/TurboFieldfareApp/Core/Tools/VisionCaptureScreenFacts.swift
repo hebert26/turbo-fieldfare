@@ -10,11 +10,14 @@ struct VisionCaptureScreenFacts {
     }
 
     private struct Element {
+        let elementID: String?
         let role: String
         let type: String?
         let identifier: String?
         let label: String?
+        let placeholder: String?
         let value: String?
+        let valueStatus: String?
         let enabled: Bool?
         let selected: Bool?
         let position: JSONValue?
@@ -30,13 +33,29 @@ struct VisionCaptureScreenFacts {
                   let role = Self.text(object["role"]) else { return nil }
             let label = Self.rawText(object["label"])
             let type = Self.text(object["type"])
+            let metadata = object["editable_field_metadata"]?.objectValue
+            let secure = role == "secure_text_field" || type == "XCUIElementTypeSecureTextField"
+                || metadata?["type"] == .string("XCUIElementTypeSecureTextField")
+            let returnedStatus = Self.text(object["value_status"])
+            let rawValue = Self.rawText(object["value"])
+            let valueStatus: String?
+            if secure { valueStatus = "secure" }
+            else if let returnedStatus {
+                valueStatus = ["available", "redacted", "omitted", "unavailable", "placeholder_ambiguous"]
+                    .contains(returnedStatus)
+                    ? returnedStatus : "unavailable"
+            } else if object["value_hash"] != nil || rawValue?.contains("[REDACTED]") == true {
+                valueStatus = "redacted"
+            } else { valueStatus = nil }
             return Element(
+                elementID: Self.rawText(object["element_id"]),
                 role: role,
                 type: type,
                 identifier: Self.rawText(object["identifier"]),
                 label: label == Self.rawText(object["element_id"]) ? nil : label,
-                value: role == "secure_text_field" || type == "XCUIElementTypeSecureTextField"
-                    ? nil : Self.rawText(object["value"]),
+                placeholder: Self.observedPlaceholder(metadata: metadata, type: type),
+                value: valueStatus == nil || valueStatus == "available" ? rawValue : nil,
+                valueStatus: valueStatus == "available" && rawValue == nil ? "unavailable" : valueStatus,
                 enabled: Self.boolean(object["enabled"]),
                 selected: Self.boolean(object["selected"]),
                 position: Self.position(in: object))
@@ -55,10 +74,10 @@ struct VisionCaptureScreenFacts {
     }
 
     func properties(
-        selector: String, role: String, selectorKind: String? = nil
+        selector: String, role: String, selectorKind: String? = nil, elementID: String? = nil
     ) -> [String: JSONValue] {
         guard let index = matchingIndex(
-            selector: selector, role: role, selectorKind: selectorKind) else { return [:] }
+            selector: selector, role: role, selectorKind: selectorKind, elementID: elementID) else { return [:] }
         let element = elements[index]
         var properties: [String: JSONValue] = [:]
         if let label = element.label.flatMap(Self.displayText), label != selector {
@@ -67,6 +86,7 @@ struct VisionCaptureScreenFacts {
         if let selected = element.selected { properties["selected"] = .bool(selected) }
         if let enabled = element.enabled { properties["enabled"] = .bool(enabled) }
         if let value = element.value { properties["value"] = .string(value) }
+        if let status = element.valueStatus { properties["value_status"] = .string(status) }
         if let position = element.position { properties["position"] = position }
         return properties
     }
@@ -123,7 +143,9 @@ struct VisionCaptureScreenFacts {
                   let role = Self.text(object["role"]),
                   let selector = Self.rawText(object["selector"]) else { continue }
             let selectorKind = Self.text(object["selector_kind"])
-            if let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind) {
+            if let index = matchingIndex(
+                selector: selector, role: role, selectorKind: selectorKind,
+                elementID: Self.rawText(object["element_id"])) {
                 excluded.insert(index)
             }
         }
@@ -156,24 +178,42 @@ struct VisionCaptureScreenFacts {
     }
 
     private func matchingIndex(
-        selector: String, role: String, selectorKind: String? = nil
+        selector: String, role: String, selectorKind: String? = nil, elementID: String? = nil
     ) -> Int? {
         func exactMatch(_ candidate: String?) -> Bool {
             candidate?.utf8.elementsEqual(selector.utf8) == true
         }
+        // A placeholder alias must bind to one returned element, not a rounded
+        // position or another field with a coincidentally matching label.
+        if selectorKind == "placeholder", elementID == nil { return nil }
+        if let elementID {
+            guard !elementID.isEmpty,
+                  elements.filter({ $0.elementID?.utf8.elementsEqual(elementID.utf8) == true }).count == 1
+            else { return nil }
+        }
         let matches = elements.indices.filter { index in
             let element = elements[index]
             guard element.role == role else { return false }
+            if let elementID, element.elementID?.utf8.elementsEqual(elementID.utf8) != true { return false }
             switch selectorKind {
             case "identifier": return exactMatch(element.identifier)
             case "label": return exactMatch(element.label)
+            case "placeholder": return exactMatch(element.placeholder)
             case nil: return exactMatch(element.identifier) || exactMatch(element.label)
-            // The observation has no placeholder field. Do not infer its
-            // provenance from an identifier or label with the same text.
             default: return false
             }
         }
         return matches.count == 1 ? matches.first : nil
+    }
+
+    private static func observedPlaceholder(metadata: [String: JSONValue]?, type: String?) -> String? {
+        guard let metadata, let type, metadata["type"] == .string(type),
+              metadata["enabled"] == .bool(true), metadata["visible"] == .bool(true),
+              let placeholder = metadata["placeholder"]?.objectValue,
+              placeholder["status"] == .string("present"),
+              let raw = rawText(placeholder["text"]), !raw.isEmpty, raw.utf8.count <= 256,
+              raw != "[REDACTED]" else { return nil }
+        return raw
     }
 
     private static func text(_ value: JSONValue?) -> String? {

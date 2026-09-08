@@ -308,7 +308,12 @@ actor VisionCaptureMCPClient {
               case .string(let session)? = request["session_id"], !session.isEmpty,
               request["session_kind"] == .string("flow"),
               let parameters = request["parameters"]?.objectValue,
-              Set(parameters.keys) == ["udid", "observation_grant"],
+              (Set(parameters.keys) == ["udid", "observation_grant"]
+                || (Set(parameters.keys) == ["udid", "observation_grant", "describe"]
+                    && parameters["describe"] == .object([
+                        "include_values": .bool(true),
+                        "redaction": .string("balanced"),
+                    ]))),
               case .string(let udid)? = parameters["udid"], !udid.isEmpty,
               case .string(let grant)? = parameters["observation_grant"], !grant.isEmpty,
               let root = value.objectValue, root["isError"] == .bool(true),

@@ -12,6 +12,8 @@ public struct ServerCompletion: Equatable, Sendable {
     public let toolCalls: [ParsedToolCall]
     public let finishReason: String
     public let usage: OpenAIUsage
+    // Internal diagnostics never change the public response or its identity.
+    var numericReceipt: ServerCompletionNumericReceipt?
 
     public init(content: String,
                 toolCalls: [ParsedToolCall],
@@ -21,6 +23,109 @@ public struct ServerCompletion: Equatable, Sendable {
         self.toolCalls = toolCalls
         self.finishReason = finishReason
         self.usage = usage
+    }
+
+    public static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.content == rhs.content && lhs.toolCalls == rhs.toolCalls
+            && lhs.finishReason == rhs.finishReason && lhs.usage == rhs.usage
+    }
+}
+
+/// Numeric evidence only. Hashes cover exact Int32 little-endian token IDs,
+/// including a sampled stop token that has not been committed to KV storage.
+/// Constructed after raw generation timing, retaining no token/image buffers.
+struct ServerCompletionNumericReceipt: Sendable {
+    private static let maximumHashTokens = 65_536
+    let logDescription: String
+
+    init(effectivePromptIDs: [Int32], result: RawDecodeResult,
+         config: GenerationConfig, maxContext: Int, nativeTemplate: Bool,
+         nativeThinking: Bool, startsInThoughtChannel: Bool, imageCount: Int) {
+        let bounded = maxContext > 0 && maxContext <= Self.maximumHashTokens
+            && !effectivePromptIDs.isEmpty && effectivePromptIDs.count < maxContext
+            && result.kvBackedTokenIDs.count <= maxContext
+            && result.uncommittedBoundaryTokenIDs.count <= 1
+        let prefixCountValid = result.prefillTokens == effectivePromptIDs.count
+            && result.prefillTokens <= result.kvBackedTokenIDs.count
+        let promptValid = bounded && prefixCountValid
+            && result.kvBackedTokenIDs.prefix(effectivePromptIDs.count)
+                .elementsEqual(effectivePromptIDs)
+        let safePrefillCount = min(max(result.prefillTokens, 0),
+                                   result.kvBackedTokenIDs.count)
+        let generatedSegments = [result.kvBackedTokenIDs.dropFirst(safePrefillCount),
+                                 result.uncommittedBoundaryTokenIDs[...]]
+        // Bounds above make this addition safe. Invalid oversized input is not hashed.
+        let sequenceCount = bounded
+            ? generatedSegments[0].count + generatedSegments[1].count : -1
+        let sequenceValid = promptValid && sequenceCount == result.newTokens
+            && result.newTokens > 0 && result.newTokens <= config.maxNewTokens
+            && result.newTokens <= maxContext - effectivePromptIDs.count
+        let (accounted, overflow) = result.cachedPromptTokens
+            .addingReportingOverflow(result.computedPrefillTokens)
+        let prefillValid = !overflow && result.cachedPromptTokens >= 0
+            && result.computedPrefillTokens >= 0 && accounted == result.prefillTokens
+        let kvValid = result.kvPosition == result.kvBackedTokenIDs.count
+        let decodeRate = Double(result.newTokens) / result.decodeSeconds
+        let timingValid = result.prefillSeconds.isFinite && result.prefillSeconds >= 0
+            && result.decodeSeconds.isFinite && result.decodeSeconds > 0
+            && decodeRate.isFinite
+        let samplingValid = config.temperature.isFinite && config.temperature >= 0
+            && config.repetitionPenalty.isFinite && config.repetitionPenalty > 0
+            && (config.topK.map { (1...256).contains($0) } ?? true)
+            && (config.topP.map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? true)
+
+        var promptHash = "unavailable"
+        var generatedHash = "unavailable"
+        if bounded && !Task.isCancelled {
+            // Reuses the existing 4 KiB incremental buffer and slice views.
+            promptHash = StructuredOutputFailureDiagnostics.i32leSHA256(
+                [effectivePromptIDs[...]])
+            if prefixCountValid && !Task.isCancelled {
+                generatedHash = StructuredOutputFailureDiagnostics.i32leSHA256(
+                    generatedSegments)
+            }
+        }
+        let cancelled = Task.isCancelled
+        if cancelled {
+            promptHash = "unavailable"
+            generatedHash = "unavailable"
+        }
+        let valid = bounded && promptValid && sequenceValid && prefillValid
+            && kvValid && timingValid && samplingValid && !cancelled
+        let status = cancelled ? "cancelled" : (valid ? "valid" : "invalid")
+        let rate = valid ? String(decodeRate) : "unavailable"
+        logDescription = [
+            "numeric_receipt_v=1",
+            "hash_bounds_valid=\(bounded)", "prompt_valid=\(promptValid)",
+            "sequence_valid=\(sequenceValid)", "prefill_accounting_valid=\(prefillValid)",
+            "kv_position_valid=\(kvValid)", "timing_valid=\(timingValid)",
+            "sampling_valid=\(samplingValid)",
+            "effective_prompt_tokens=\(effectivePromptIDs.count)",
+            "generated_sequence_tokens=\(bounded ? String(sequenceCount) : "unavailable")",
+            "computed_prefill_tokens=\(result.computedPrefillTokens)",
+            "prefill_seconds=\(Self.number(result.prefillSeconds))",
+            "decode_seconds=\(Self.number(result.decodeSeconds))",
+            "decode_tokens_per_second=\(rate)",
+            "raw_stop=\(StructuredOutputFailureDiagnostics.rawStop(result.reason))",
+            "effective_prompt_i32le_sha256=\(promptHash)",
+            "generated_i32le_sha256=\(generatedHash)",
+            "seed=\(config.seed.map { String($0) } ?? "unset")",
+            "temperature=\(Self.number(Double(config.temperature)))",
+            "top_k=\(config.topK.map { String($0) } ?? "unset")",
+            "top_p=\(config.topP.map { Self.number(Double($0)) } ?? "unset")",
+            "repetition_penalty=\(Self.number(Double(config.repetitionPenalty)))",
+            "max_new_tokens=\(config.maxNewTokens)", "max_context=\(maxContext)",
+            "native_template=\(nativeTemplate)", "native_thinking=\(nativeThinking)",
+            "starts_in_thought_channel=\(startsInThoughtChannel)",
+            // Token hashes do not identify pixels. Freeze the image fixture separately.
+            "input_image_count=\(imageCount)",
+            // Keep status last so a truncated prefix cannot claim a complete receipt.
+            "numeric_receipt=\(status)",
+        ].joined(separator: " ")
+    }
+
+    private static func number(_ value: Double) -> String {
+        value.isFinite ? String(value) : "unavailable"
     }
 }
 
@@ -225,7 +330,7 @@ struct StructuredOutputFailureDiagnostics: Equatable, Sendable {
         ].joined(separator: " ")
     }
 
-    private static func rawStop(_ reason: StopReason) -> String {
+    fileprivate static func rawStop(_ reason: StopReason) -> String {
         switch reason {
         case .eos: "eos"
         case .endOfTurn: "end_of_turn"
@@ -1113,7 +1218,7 @@ public actor ServerModelSession: ServerInferenceBackend {
                 stopStringFiltered: stopMatcher.isStopped)
         }
         completed = true
-        return ServerCompletion(
+        var completion = ServerCompletion(
             content: content,
             toolCalls: calls,
             finishReason: reason,
@@ -1121,6 +1226,13 @@ public actor ServerModelSession: ServerInferenceBackend {
                                completionTokens: result.newTokens,
                                totalTokens: result.prefillTokens + result.newTokens,
                                cachedTokens: result.cachedPromptTokens))
+        completion.numericReceipt = ServerCompletionNumericReceipt(
+            effectivePromptIDs: effectivePromptIDs, result: result, config: config,
+            maxContext: maxContext, nativeTemplate: needsToolTemplate,
+            nativeThinking: needsToolTemplate && tokenizer.enableToolThinking,
+            startsInThoughtChannel: tokenizer.promptEndsInThoughtChannel(effectivePromptIDs),
+            imageCount: request.imageFiles.count)
+        return completion
     }
 
     private func renderPrompt(_ request: ValidatedChatRequest) throws -> [Int32] {

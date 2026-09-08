@@ -23,6 +23,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private let condition = NSCondition()
     private var state = State()
     private let generationID: UUID
+    private let conversationEpoch: UUID?
     private let memorySampler = AppMemorySampler()
     private let measurementRequest: DecodeRuntimeMeasurementRequest?
     private let measurementCapture: RuntimeMeasurementCapture?
@@ -43,12 +44,14 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private let conversationTokens: @Sendable () -> Int?
 
     init(generationID: UUID,
+         conversationEpoch: UUID? = nil,
          towerBytes: @escaping @Sendable () -> UInt64? = { nil },
          conversationTokens: @escaping @Sendable () -> Int? = { nil },
          measurementRequest: DecodeRuntimeMeasurementRequest? = nil,
          measurementCapture: RuntimeMeasurementCapture? = nil) {
         self.conversationTokens = conversationTokens
         self.generationID = generationID
+        self.conversationEpoch = conversationEpoch
         self.towerBytes = towerBytes
         self.measurementRequest = measurementRequest
         self.measurementCapture = measurementCapture
@@ -98,6 +101,10 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                         state.terminal?.parserFailureJSON = String(data: data, encoding: .utf8)
                     }
                 }
+                if case .repeatedThought(let recovery) = error,
+                   let data = try? JSONEncoder().encode(recovery) {
+                    state.terminal?.thoughtRepetitionRecoveryJSON = String(data: data, encoding: .utf8)
+                }
                 state.terminalCommitted = true
             }
         }
@@ -109,7 +116,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         condition.lock()
         if !state.terminalCommitted, let error {
             state.terminal = DecodeServiceEvent(
-                kind: .failed, generationID: generationID, error: "\(error)")
+                kind: .failed, generationID: generationID, error: "\(error)",
+                conversationEpoch: conversationEpoch)
             state.terminalCommitted = true
         }
         state.finished = true
@@ -129,7 +137,11 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             let toolCalls = state.pendingToolCalls
             // Keep the collector alive through producer cleanup and drain it
             // before the terminal event, which ends the app's receive loop.
-            let terminal = measurementRequest == nil || state.finished ? state.terminal : nil
+            // A recovery receipt also waits for Entry to finish the failed
+            // stream without committing its pending tool admission.
+            let waitsForProducer = measurementRequest != nil
+                || state.terminal?.thoughtRepetitionRecoveryJSON != nil
+            let terminal = !waitsForProducer || state.finished ? state.terminal : nil
             let done = state.finished
             state.latestPrefill = nil
             state.pendingText = ""
@@ -182,7 +194,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     kind: .memory, generationID: generationID,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
-                    visionTowerMappedBytes: towerBytes())
+                    visionTowerMappedBytes: towerBytes(),
+                    conversationEpoch: conversationEpoch)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
                 continue
             }
@@ -193,7 +206,8 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     prefillDone: prefill.done, prefillTotal: prefill.total,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
-                    visionTowerMappedBytes: towerBytes())
+                    visionTowerMappedBytes: towerBytes(),
+                    conversationEpoch: conversationEpoch)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
             }
             if !text.isEmpty || token != nil {
@@ -207,6 +221,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes(),
+                    conversationEpoch: conversationEpoch,
                     structuredProgress: token?.structuredProgress,
                     thinkingPreview: token?.thinkingPreview,
                     toolCallPreview: token?.toolCallPreview)
@@ -216,6 +231,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 let event = DecodeServiceEvent(
                     kind: .toolCall,
                     generationID: generationID,
+                    conversationEpoch: conversationEpoch,
                     toolCall: DecodeToolCall(
                         id: call.id,
                         name: call.name,
@@ -305,6 +321,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             visionTowerMappedBytes: diagnostics?.visionTowerMappedBytes,
             cachedPromptTokens: diagnostics?.cachedPromptTokens,
             conversationTokenCount: conversationTokens(),
+            conversationEpoch: conversationEpoch,
             prefill: diagnostics?.prefill.map(Self.prefillDiagnostics),
             runner: diagnostics?.runner.map(Self.runnerDiagnostics),
             structuredProgress: diagnostics?.structuredProgress)

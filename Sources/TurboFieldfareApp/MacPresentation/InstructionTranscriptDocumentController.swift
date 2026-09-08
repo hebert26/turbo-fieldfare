@@ -1131,6 +1131,11 @@ public final class InstructionTranscriptDocumentController {
                         attributes: activityBodyAttributes()))
                 }
                 document.append(NSAttributedString(string: "\n\n"))
+            case .contextCompaction, .generationRecovery:
+                let status = activityStatus(activity.status, elapsedSeconds: nil)
+                document.append(NSAttributedString(
+                    string: activity.body + "\n\n",
+                    attributes: activityLabelAttributes(color: status.color)))
             case .localProposal:
                 document.append(NSAttributedString(
                     string: "Not sent · Gemma proposal (not an MCP request)\n",

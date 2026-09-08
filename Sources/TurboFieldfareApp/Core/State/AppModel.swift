@@ -103,6 +103,12 @@ public final class AppModel {
     public var generationStatusText: String? {
         guard isRunning else { return nil }
         if isCancellationPending { return "Stopping generation" }
+        if let compaction = activeAgentCompaction {
+            guard compaction.replacementPromptTokens != nil else { return "Compacting history…" }
+            return phase == .prefill && livePrefillTotal > 0
+                ? "Compacting history… · Rebuilding \(livePrefillDone) / \(livePrefillTotal) tokens"
+                : "Compacting history… · Rebuilding model context"
+        }
         if agentWaitingForMCP { return "Waiting for VisionCapture" }
         if phase == .prefill {
             return livePrefillTotal > 0
@@ -153,6 +159,20 @@ public final class AppModel {
     private var agentCheckpointRequested = false
     private var agentCheckpointRecord: String?
     private var agentCheckpointPrepared = false
+    /// One display row spans the refresh, accepted reset and actual KV rebuild.
+    /// A reset receipt alone is not a completed rebuild.
+    private struct AgentCompactionProgress {
+        let id: UUID
+        let trigger: DecodeContextCheckpointTrigger
+        let performanceEvidence: DecodePerformanceCheckpointEvidence?
+        var existingPromptTokens: Int
+        var replacementPromptTokens: Int?
+        var rebuildConfirmed = false
+    }
+    private var activeAgentCompaction: AgentCompactionProgress?
+    /// Small pinned chat caption. Updated only at compaction transitions, with
+    /// the same text retained in the transcript activity row.
+    public private(set) var contextCompactionStatusText: String?
     private var activeAgentActivityTurnID: UUID?
     private var loadGeneration: UInt64 = 0
     /// The highest load-phase sequence already applied. Each `onState` callback
@@ -934,6 +954,8 @@ public final class AppModel {
     }
 
     private func beginLoad() {
+        activeAgentCompaction = nil
+        contextCompactionStatusText = nil
         liveStructuredProgress = nil
         thinkingPreview = nil
         toolCallPreview = nil
@@ -1863,6 +1885,8 @@ public final class AppModel {
     /// calling this when the transcript is not empty.
     public func newChat() {
         guard !isRunning else { return }
+        activeAgentCompaction = nil
+        contextCompactionStatusText = nil
         liveStructuredProgress = nil
         thinkingPreview = nil
         toolCallPreview = nil
@@ -1900,6 +1924,8 @@ public final class AppModel {
     /// from the service's gate, which has just gone back to expecting turn zero;
     /// the gate would then refuse every turn for the rest of the session.
     private func archiveConversationContext() {
+        activeAgentCompaction = nil
+        contextCompactionStatusText = nil
         liveStructuredProgress = nil
         thinkingPreview = nil
         toolCallPreview = nil
@@ -1989,6 +2015,8 @@ public final class AppModel {
         agentCheckpointRequested = false
         agentCheckpointRecord = nil
         agentCheckpointPrepared = false
+        activeAgentCompaction = nil
+        contextCompactionStatusText = nil
         outputPromptText = request.prompt
         outputAgentActivities = []
         activeAgentActivityTurnID = agentConfiguration == nil
@@ -2056,6 +2084,8 @@ public final class AppModel {
                         },
                         userPrompt: request.prompt,
                         userImages: request.imageAttachments,
+                        conversationEpoch: request.conversationEpoch,
+                        maxContextTokens: request.maxContextTokens,
                         checkpoint: checkpoint,
                         forceCheckpoint: { await self.shouldForceAgentCheckpoint() }
                     ) { toolTurn in
@@ -2132,6 +2162,21 @@ public final class AppModel {
               let checkpointClient = client as? any AppContextCheckpointClient else {
             throw AppInferenceError.conversationLineageLost("The active task changed before its checkpoint.")
         }
+        if proposal.trigger == .sustainedSlowDecode, !proposal.commit,
+           let evidence = proposal.performanceEvidence {
+            activeAgentCompaction = AgentCompactionProgress(
+                id: proposal.id, trigger: proposal.trigger,
+                performanceEvidence: evidence,
+                existingPromptTokens: evidence.conversationTokens,
+                replacementPromptTokens: nil)
+            updateAgentCompactionActivity(
+                "Performance compaction checking at \(evidence.conversationTokens) input tokens after \(evidence.completedDecisions) decisions at \(Self.compactionRateText(evidence.weightedTokensPerSecond)) tokens/second.",
+                status: .dispatching)
+        } else if proposal.trigger == .sustainedSlowDecode, proposal.commit {
+            updateAgentCompactionActivity(
+                "Performance compaction starting. Replacing the settled task history without replaying app input.",
+                status: .dispatching)
+        }
         let request = DecodeContextCheckpointRequest(checkpointID: proposal.id,
             sourceEpoch: ticket.epoch, sourceTurnIndex: ticket.index,
             replacementEpoch: proposal.replacementEpoch,
@@ -2143,6 +2188,7 @@ public final class AppModel {
                         encodedBytes: $0.encodedBytes, sha256: $0.sha256)
                 }),
             record: proposal.record, commit: proposal.commit, force: proposal.force,
+            trigger: proposal.trigger, performanceEvidence: proposal.performanceEvidence,
             permitsScreenshot: proposal.permitsScreenshot)
         let receipt: DecodeContextCheckpointReceipt
         if proposal.commit { agentCheckpointRecord = proposal.record }
@@ -2151,13 +2197,25 @@ public final class AppModel {
         } catch {
             await AgentInferenceTrace.shared?.checkpointFailure(id: proposal.id, commit: proposal.commit,
                 error: String(describing: error))
+            if proposal.trigger == .sustainedSlowDecode {
+                let cancelled = error is CancellationError
+                    || (error as? AppInferenceError) == .cancelled
+                updateAgentCompactionActivity(
+                    cancelled
+                        ? "Performance compaction cancelled. The rebuild was not confirmed."
+                        : "Performance compaction failed before a rebuild was confirmed: \(error)",
+                    status: cancelled ? .cancelled
+                        : .localFailure(reason: String(describing: error)))
+                activeAgentCompaction = nil
+            }
             throw error
         }
         guard generation == runIdentity, isRunning else {
             throw AppInferenceError.conversationLineageLost("The task changed while the checkpoint was being acknowledged.")
         }
         await AgentInferenceTrace.shared?.checkpoint(receipt, callID: proposal.call.id,
-            sourceEpoch: ticket.epoch, forced: proposal.force)
+            sourceEpoch: ticket.epoch, trigger: proposal.trigger,
+            performanceEvidence: proposal.performanceEvidence)
         if receipt.committed {
             guard conversation.acceptCheckpoint(epoch: receipt.replacementEpoch, source: ticket) else {
                 throw AppInferenceError.conversationLineageLost("The service accepted a checkpoint for a different visible task.")
@@ -2168,18 +2226,118 @@ public final class AppModel {
             guard let replacementCount = receipt.replacementPromptTokens else {
                 throw AppInferenceError.conversationLineageLost("The accepted checkpoint omitted its rendered token count.")
             }
-            outputAgentActivities.append(AppAgentActivity(id: UUID(),
-                kind: .modelResult(callID: proposal.id.uuidString, toolName: "context_checkpoint", imageCount: receipt.retainedImageCount),
-                body: "Earlier context condensed: \(receipt.existingPromptTokens) → \(replacementCount) input tokens. Rebuilding the same loaded model context and resuming the current task. Original instructions, execution records and \(receipt.retainedImageCount) images retained.",
-                status: .succeeded))
+            activeAgentCompaction = AgentCompactionProgress(id: proposal.id,
+                trigger: proposal.trigger,
+                performanceEvidence: proposal.performanceEvidence,
+                existingPromptTokens: receipt.existingPromptTokens,
+                replacementPromptTokens: replacementCount)
+            let prefix = proposal.trigger == .sustainedSlowDecode
+                ? "Performance compaction" : "Compacting history"
+            updateAgentCompactionActivity(
+                "\(prefix): \(receipt.existingPromptTokens) → \(replacementCount) input tokens. Rebuilding model context.",
+                status: .dispatching)
+        } else if proposal.trigger == .sustainedSlowDecode, proposal.commit {
+            updateAgentCompactionActivity(
+                "Performance compaction failed because the service did not acknowledge the rebuild.",
+                status: .localFailure(reason: "The checkpoint commit was not acknowledged."))
+            activeAgentCompaction = nil
         } else if receipt.needed {
-            agentCheckpointPrepared = true
-            outputAgentActivities.append(AppAgentActivity(id: UUID(),
-                kind: .modelResult(callID: proposal.id.uuidString, toolName: "context_checkpoint", imageCount: 0),
-                body: "Condensing earlier context. Saving completed actions and unfinished work, then reading current screen facts.",
-                status: .succeeded))
+            if proposal.trigger != .sustainedSlowDecode {
+                agentCheckpointPrepared = true
+            }
+            activeAgentCompaction = AgentCompactionProgress(id: proposal.id,
+                trigger: proposal.trigger,
+                performanceEvidence: proposal.performanceEvidence,
+                existingPromptTokens: receipt.existingPromptTokens)
+            let text = proposal.trigger == .sustainedSlowDecode
+                ? "Performance compaction starting at \(receipt.existingPromptTokens) input tokens."
+                : "Compacting history…"
+            updateAgentCompactionActivity(text, status: .dispatching)
+        } else if proposal.trigger == .sustainedSlowDecode {
+            let candidate = receipt.replacementPromptTokens.map(String.init) ?? "unavailable"
+            let minimum = receipt.performanceMinimumSavingsTokens.map(String.init) ?? "unavailable"
+            updateAgentCompactionActivity(
+                "Performance compaction skipped. Candidate: \(candidate) input tokens. Required minimum saving: \(minimum) tokens. The current conversation continues.",
+                status: .succeeded)
+            activeAgentCompaction = nil
         }
         return receipt
+    }
+
+    private static func compactionRateText(_ rate: Double) -> String {
+        String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), rate)
+    }
+
+    private func updateAgentCompactionActivity(_ text: String, status: AppAgentActivity.Status) {
+        guard let compaction = activeAgentCompaction else { return }
+        contextCompactionStatusText = text
+        let activity = AppAgentActivity(id: compaction.id, kind: .contextCompaction,
+            body: text, status: status)
+        if let index = outputAgentActivities.firstIndex(where: { $0.id == compaction.id }) {
+            outputAgentActivities[index] = activity
+        } else {
+            outputAgentActivities.append(activity)
+        }
+    }
+
+    private func completeAgentCompactionRebuild(checkpointID: UUID?, generation: Int) {
+        guard generation == runIdentity, isRunning,
+              var compaction = activeAgentCompaction, compaction.id == checkpointID,
+              let replacementCount = compaction.replacementPromptTokens else { return }
+        if compaction.trigger == .sustainedSlowDecode {
+            guard !compaction.rebuildConfirmed else { return }
+            compaction.rebuildConfirmed = true
+            activeAgentCompaction = compaction
+            updateAgentCompactionActivity(
+                "Performance compaction rebuilt model context: \(compaction.existingPromptTokens) → \(replacementCount) input tokens. Measuring the first completed decision.",
+                status: .dispatching)
+            return
+        }
+        updateAgentCompactionActivity(
+            "History compacted: \(compaction.existingPromptTokens) → \(replacementCount) input tokens. Model context rebuilt.",
+            status: .succeeded)
+        activeAgentCompaction = nil
+    }
+
+    private func completePerformanceCompactionMeasurement(
+        checkpointID: UUID?, diagnostics: AppDiagnostics, generation: Int
+    ) async {
+        guard generation == runIdentity, isRunning,
+              let compaction = activeAgentCompaction,
+              compaction.id == checkpointID,
+              compaction.trigger == .sustainedSlowDecode,
+              compaction.rebuildConfirmed,
+              let replacementCount = compaction.replacementPromptTokens else { return }
+        let afterContext = diagnostics.conversationTokens
+        let afterRate = diagnostics.generatedTokens > 0
+            && diagnostics.decodeSeconds.isFinite && diagnostics.decodeSeconds > 0
+            ? Double(diagnostics.generatedTokens) / diagnostics.decodeSeconds : nil
+        let afterContextText = afterContext.map(String.init) ?? "unavailable"
+        let afterRateText = afterRate.map(Self.compactionRateText) ?? "unavailable"
+        updateAgentCompactionActivity(
+            "Performance compaction completed: \(compaction.existingPromptTokens) → \(replacementCount) input tokens. First completed decision: \(afterContextText) context tokens at \(afterRateText) tokens/second.",
+            status: .succeeded)
+        await AgentInferenceTrace.shared?.checkpointCompleted(
+            id: compaction.id, before: compaction.performanceEvidence,
+            replacementPromptTokens: replacementCount, after: diagnostics)
+        activeAgentCompaction = nil
+    }
+
+    private func interruptAgentCompaction(_ appError: AppInferenceError) {
+        guard let compaction = activeAgentCompaction else { return }
+        let cancelled = appError == .cancelled
+        let outcome = cancelled ? "cancelled" : "failed"
+        let detail: String
+        if compaction.rebuildConfirmed, let replacement = compaction.replacementPromptTokens {
+            detail = " Model context rebuilt from \(compaction.existingPromptTokens) to \(replacement) input tokens, but the resumed decision did not complete."
+        } else if let replacement = compaction.replacementPromptTokens {
+            detail = " \(compaction.existingPromptTokens) → \(replacement) input tokens were accepted, but the rebuild was not confirmed complete."
+        } else {
+            detail = " No completed rebuild was confirmed."
+        }
+        updateAgentCompactionActivity("History compaction \(outcome)." + detail,
+            status: cancelled ? .cancelled : .localFailure(reason: appError.description))
+        activeAgentCompaction = nil
     }
 
     private func agentRequest(_ base: AppGenerationRequest, toolTurn: AppToolTurn,
@@ -2225,6 +2383,8 @@ public final class AppModel {
         var latestStructuredProgress: DecodeStructuredProgress?
         var latestToolCallPreview: DecodeToolCallPreview?
         var lastProgressTrace = ContinuousClock.now
+        let checkpointID: UUID?
+        if case .checkpoint(let id) = toolTurn { checkpointID = id } else { checkpointID = nil }
         do {
             await recordAgentModelInput(
                 request, isFormatCorrection: !allowsMalformedRegeneration,
@@ -2232,6 +2392,11 @@ public final class AppModel {
             for try await event in client.generate(request) {
                 switch event {
                 case .token(let token):
+                    // The first decode event proves this checkpoint's prefill
+                    // completed. Keep the indicator up throughout the rebuild.
+                    if checkpointID != nil, previousStepTokenCount == 0 {
+                        await completeAgentCompactionRebuild(checkpointID: checkpointID, generation: generation)
+                    }
                     content += token.textDelta
                     latestStructuredProgress = token.structuredProgress
                     latestToolCallPreview = token.toolCallPreview
@@ -2281,6 +2446,12 @@ public final class AppModel {
             guard let terminal else {
                 throw VisionCaptureAgentError.incompleteAnswer
             }
+            if checkpointID != nil {
+                await completeAgentCompactionRebuild(checkpointID: checkpointID, generation: generation)
+                await completePerformanceCompactionMeasurement(
+                    checkpointID: checkpointID, diagnostics: terminal,
+                    generation: generation)
+            }
             if let reporter = client as? any AppInferenceTranscriptReporting {
                 content = reporter.generationTranscriptMailbox.completeText
             }
@@ -2298,8 +2469,16 @@ public final class AppModel {
                 parserFailure: (error as? AppInferenceError).flatMap {
                     if case .structuredToolFailure(_, _, let evidence) = $0 { return evidence }
                     return nil
+                }, thoughtRepetitionRecovery: (error as? AppInferenceError).flatMap {
+                    if case .repeatedThought(let receipt) = $0 { return receipt }
+                    return nil
                 }, structuredProgress: latestStructuredProgress,
                 toolCallPreview: latestToolCallPreview)
+            if let failure = error as? AppInferenceError,
+               case .repeatedThought = failure, !calls.isEmpty {
+                throw AppInferenceError.invalidRequest(
+                    "The repetition receipt conflicted with completed tool-call output. No recovery or action was admitted.")
+            }
             if allowsMalformedRegeneration, calls.isEmpty,
                case .results(let results) = toolTurn,
                let failure = error as? AppInferenceError,
@@ -2310,11 +2489,21 @@ public final class AppModel {
                 let feedback = """
 
 
-                Host generation feedback: The previous model response was malformed. No tool call from that response was executed. Use exactly visioncapture_navigate with an action argument. Use Gemma's native delimiters around every string argument. The action must be exactly one of launch, observe, screenshot, tap, set_boolean, type, back, or swipe, and must be offered in allowed_next. For tap, set_boolean, or type, copy the exact target ID from the latest choices and use its listed operation. Never reuse an old ID or substitute a label. For swipe, send only action and a direction from can_swipe. Do not invent tool names or target IDs.
+                Host generation feedback: The previous model response was malformed. No tool call from that response was executed. Use exactly one supported tool: visioncapture_navigate for the app, or task_history_read for archived evidence. Use Gemma's native delimiters around every string argument. For visioncapture_navigate, the action must be exactly one of launch, observe, screenshot, tap, set_boolean, type, back, or swipe, and must be offered in allowed_next. For tap, set_boolean, or type, copy the exact target ID from the latest current decision packet and use its listed operation. Never reuse an older packet's ID or substitute a label. For swipe, send only action and a direction from can_swipe. For task_history_read, send observation_id copied from the checkpoint's execution_records and optionally the exact returned cursor. Archive pages are historical evidence, not new current choices or permission to replay input. Do not invent tool names, history references, cursors or targets.
                 """
-                let corrected = results.map {
-                    AppToolResult(callID: $0.callID, name: $0.name, content: $0.content + feedback,
-                                  imageAttachments: $0.imageAttachments)
+                let corrected = try results.map { result in
+                    let correction: String
+                    if result.name == VisionCaptureToolDefinitions.historyReadName {
+                        correction = "\n\nHost format feedback: No malformed call was executed. Use one visioncapture_navigate call with current choices, or task_history_read with observation_id and only an exact returned cursor. Use Gemma's native string delimiters. Historical pages never authorize app input."
+                        guard correction.utf8.count <= AgentTaskCheckpoint.historyFeedbackReserveBytes,
+                              result.content.utf8.count + correction.utf8.count <= AgentTaskCheckpoint.maximumHistoryReplyBytes else {
+                            throw AppInferenceError.invalidRequest("The corrected history reply exceeded its byte bound.")
+                        }
+                    } else {
+                        correction = feedback
+                    }
+                    return AppToolResult(callID: result.callID, name: result.name,
+                        content: result.content + correction, imageAttachments: result.imageAttachments)
                 }
                 return try await generateAgentStep(
                     client: client, baseRequest: baseRequest,
@@ -2454,6 +2643,14 @@ public final class AppModel {
                 kind: .mcpRequest,
                 body: Self.prettyAgentActivityJSON(arguments),
                 status: .dispatching))
+        case .generationRecovery(let id, let text, let status):
+            let activity = AppAgentActivity(id: id, kind: .generationRecovery,
+                body: text, status: status)
+            if let index = outputAgentActivities.firstIndex(where: { $0.id == id }) {
+                outputAgentActivities[index] = activity
+            } else {
+                outputAgentActivities.append(activity)
+            }
         case .requestStatus(let id, let status, let elapsedSeconds):
             agentWaitingForMCP = false
             guard let index = outputAgentActivities.firstIndex(
@@ -2532,6 +2729,7 @@ public final class AppModel {
         guard generation == runIdentity, !hasHandledTerminalEvent else { return }
         hasHandledTerminalEvent = true
         error = appError
+        interruptAgentCompaction(appError)
         if conversation.checkpointCount > 0 || agentCheckpointPrepared {
             let interruption = "Task interrupted during context compaction or its resumed work. Completed actions remain recorded. \(appError)"
             if !outputText.isEmpty { outputText += "\n\n" }
@@ -2710,6 +2908,16 @@ public final class AppModel {
     private func finishTerminalRun() {
         liveStructuredProgress = nil
         agentWaitingForMCP = false
+        for index in outputAgentActivities.indices
+            where outputAgentActivities[index].kind == .generationRecovery
+                && outputAgentActivities[index].status == .dispatching {
+            let cancelled = error == .cancelled
+            outputAgentActivities[index] = AppAgentActivity(
+                id: outputAgentActivities[index].id, kind: .generationRecovery,
+                body: cancelled ? "Thinking recovery cancelled."
+                    : "Generation ended before thinking recovery completed.",
+                status: cancelled ? .cancelled : .localFailure(reason: "Recovery incomplete"))
+        }
         if let activeAgentActivityTurnID {
             // The live array drives in-flight rendering. Snapshot it once when
             // the turn ends instead of copying an ever-growing audit trail into
