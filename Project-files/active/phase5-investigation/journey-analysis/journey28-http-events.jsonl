@@ -1,0 +1,411 @@
+{"source_line": 7, "timestamp": "2026-09-07 16:34:25.080740+0100", "message": "[HTTPExecute] \u25b6 request='launch app' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 79, "timestamp": "2026-09-07 16:34:25.098240+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 1680, "timestamp": "2026-09-07 16:34:31.346507+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6265ms"}
+{"source_line": 1688, "timestamp": "2026-09-07 16:34:37.665351+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 1717, "timestamp": "2026-09-07 16:34:37.671711+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 2297, "timestamp": "2026-09-07 16:34:38.808431+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1142ms"}
+{"source_line": 2304, "timestamp": "2026-09-07 16:34:38.824703+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 2333, "timestamp": "2026-09-07 16:34:38.828048+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 2602, "timestamp": "2026-09-07 16:34:39.166832+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=342ms"}
+{"source_line": 2608, "timestamp": "2026-09-07 16:34:39.204502+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 2638, "timestamp": "2026-09-07 16:34:39.209850+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 3215, "timestamp": "2026-09-07 16:34:40.195134+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=990ms"}
+{"source_line": 3222, "timestamp": "2026-09-07 16:34:40.214881+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 3252, "timestamp": "2026-09-07 16:34:40.218145+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 5822, "timestamp": "2026-09-07 16:34:45.615018+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5400ms"}
+{"source_line": 5829, "timestamp": "2026-09-07 16:34:51.987700+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 5859, "timestamp": "2026-09-07 16:34:51.996479+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 6437, "timestamp": "2026-09-07 16:34:53.056566+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1068ms"}
+{"source_line": 6444, "timestamp": "2026-09-07 16:34:53.073848+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 6471, "timestamp": "2026-09-07 16:34:53.076273+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 6742, "timestamp": "2026-09-07 16:34:53.415223+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=341ms"}
+{"source_line": 6748, "timestamp": "2026-09-07 16:34:53.453038+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 6778, "timestamp": "2026-09-07 16:34:53.458438+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 7355, "timestamp": "2026-09-07 16:34:54.440260+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=987ms"}
+{"source_line": 7362, "timestamp": "2026-09-07 16:34:54.469151+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 7392, "timestamp": "2026-09-07 16:34:54.475868+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 9942, "timestamp": "2026-09-07 16:34:59.899241+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5430ms"}
+{"source_line": 9949, "timestamp": "2026-09-07 16:35:09.270993+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 9979, "timestamp": "2026-09-07 16:35:09.281687+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 10557, "timestamp": "2026-09-07 16:35:10.418574+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1147ms"}
+{"source_line": 10564, "timestamp": "2026-09-07 16:35:10.441223+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 10591, "timestamp": "2026-09-07 16:35:10.444076+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 10862, "timestamp": "2026-09-07 16:35:10.757777+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=316ms"}
+{"source_line": 10868, "timestamp": "2026-09-07 16:35:10.782844+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 10893, "timestamp": "2026-09-07 16:35:10.786306+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 11475, "timestamp": "2026-09-07 16:35:11.611566+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=826ms"}
+{"source_line": 11482, "timestamp": "2026-09-07 16:35:22.619907+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 11512, "timestamp": "2026-09-07 16:35:22.626599+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 14149, "timestamp": "2026-09-07 16:35:31.142128+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8522ms"}
+{"source_line": 14156, "timestamp": "2026-09-07 16:35:45.608950+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 14186, "timestamp": "2026-09-07 16:35:45.621324+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 14764, "timestamp": "2026-09-07 16:35:46.767802+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1158ms"}
+{"source_line": 14771, "timestamp": "2026-09-07 16:35:46.789883+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 14800, "timestamp": "2026-09-07 16:35:46.793025+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 15069, "timestamp": "2026-09-07 16:35:47.098956+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=309ms"}
+{"source_line": 15075, "timestamp": "2026-09-07 16:35:47.139109+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 15105, "timestamp": "2026-09-07 16:35:47.145427+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 15682, "timestamp": "2026-09-07 16:35:48.112226+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=973ms"}
+{"source_line": 15689, "timestamp": "2026-09-07 16:35:48.130596+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 15719, "timestamp": "2026-09-07 16:35:48.133324+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 18269, "timestamp": "2026-09-07 16:35:53.705611+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5574ms"}
+{"source_line": 18276, "timestamp": "2026-09-07 16:36:03.808357+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 18306, "timestamp": "2026-09-07 16:36:03.818462+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 18884, "timestamp": "2026-09-07 16:36:04.852720+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1044ms"}
+{"source_line": 18891, "timestamp": "2026-09-07 16:36:04.867814+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 18920, "timestamp": "2026-09-07 16:36:04.870844+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 19189, "timestamp": "2026-09-07 16:36:05.211419+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=343ms"}
+{"source_line": 19195, "timestamp": "2026-09-07 16:36:05.250448+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 19225, "timestamp": "2026-09-07 16:36:05.261358+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 19802, "timestamp": "2026-09-07 16:36:06.063738+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=813ms"}
+{"source_line": 19809, "timestamp": "2026-09-07 16:36:14.960546+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 19839, "timestamp": "2026-09-07 16:36:14.967201+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 22394, "timestamp": "2026-09-07 16:36:20.734089+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5773ms"}
+{"source_line": 22401, "timestamp": "2026-09-07 16:36:24.735244+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 22431, "timestamp": "2026-09-07 16:36:24.741006+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 23009, "timestamp": "2026-09-07 16:36:25.796784+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1061ms"}
+{"source_line": 23016, "timestamp": "2026-09-07 16:36:25.817404+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 23045, "timestamp": "2026-09-07 16:36:25.820743+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 23314, "timestamp": "2026-09-07 16:36:26.144416+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=326ms"}
+{"source_line": 23320, "timestamp": "2026-09-07 16:36:26.179008+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 23347, "timestamp": "2026-09-07 16:36:26.188137+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 23927, "timestamp": "2026-09-07 16:36:26.953597+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=774ms"}
+{"source_line": 23934, "timestamp": "2026-09-07 16:36:33.887671+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 23962, "timestamp": "2026-09-07 16:36:33.897181+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 24542, "timestamp": "2026-09-07 16:36:35.046712+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1158ms"}
+{"source_line": 24549, "timestamp": "2026-09-07 16:36:35.067429+0100", "message": "[HTTPExecute] \u25b6 request='revalidate cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 24579, "timestamp": "2026-09-07 16:36:35.072888+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 27130, "timestamp": "2026-09-07 16:36:41.351765+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6284ms"}
+{"source_line": 27137, "timestamp": "2026-09-07 16:36:46.966802+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 27167, "timestamp": "2026-09-07 16:36:46.973478+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 27407, "timestamp": "2026-09-07 16:36:48.389689+0100", "message": "[HTTPExecute] \u2717 WorkflowEngine threw after 1422ms: CACHE_LIVE_VALIDATION_FAILED: A complete foreground accessibility screen could not be validated. Next step: do not reuse any earlier cache capability or observation grant. Run read-only `describe screen` with the same `bundle_id` and `parameters.udid`. Only the Driver/Discovery Cache lane cannot act on a system-owned presentation. If the fresh read still proves system-owned UI and the caller selects a visible control with no Driver action, discard cache authority, select a new action from fresh evidence, and use the explicit VisionCapture Computer Use lane. Do not run `inspect cache` again while system UI remains. After `describe screen` proves the requested app is foreground, run one fresh `inspect cache`. Do not retry the cached action."}
+{"source_line": 27414, "timestamp": "2026-09-07 16:36:48.423055+0100", "message": "[HTTPExecute] \u25b6 request='describe system alert' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 27443, "timestamp": "2026-09-07 16:36:48.425496+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 27479, "timestamp": "2026-09-07 16:36:49.275648+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=852ms"}
+{"source_line": 27487, "timestamp": "2026-09-07 16:36:57.529396+0100", "message": "[HTTPExecute] \u25b6 request='press system alert button' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 27515, "timestamp": "2026-09-07 16:36:57.536233+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 27651, "timestamp": "2026-09-07 16:36:59.671325+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2141ms"}
+{"source_line": 27659, "timestamp": "2026-09-07 16:36:59.699954+0100", "message": "[HTTPExecute] \u25b6 request='describe system alert' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 27690, "timestamp": "2026-09-07 16:36:59.701790+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 27725, "timestamp": "2026-09-07 16:37:00.479682+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=779ms"}
+{"source_line": 27733, "timestamp": "2026-09-07 16:37:06.155314+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 27761, "timestamp": "2026-09-07 16:37:06.162098+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 28003, "timestamp": "2026-09-07 16:37:07.576725+0100", "message": "[HTTPExecute] \u2717 WorkflowEngine threw after 1421ms: CACHE_LIVE_VALIDATION_FAILED: A complete foreground accessibility screen could not be validated. Next step: do not reuse any earlier cache capability or observation grant. Run read-only `describe screen` with the same `bundle_id` and `parameters.udid`. Only the Driver/Discovery Cache lane cannot act on a system-owned presentation. If the fresh read still proves system-owned UI and the caller selects a visible control with no Driver action, discard cache authority, select a new action from fresh evidence, and use the explicit VisionCapture Computer Use lane. Do not run `inspect cache` again while system UI remains. After `describe screen` proves the requested app is foreground, run one fresh `inspect cache`. Do not retry the cached action."}
+{"source_line": 28010, "timestamp": "2026-09-07 16:37:07.604072+0100", "message": "[HTTPExecute] \u25b6 request='describe system alert' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 28038, "timestamp": "2026-09-07 16:37:07.607097+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 28076, "timestamp": "2026-09-07 16:37:08.476575+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=872ms"}
+{"source_line": 28084, "timestamp": "2026-09-07 16:37:14.413205+0100", "message": "[HTTPExecute] \u25b6 request='press system alert button' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 28116, "timestamp": "2026-09-07 16:37:14.430846+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 28248, "timestamp": "2026-09-07 16:37:16.570247+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2156ms"}
+{"source_line": 28255, "timestamp": "2026-09-07 16:37:16.597429+0100", "message": "[HTTPExecute] \u25b6 request='describe system alert' bundle=com.hebertgo.nestmind.debug session=none mode=auto"}
+{"source_line": 28284, "timestamp": "2026-09-07 16:37:16.600891+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 28322, "timestamp": "2026-09-07 16:37:17.651792+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1054ms"}
+{"source_line": 28330, "timestamp": "2026-09-07 16:37:22.652354+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 28355, "timestamp": "2026-09-07 16:37:22.669786+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 28938, "timestamp": "2026-09-07 16:37:24.052095+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1399ms"}
+{"source_line": 28945, "timestamp": "2026-09-07 16:37:24.079334+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 28973, "timestamp": "2026-09-07 16:37:24.083264+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 29243, "timestamp": "2026-09-07 16:37:24.777177+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=697ms"}
+{"source_line": 29249, "timestamp": "2026-09-07 16:37:24.831639+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 29279, "timestamp": "2026-09-07 16:37:24.838482+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 29857, "timestamp": "2026-09-07 16:37:25.928947+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1097ms"}
+{"source_line": 29864, "timestamp": "2026-09-07 16:37:35.888641+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 29894, "timestamp": "2026-09-07 16:37:35.919767+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 32446, "timestamp": "2026-09-07 16:37:43.068671+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=7179ms"}
+{"source_line": 32453, "timestamp": "2026-09-07 16:37:47.051451+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 32483, "timestamp": "2026-09-07 16:37:47.064551+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 33061, "timestamp": "2026-09-07 16:37:48.118857+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1067ms"}
+{"source_line": 33068, "timestamp": "2026-09-07 16:37:48.135157+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 33094, "timestamp": "2026-09-07 16:37:48.136926+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 33366, "timestamp": "2026-09-07 16:37:48.460152+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=324ms"}
+{"source_line": 33372, "timestamp": "2026-09-07 16:37:48.499086+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 33399, "timestamp": "2026-09-07 16:37:48.503052+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 33979, "timestamp": "2026-09-07 16:37:49.313259+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=814ms"}
+{"source_line": 33986, "timestamp": "2026-09-07 16:37:58.621646+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 34016, "timestamp": "2026-09-07 16:37:58.628769+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 34594, "timestamp": "2026-09-07 16:37:59.699782+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1078ms"}
+{"source_line": 34601, "timestamp": "2026-09-07 16:37:59.722125+0100", "message": "[HTTPExecute] \u25b6 request='revalidate cached action' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 34631, "timestamp": "2026-09-07 16:37:59.726240+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 37415, "timestamp": "2026-09-07 16:38:05.722469+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6000ms"}
+{"source_line": 37422, "timestamp": "2026-09-07 16:38:11.136478+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 37448, "timestamp": "2026-09-07 16:38:11.144377+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 38030, "timestamp": "2026-09-07 16:38:12.179994+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1043ms"}
+{"source_line": 38037, "timestamp": "2026-09-07 16:38:12.197668+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 38066, "timestamp": "2026-09-07 16:38:12.201586+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 38335, "timestamp": "2026-09-07 16:38:12.531273+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=333ms"}
+{"source_line": 38341, "timestamp": "2026-09-07 16:38:12.581608+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 38371, "timestamp": "2026-09-07 16:38:12.588760+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 38948, "timestamp": "2026-09-07 16:38:13.366990+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=785ms"}
+{"source_line": 38956, "timestamp": "2026-09-07 16:38:23.127699+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 38986, "timestamp": "2026-09-07 16:38:23.132143+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 39565, "timestamp": "2026-09-07 16:38:24.238829+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1111ms"}
+{"source_line": 39572, "timestamp": "2026-09-07 16:38:24.257133+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B4AE84F9-0665-4908-BA52-B48ED53D0C50 mode=auto"}
+{"source_line": 39601, "timestamp": "2026-09-07 16:38:24.260208+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 40439, "timestamp": "2026-09-07 16:38:25.926967+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1669ms"}
+{"source_line": 40445, "timestamp": "2026-09-07 16:38:25.970389+0100", "message": "[HTTPExecute] \u25b6 request='tap ui.profiles.addProfileButton' bundle=com.hebertgo.nestmind.debug session=817E2EAD-ECD0-498E-AA00-914974387AE2 mode=auto"}
+{"source_line": 40473, "timestamp": "2026-09-07 16:38:25.978377+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 42844, "timestamp": "2026-09-07 16:38:37.647707+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11677ms"}
+{"source_line": 42851, "timestamp": "2026-09-07 16:38:42.563456+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=817E2EAD-ECD0-498E-AA00-914974387AE2 mode=auto"}
+{"source_line": 42876, "timestamp": "2026-09-07 16:38:42.567538+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 43514, "timestamp": "2026-09-07 16:38:47.198022+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4634ms"}
+{"source_line": 43521, "timestamp": "2026-09-07 16:38:47.214605+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=817E2EAD-ECD0-498E-AA00-914974387AE2 mode=auto"}
+{"source_line": 43550, "timestamp": "2026-09-07 16:38:47.217986+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 43821, "timestamp": "2026-09-07 16:38:48.742302+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1527ms"}
+{"source_line": 43827, "timestamp": "2026-09-07 16:38:48.786506+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=817E2EAD-ECD0-498E-AA00-914974387AE2 mode=auto"}
+{"source_line": 43857, "timestamp": "2026-09-07 16:38:48.789709+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 44435, "timestamp": "2026-09-07 16:38:53.074267+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4287ms"}
+{"source_line": 44442, "timestamp": "2026-09-07 16:38:53.097744+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=817E2EAD-ECD0-498E-AA00-914974387AE2 mode=auto"}
+{"source_line": 44471, "timestamp": "2026-09-07 16:38:53.102926+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 45375, "timestamp": "2026-09-07 16:38:59.374276+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6276ms"}
+{"source_line": 45381, "timestamp": "2026-09-07 16:39:12.792081+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 45412, "timestamp": "2026-09-07 16:39:12.810803+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 45991, "timestamp": "2026-09-07 16:39:17.456255+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4664ms"}
+{"source_line": 45998, "timestamp": "2026-09-07 16:39:17.479994+0100", "message": "[HTTPExecute] \u25b6 request='type [REDACTED]' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 46028, "timestamp": "2026-09-07 16:39:17.485904+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 47896, "timestamp": "2026-09-07 16:39:23.081862+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5601ms"}
+{"source_line": 47903, "timestamp": "2026-09-07 16:39:23.115037+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 47933, "timestamp": "2026-09-07 16:39:23.116545+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 48512, "timestamp": "2026-09-07 16:39:27.618530+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4503ms"}
+{"source_line": 48519, "timestamp": "2026-09-07 16:39:27.643097+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 48547, "timestamp": "2026-09-07 16:39:27.647603+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 48818, "timestamp": "2026-09-07 16:39:29.229349+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1586ms"}
+{"source_line": 48824, "timestamp": "2026-09-07 16:39:29.287021+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 48854, "timestamp": "2026-09-07 16:39:29.290890+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 49432, "timestamp": "2026-09-07 16:39:33.966196+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4679ms"}
+{"source_line": 49439, "timestamp": "2026-09-07 16:39:48.690630+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 49469, "timestamp": "2026-09-07 16:39:48.707809+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 52343, "timestamp": "2026-09-07 16:40:05.315382+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=16624ms"}
+{"source_line": 52350, "timestamp": "2026-09-07 16:40:09.762595+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 52380, "timestamp": "2026-09-07 16:40:09.767323+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 52959, "timestamp": "2026-09-07 16:40:11.376609+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1613ms"}
+{"source_line": 52966, "timestamp": "2026-09-07 16:40:11.400316+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 52995, "timestamp": "2026-09-07 16:40:11.403530+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 53265, "timestamp": "2026-09-07 16:40:12.205834+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=805ms"}
+{"source_line": 53271, "timestamp": "2026-09-07 16:40:12.250557+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 53301, "timestamp": "2026-09-07 16:40:12.253955+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 53878, "timestamp": "2026-09-07 16:40:13.575916+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1325ms"}
+{"source_line": 53885, "timestamp": "2026-09-07 16:40:29.061726+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 53915, "timestamp": "2026-09-07 16:40:29.066755+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 54493, "timestamp": "2026-09-07 16:40:30.648527+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1586ms"}
+{"source_line": 54500, "timestamp": "2026-09-07 16:40:30.672313+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=D785C463-D249-48D8-9965-F23AD188ABCC mode=auto"}
+{"source_line": 54529, "timestamp": "2026-09-07 16:40:30.677023+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 55378, "timestamp": "2026-09-07 16:40:33.195707+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2523ms"}
+{"source_line": 55384, "timestamp": "2026-09-07 16:40:33.232827+0100", "message": "[HTTPExecute] \u25b6 request='tap Todos' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 55412, "timestamp": "2026-09-07 16:40:33.239087+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 57129, "timestamp": "2026-09-07 16:40:39.877447+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6644ms"}
+{"source_line": 57136, "timestamp": "2026-09-07 16:40:45.162492+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 57166, "timestamp": "2026-09-07 16:40:45.169503+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 57744, "timestamp": "2026-09-07 16:40:46.812782+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1650ms"}
+{"source_line": 57751, "timestamp": "2026-09-07 16:40:46.838657+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 57780, "timestamp": "2026-09-07 16:40:46.843052+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 58050, "timestamp": "2026-09-07 16:40:47.664980+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=826ms"}
+{"source_line": 58056, "timestamp": "2026-09-07 16:40:47.691896+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 58086, "timestamp": "2026-09-07 16:40:47.695426+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 58663, "timestamp": "2026-09-07 16:40:49.076014+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1384ms"}
+{"source_line": 58670, "timestamp": "2026-09-07 16:41:01.525244+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 58701, "timestamp": "2026-09-07 16:41:01.529946+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 61312, "timestamp": "2026-09-07 16:41:19.140687+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=17615ms"}
+{"source_line": 61319, "timestamp": "2026-09-07 16:41:30.510445+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 61349, "timestamp": "2026-09-07 16:41:30.523970+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 61946, "timestamp": "2026-09-07 16:41:41.603233+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11092ms"}
+{"source_line": 61953, "timestamp": "2026-09-07 16:41:41.655213+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 61982, "timestamp": "2026-09-07 16:41:41.664829+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 62252, "timestamp": "2026-09-07 16:41:44.887757+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=3232ms"}
+{"source_line": 62258, "timestamp": "2026-09-07 16:41:44.950063+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 62288, "timestamp": "2026-09-07 16:41:44.952888+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 62924, "timestamp": "2026-09-07 16:41:52.650899+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=7700ms"}
+{"source_line": 62931, "timestamp": "2026-09-07 16:41:52.695428+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 62958, "timestamp": "2026-09-07 16:41:52.700492+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 65541, "timestamp": "2026-09-07 16:42:17.435364+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=24739ms"}
+{"source_line": 65548, "timestamp": "2026-09-07 16:42:23.597207+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 65579, "timestamp": "2026-09-07 16:42:23.624758+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 66158, "timestamp": "2026-09-07 16:42:26.581559+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2984ms"}
+{"source_line": 66165, "timestamp": "2026-09-07 16:42:26.607399+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=20BAAE43-E28E-4ADC-9EF4-AD6191ACF73B mode=auto"}
+{"source_line": 66194, "timestamp": "2026-09-07 16:42:26.614493+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 67034, "timestamp": "2026-09-07 16:42:31.091877+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4484ms"}
+{"source_line": 67050, "timestamp": "2026-09-07 16:42:46.534781+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=63E6E47C-D17C-4F44-A604-CDFFE6005996 mode=auto"}
+{"source_line": 67076, "timestamp": "2026-09-07 16:42:46.539171+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 67660, "timestamp": "2026-09-07 16:42:49.437444+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2902ms"}
+{"source_line": 67667, "timestamp": "2026-09-07 16:42:49.470079+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=63E6E47C-D17C-4F44-A604-CDFFE6005996 mode=auto"}
+{"source_line": 67696, "timestamp": "2026-09-07 16:42:49.474639+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 68536, "timestamp": "2026-09-07 16:42:53.928362+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4458ms"}
+{"source_line": 68542, "timestamp": "2026-09-07 16:42:53.987198+0100", "message": "[HTTPExecute] \u25b6 request='type [REDACTED]' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 68570, "timestamp": "2026-09-07 16:42:54.001637+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 70443, "timestamp": "2026-09-07 16:42:59.404872+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5417ms"}
+{"source_line": 70450, "timestamp": "2026-09-07 16:42:59.435818+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 70480, "timestamp": "2026-09-07 16:42:59.438394+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 71059, "timestamp": "2026-09-07 16:43:05.767258+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6331ms"}
+{"source_line": 71066, "timestamp": "2026-09-07 16:43:05.795422+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 71095, "timestamp": "2026-09-07 16:43:05.798356+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 71365, "timestamp": "2026-09-07 16:43:08.249449+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2453ms"}
+{"source_line": 71371, "timestamp": "2026-09-07 16:43:08.304591+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 71401, "timestamp": "2026-09-07 16:43:08.310710+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 71983, "timestamp": "2026-09-07 16:43:14.417374+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6112ms"}
+{"source_line": 71990, "timestamp": "2026-09-07 16:43:25.890270+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 72018, "timestamp": "2026-09-07 16:43:25.907940+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 74721, "timestamp": "2026-09-07 16:43:49.862874+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=23972ms"}
+{"source_line": 74728, "timestamp": "2026-09-07 16:43:55.424548+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 74758, "timestamp": "2026-09-07 16:43:55.432097+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 75337, "timestamp": "2026-09-07 16:43:58.404209+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2979ms"}
+{"source_line": 75344, "timestamp": "2026-09-07 16:43:58.430320+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 75373, "timestamp": "2026-09-07 16:43:58.435199+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 75643, "timestamp": "2026-09-07 16:43:59.884821+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=1454ms"}
+{"source_line": 75649, "timestamp": "2026-09-07 16:43:59.927600+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 75679, "timestamp": "2026-09-07 16:43:59.931679+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 76257, "timestamp": "2026-09-07 16:44:02.614791+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2687ms"}
+{"source_line": 76264, "timestamp": "2026-09-07 16:44:02.638957+0100", "message": "[HTTPExecute] \u25b6 request='tap cached action' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 76294, "timestamp": "2026-09-07 16:44:02.645434+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 78913, "timestamp": "2026-09-07 16:44:24.368742+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=21729ms"}
+{"source_line": 78920, "timestamp": "2026-09-07 16:44:29.603035+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 78948, "timestamp": "2026-09-07 16:44:29.612568+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 79533, "timestamp": "2026-09-07 16:44:37.691583+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8088ms"}
+{"source_line": 79540, "timestamp": "2026-09-07 16:44:37.718172+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=6F8B59BD-4317-4CDB-9BBD-3C4998B3D188 mode=auto"}
+{"source_line": 79569, "timestamp": "2026-09-07 16:44:37.722487+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 80423, "timestamp": "2026-09-07 16:44:49.028096+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11309ms"}
+{"source_line": 80429, "timestamp": "2026-09-07 16:45:03.174965+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=01A3CFE6-ECD1-42A9-AFEB-72D6DB206C8B mode=auto"}
+{"source_line": 80460, "timestamp": "2026-09-07 16:45:03.185963+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 81043, "timestamp": "2026-09-07 16:45:11.435468+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8260ms"}
+{"source_line": 81050, "timestamp": "2026-09-07 16:45:11.459558+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=01A3CFE6-ECD1-42A9-AFEB-72D6DB206C8B mode=auto"}
+{"source_line": 81079, "timestamp": "2026-09-07 16:45:11.462897+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 81923, "timestamp": "2026-09-07 16:45:22.880946+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11421ms"}
+{"source_line": 81929, "timestamp": "2026-09-07 16:45:22.948289+0100", "message": "[HTTPExecute] \u25b6 request='type [REDACTED]' bundle=com.hebertgo.nestmind.debug session=EF3FC59C-958E-44DC-AC3D-14AE62549BDE mode=auto"}
+{"source_line": 81959, "timestamp": "2026-09-07 16:45:22.959164+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 83827, "timestamp": "2026-09-07 16:45:28.645280+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5696ms"}
+{"source_line": 83834, "timestamp": "2026-09-07 16:45:28.684433+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=EF3FC59C-958E-44DC-AC3D-14AE62549BDE mode=auto"}
+{"source_line": 83864, "timestamp": "2026-09-07 16:45:28.687035+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 84446, "timestamp": "2026-09-07 16:45:36.680288+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=7995ms"}
+{"source_line": 84453, "timestamp": "2026-09-07 16:45:36.705743+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=EF3FC59C-958E-44DC-AC3D-14AE62549BDE mode=auto"}
+{"source_line": 84482, "timestamp": "2026-09-07 16:45:36.713140+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 84762, "timestamp": "2026-09-07 16:45:42.690319+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5984ms"}
+{"source_line": 84768, "timestamp": "2026-09-07 16:45:42.746574+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=EF3FC59C-958E-44DC-AC3D-14AE62549BDE mode=auto"}
+{"source_line": 84796, "timestamp": "2026-09-07 16:45:42.753135+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 85439, "timestamp": "2026-09-07 16:45:51.018997+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8272ms"}
+{"source_line": 85456, "timestamp": "2026-09-07 16:46:05.747783+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=EF3FC59C-958E-44DC-AC3D-14AE62549BDE mode=auto"}
+{"source_line": 85485, "timestamp": "2026-09-07 16:46:05.753045+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 86070, "timestamp": "2026-09-07 16:46:14.064443+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8316ms"}
+{"source_line": 86077, "timestamp": "2026-09-07 16:46:14.102855+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=EF3FC59C-958E-44DC-AC3D-14AE62549BDE mode=auto"}
+{"source_line": 86106, "timestamp": "2026-09-07 16:46:14.106738+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 87010, "timestamp": "2026-09-07 16:46:25.672852+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11569ms"}
+{"source_line": 87016, "timestamp": "2026-09-07 16:46:25.729913+0100", "message": "[HTTPExecute] \u25b6 request='tap ui.todos.tagPickerButton' bundle=com.hebertgo.nestmind.debug session=AE27B9C2-E1EE-4466-871C-247D3A3DFDD9 mode=auto"}
+{"source_line": 87046, "timestamp": "2026-09-07 16:46:25.735464+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 89112, "timestamp": "2026-09-07 16:46:42.927103+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=17197ms"}
+{"source_line": 89119, "timestamp": "2026-09-07 16:46:47.893931+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=AE27B9C2-E1EE-4466-871C-247D3A3DFDD9 mode=auto"}
+{"source_line": 89149, "timestamp": "2026-09-07 16:46:47.902322+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 89728, "timestamp": "2026-09-07 16:46:50.867713+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2973ms"}
+{"source_line": 89735, "timestamp": "2026-09-07 16:46:50.906236+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=AE27B9C2-E1EE-4466-871C-247D3A3DFDD9 mode=auto"}
+{"source_line": 89764, "timestamp": "2026-09-07 16:46:50.911427+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 90661, "timestamp": "2026-09-07 16:46:55.396406+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4490ms"}
+{"source_line": 90667, "timestamp": "2026-09-07 16:47:07.015241+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=D3BBB7B1-6C9F-43E5-A3C6-E3D6CE7ED432 mode=auto"}
+{"source_line": 90699, "timestamp": "2026-09-07 16:47:07.024000+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 91288, "timestamp": "2026-09-07 16:47:10.014494+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2999ms"}
+{"source_line": 91295, "timestamp": "2026-09-07 16:47:10.050913+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=D3BBB7B1-6C9F-43E5-A3C6-E3D6CE7ED432 mode=auto"}
+{"source_line": 91324, "timestamp": "2026-09-07 16:47:10.055220+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 92164, "timestamp": "2026-09-07 16:47:14.551425+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4500ms"}
+{"source_line": 92170, "timestamp": "2026-09-07 16:47:14.621184+0100", "message": "[HTTPExecute] \u25b6 request='tap Done' bundle=com.hebertgo.nestmind.debug session=75E35247-E32C-4D39-9991-FBF1DFB4F2D7 mode=auto"}
+{"source_line": 92198, "timestamp": "2026-09-07 16:47:14.630886+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 94307, "timestamp": "2026-09-07 16:47:33.640723+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=19019ms"}
+{"source_line": 94314, "timestamp": "2026-09-07 16:47:43.371113+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=75E35247-E32C-4D39-9991-FBF1DFB4F2D7 mode=auto"}
+{"source_line": 94345, "timestamp": "2026-09-07 16:47:43.396690+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 94937, "timestamp": "2026-09-07 16:47:52.207409+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8836ms"}
+{"source_line": 94944, "timestamp": "2026-09-07 16:47:52.260530+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=75E35247-E32C-4D39-9991-FBF1DFB4F2D7 mode=auto"}
+{"source_line": 94973, "timestamp": "2026-09-07 16:47:52.264110+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 95817, "timestamp": "2026-09-07 16:48:03.614240+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11353ms"}
+{"source_line": 95823, "timestamp": "2026-09-07 16:48:03.705123+0100", "message": "[HTTPExecute] \u25b6 request='tap Add todo and close' bundle=com.hebertgo.nestmind.debug session=4F03CC8A-2767-48F3-B8F5-9B9DE46C4EA5 mode=auto"}
+{"source_line": 95854, "timestamp": "2026-09-07 16:48:03.711110+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 97909, "timestamp": "2026-09-07 16:48:19.777617+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=16072ms"}
+{"source_line": 97916, "timestamp": "2026-09-07 16:48:25.813667+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=4F03CC8A-2767-48F3-B8F5-9B9DE46C4EA5 mode=auto"}
+{"source_line": 97945, "timestamp": "2026-09-07 16:48:25.822609+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 98525, "timestamp": "2026-09-07 16:48:28.492864+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2679ms"}
+{"source_line": 98532, "timestamp": "2026-09-07 16:48:28.530224+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=4F03CC8A-2767-48F3-B8F5-9B9DE46C4EA5 mode=auto"}
+{"source_line": 98560, "timestamp": "2026-09-07 16:48:28.536192+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 99401, "timestamp": "2026-09-07 16:48:32.171939+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=3641ms"}
+{"source_line": 99417, "timestamp": "2026-09-07 16:48:54.353227+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=BB96A9CA-EF80-4146-A408-B62A267A4806 mode=auto"}
+{"source_line": 99448, "timestamp": "2026-09-07 16:48:54.366927+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 100080, "timestamp": "2026-09-07 16:48:57.030636+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2677ms"}
+{"source_line": 100087, "timestamp": "2026-09-07 16:48:57.069030+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=BB96A9CA-EF80-4146-A408-B62A267A4806 mode=auto"}
+{"source_line": 100116, "timestamp": "2026-09-07 16:48:57.078591+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 100957, "timestamp": "2026-09-07 16:49:00.706913+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=3637ms"}
+{"source_line": 100963, "timestamp": "2026-09-07 16:49:00.782410+0100", "message": "[HTTPExecute] \u25b6 request='tap plus' bundle=com.hebertgo.nestmind.debug session=B6B510C3-8B56-4826-9E86-F3CF39C66F26 mode=auto"}
+{"source_line": 100993, "timestamp": "2026-09-07 16:49:00.789921+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 103001, "timestamp": "2026-09-07 16:49:17.429980+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=16647ms"}
+{"source_line": 103008, "timestamp": "2026-09-07 16:49:22.616752+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B6B510C3-8B56-4826-9E86-F3CF39C66F26 mode=auto"}
+{"source_line": 103086, "timestamp": "2026-09-07 16:49:22.634073+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 103675, "timestamp": "2026-09-07 16:49:30.826258+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8209ms"}
+{"source_line": 103682, "timestamp": "2026-09-07 16:49:30.864811+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B6B510C3-8B56-4826-9E86-F3CF39C66F26 mode=auto"}
+{"source_line": 103711, "timestamp": "2026-09-07 16:49:30.868722+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 104619, "timestamp": "2026-09-07 16:49:45.405671+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=14540ms"}
+{"source_line": 104625, "timestamp": "2026-09-07 16:49:56.231592+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=2A1D07E4-436F-46BF-8DEB-6626A55B01A8 mode=auto"}
+{"source_line": 104656, "timestamp": "2026-09-07 16:49:56.237018+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 105239, "timestamp": "2026-09-07 16:50:04.629594+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8397ms"}
+{"source_line": 105246, "timestamp": "2026-09-07 16:50:04.668079+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=2A1D07E4-436F-46BF-8DEB-6626A55B01A8 mode=auto"}
+{"source_line": 105275, "timestamp": "2026-09-07 16:50:04.672448+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 106119, "timestamp": "2026-09-07 16:50:16.136775+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11468ms"}
+{"source_line": 106125, "timestamp": "2026-09-07 16:50:16.215886+0100", "message": "[HTTPExecute] \u25b6 request='type [REDACTED]' bundle=com.hebertgo.nestmind.debug session=6A64EF38-4745-4100-BC33-8F21DD150C21 mode=auto"}
+{"source_line": 106156, "timestamp": "2026-09-07 16:50:16.225024+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 107969, "timestamp": "2026-09-07 16:50:21.971338+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5755ms"}
+{"source_line": 107976, "timestamp": "2026-09-07 16:50:22.010785+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6A64EF38-4745-4100-BC33-8F21DD150C21 mode=auto"}
+{"source_line": 108004, "timestamp": "2026-09-07 16:50:22.016474+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 108588, "timestamp": "2026-09-07 16:50:30.113061+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8102ms"}
+{"source_line": 108595, "timestamp": "2026-09-07 16:50:30.151034+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=6A64EF38-4745-4100-BC33-8F21DD150C21 mode=auto"}
+{"source_line": 108624, "timestamp": "2026-09-07 16:50:30.154514+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 109468, "timestamp": "2026-09-07 16:50:41.493579+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11342ms"}
+{"source_line": 109484, "timestamp": "2026-09-07 16:50:55.648264+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=6A167822-AA28-4EC3-817F-9BE87302DBD1 mode=auto"}
+{"source_line": 109515, "timestamp": "2026-09-07 16:50:55.659800+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 110155, "timestamp": "2026-09-07 16:51:03.832915+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8184ms"}
+{"source_line": 110162, "timestamp": "2026-09-07 16:51:03.868330+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=6A167822-AA28-4EC3-817F-9BE87302DBD1 mode=auto"}
+{"source_line": 110190, "timestamp": "2026-09-07 16:51:03.872972+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 111036, "timestamp": "2026-09-07 16:51:15.228422+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11360ms"}
+{"source_line": 111042, "timestamp": "2026-09-07 16:51:15.319258+0100", "message": "[HTTPExecute] \u25b6 request='tap ui.todos.tagPickerButton' bundle=com.hebertgo.nestmind.debug session=F62B7FB5-2867-4C7A-848A-F71FB13C63F6 mode=auto"}
+{"source_line": 111072, "timestamp": "2026-09-07 16:51:15.326850+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 113073, "timestamp": "2026-09-07 16:51:34.573016+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=19253ms"}
+{"source_line": 113080, "timestamp": "2026-09-07 16:51:42.314598+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=F62B7FB5-2867-4C7A-848A-F71FB13C63F6 mode=auto"}
+{"source_line": 113110, "timestamp": "2026-09-07 16:51:42.331765+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 113689, "timestamp": "2026-09-07 16:51:47.647357+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=5332ms"}
+{"source_line": 113696, "timestamp": "2026-09-07 16:51:47.698984+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=F62B7FB5-2867-4C7A-848A-F71FB13C63F6 mode=auto"}
+{"source_line": 113725, "timestamp": "2026-09-07 16:51:47.702378+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 114565, "timestamp": "2026-09-07 16:51:53.984773+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6285ms"}
+{"source_line": 114581, "timestamp": "2026-09-07 16:52:03.760789+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=560FFECE-CB44-4008-A287-C5B051AB54A6 mode=auto"}
+{"source_line": 114611, "timestamp": "2026-09-07 16:52:03.772598+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 115192, "timestamp": "2026-09-07 16:52:08.324652+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=4563ms"}
+{"source_line": 115199, "timestamp": "2026-09-07 16:52:08.358017+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=560FFECE-CB44-4008-A287-C5B051AB54A6 mode=auto"}
+{"source_line": 115226, "timestamp": "2026-09-07 16:52:08.364259+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 116068, "timestamp": "2026-09-07 16:52:14.628455+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=6270ms"}
+{"source_line": 116074, "timestamp": "2026-09-07 16:52:14.694141+0100", "message": "[HTTPExecute] \u25b6 request='tap Done' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 116105, "timestamp": "2026-09-07 16:52:14.710766+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 118110, "timestamp": "2026-09-07 16:52:34.574627+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=19880ms"}
+{"source_line": 118117, "timestamp": "2026-09-07 16:52:40.407897+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 118147, "timestamp": "2026-09-07 16:52:40.414519+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 118730, "timestamp": "2026-09-07 16:52:48.599109+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8191ms"}
+{"source_line": 118737, "timestamp": "2026-09-07 16:52:48.627759+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 118766, "timestamp": "2026-09-07 16:52:48.629487+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 119037, "timestamp": "2026-09-07 16:52:51.877788+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=3250ms"}
+{"source_line": 119043, "timestamp": "2026-09-07 16:52:51.930539+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 119072, "timestamp": "2026-09-07 16:52:51.935591+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 119672, "timestamp": "2026-09-07 16:52:59.893895+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=7963ms"}
+{"source_line": 119679, "timestamp": "2026-09-07 16:53:14.531001+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 119705, "timestamp": "2026-09-07 16:53:14.540798+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 120292, "timestamp": "2026-09-07 16:53:22.759500+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=8228ms"}
+{"source_line": 120303, "timestamp": "2026-09-07 16:53:35.489575+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 120333, "timestamp": "2026-09-07 16:53:35.495933+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 120917, "timestamp": "2026-09-07 16:53:58.092685+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=22603ms"}
+{"source_line": 120924, "timestamp": "2026-09-07 16:53:58.143523+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=9B7CFCCB-C6BC-4A89-9F66-335D1CC53102 mode=auto"}
+{"source_line": 120953, "timestamp": "2026-09-07 16:53:58.147036+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 121802, "timestamp": "2026-09-07 16:54:09.604031+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=11460ms"}
+{"source_line": 121808, "timestamp": "2026-09-07 16:54:09.671690+0100", "message": "[HTTPExecute] \u25b6 request='tap Add todo and close' bundle=com.hebertgo.nestmind.debug session=7B2751B1-401F-4014-857A-9F5C1170E9B1 mode=auto"}
+{"source_line": 121836, "timestamp": "2026-09-07 16:54:09.673801+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 123838, "timestamp": "2026-09-07 16:54:26.095840+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=16424ms"}
+{"source_line": 123845, "timestamp": "2026-09-07 16:54:33.095455+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=7B2751B1-401F-4014-857A-9F5C1170E9B1 mode=auto"}
+{"source_line": 123870, "timestamp": "2026-09-07 16:54:33.105564+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 124454, "timestamp": "2026-09-07 16:54:35.844180+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2748ms"}
+{"source_line": 124461, "timestamp": "2026-09-07 16:54:35.874535+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=7B2751B1-401F-4014-857A-9F5C1170E9B1 mode=auto"}
+{"source_line": 124490, "timestamp": "2026-09-07 16:54:35.879774+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 125390, "timestamp": "2026-09-07 16:54:39.645189+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=3770ms"}
+{"source_line": 125424, "timestamp": "2026-09-07 16:55:10.197813+0100", "message": "[HTTPExecute] \u25b6 request='inspect cache' bundle=com.hebertgo.nestmind.debug session=B2D2CB65-49B2-4913-8543-7D2F263335C1 mode=auto"}
+{"source_line": 125507, "timestamp": "2026-09-07 16:55:10.205060+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 126094, "timestamp": "2026-09-07 16:55:13.039389+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=2841ms"}
+{"source_line": 126101, "timestamp": "2026-09-07 16:55:13.067807+0100", "message": "[HTTPExecute] \u25b6 request='describe screen' bundle=com.hebertgo.nestmind.debug session=B2D2CB65-49B2-4913-8543-7D2F263335C1 mode=auto"}
+{"source_line": 126130, "timestamp": "2026-09-07 16:55:13.070523+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 126970, "timestamp": "2026-09-07 16:55:16.842070+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=3774ms"}
+{"source_line": 126976, "timestamp": "2026-09-07 16:55:16.931117+0100", "message": "[HTTPExecute] \u25b6 request='tap plus' bundle=com.hebertgo.nestmind.debug session=143CC20F-1998-40BA-AD15-34CF557F189C mode=auto"}
+{"source_line": 127006, "timestamp": "2026-09-07 16:55:16.937276+0100", "message": "[HTTPExecute] \u2192 Routing to WorkflowEngine.execute()"}
+{"source_line": 129016, "timestamp": "2026-09-07 16:55:34.545034+0100", "message": "[HTTPExecute] \u25c0 completed status=success success=true elapsed=17613ms"}

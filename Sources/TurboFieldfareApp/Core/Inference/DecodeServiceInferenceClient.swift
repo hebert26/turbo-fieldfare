@@ -5,7 +5,7 @@ import TurboFieldfare
 import TurboFieldfareDecodeProtocol
 
 public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
-    AppInferenceMemoryReporting, AppInferenceTranscriptReporting, @unchecked Sendable {
+    AppInferenceMemoryReporting, AppInferenceTranscriptReporting, AppContextCheckpointClient, @unchecked Sendable {
     private struct Connection {
         var input: FileHandle?
         var responses: DecodeServiceResponseRouter?
@@ -14,7 +14,66 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         var socketPath: String?
     }
 
+    /// Only opted-in requests need to outlive their visible stream. Protect the
+    /// shared display state from an old receiver while its numeric footer drains.
+    private final class MeasurementConsumer: Sendable {
+        private struct State {
+            var active = true
+            var stopRequested = false
+            var finished = false
+        }
+        let generationID = UUID()
+        private let state = Mutex(State())
+        private let commands = DispatchQueue(label: "TurboFieldfare.MeasurementCommands")
+        // Accessed only on commands. There is at most one queued Stop.
+        private let dispatch = Mutex<(@Sendable () -> Void)?>(nil)
+
+        func cancel() {
+            state.withLock { $0.active = false }
+            requestStop()
+        }
+
+        var isCancelled: Bool { state.withLock { !$0.active } }
+
+        func requestStop() {
+            let first = state.withLock { value in
+                guard !value.stopRequested, !value.finished else { return false }
+                value.stopRequested = true
+                return true
+            }
+            guard first else { return }
+            commands.async { [self] in
+                let stop = dispatch.withLock { $0 }
+                stop?()
+            }
+        }
+
+        func sendGeneration(
+            _ send: () throws -> Void, stop: @escaping @Sendable () -> Void
+        ) throws {
+            try commands.sync {
+                guard !state.withLock({ $0.stopRequested }) else { throw CancellationError() }
+                try send()
+                dispatch.withLock { $0 = stop }
+            }
+        }
+
+        func finish() {
+            state.withLock { $0.finished = true }
+            commands.sync { dispatch.withLock { $0 = nil } }
+        }
+
+        func performIfActive(_ update: () -> Void) -> Bool {
+            state.withLock { value in
+                guard value.active else { return false }
+                update()
+                return true
+            }
+        }
+    }
+
     private let connection = Mutex(Connection())
+    private let currentMeasurementConsumer = Mutex<MeasurementConsumer?>(nil)
     private let serviceURL: URL
     private let inferenceMemory = Mutex<UInt64?>(nil)
     private let inferenceTowerMemory = Mutex<UInt64?>(nil)
@@ -132,15 +191,26 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     public func generate(_ request: AppGenerationRequest)
         -> AsyncThrowingStream<AppInferenceEvent, Error> {
         AsyncThrowingStream { continuation in
+            let measurementConsumer = request.runtimeMeasurementCapture.map { _ in
+                MeasurementConsumer()
+            }
+            currentMeasurementConsumer.withLock { $0 = measurementConsumer }
             let task = Task.detached(priority: .userInitiated) { [self] in
                 var pendingThinkingToken: AppTokenEvent?
+                var measurementReceiver: (id: UUID, responses: DecodeServiceResponseRouter)?
                 do {
                     try request.validate()
                     guard let handles = currentHandles() else {
                         throw AppInferenceError.modelNotLoaded
                     }
-                    let generationID = UUID()
-                    generationTranscriptMailbox.reset()
+                    let generationID = measurementConsumer?.generationID ?? UUID()
+                    if let measurementConsumer {
+                        guard measurementConsumer.performIfActive({
+                            generationTranscriptMailbox.reset()
+                        }) else { throw CancellationError() }
+                    } else {
+                        generationTranscriptMailbox.reset()
+                    }
                     var command = DecodeGenerationRequest(
                         prompt: request.prompt,
                         imageAttachments: request.imageAttachments.map {
@@ -164,24 +234,78 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         toolTurn: try Self.decodeToolTurn(request.toolTurn))
                     command.captureToolFailureEvidence = request.captureToolFailureEvidence ? true : nil
                     command.captureGPUCompletionTiming = request.captureGPUCompletionTiming ? true : nil
-                    try write(.generate(command), to: handles.input,
-                              expecting: handles.responses)
+                    command.runtimeMeasurementCapture = request.runtimeMeasurementCapture
+                    command.scopedCancellation = measurementConsumer == nil ? nil : true
+                    let receivesMeasurements = command.runtimeMeasurementCapture != nil
+                        && handles.responses.beginMeasurementReception(generationID)
+                    if receivesMeasurements {
+                        measurementReceiver = (generationID, handles.responses)
+                    }
+                    if let capture = command.runtimeMeasurementCapture, !receivesMeasurements {
+                        command.runtimeMeasurementCapture = nil
+                        var status = DecodeServiceEvent(kind: .measurement, generationID: generationID)
+                        status.measurementCaptureID = capture.stepID
+                        status.measurementBatchJSON = "{\"receiver_admission_refused\":1}"
+                        status.measurementFinal = true
+                        await AgentInferenceTrace.shared?.runtimeMeasurementEvent(
+                            status, capture: capture,
+                            conversation: request.conversationEpoch, turn: request.turnIndex)
+                    }
+                    if let measurementConsumer {
+                        try measurementConsumer.sendGeneration({
+                            try write(.generate(command), to: handles.input,
+                                      expecting: handles.responses)
+                        }, stop: { [weak self] in
+                            try? self?.write(.cancelGeneration(generationID), to: handles.input,
+                                             expecting: handles.responses)
+                        })
+                    } else {
+                        try write(.generate(command), to: handles.input,
+                                  expecting: handles.responses)
+                    }
 
                     var expectedSequence: UInt64 = 1
                     var lastMetricYield = Date.distantPast
                     var hasYieldedVisibleText = false
                     while true {
                         let event = try await handles.responses.next(matching: generationID)
+                        if let capture = request.runtimeMeasurementCapture {
+                            guard event.generationID == generationID else { continue }
+                            await AgentInferenceTrace.shared?.runtimeMeasurementEvent(
+                                event, capture: capture,
+                                conversation: request.conversationEpoch, turn: request.turnIndex)
+                        }
                         // Only when the event carries a figure: an event
                         // without one says nothing about memory, and clearing
                         // the last reading made the display flicker to empty.
-                        if let bytes = event.currentMemoryBytes {
-                            inferenceMemory.withLock { $0 = bytes }
-                        }
-                        if let tower = event.visionTowerMappedBytes {
-                            inferenceTowerMemory.withLock { $0 = tower }
+                        if let measurementConsumer {
+                            guard measurementConsumer.performIfActive({
+                                if let bytes = event.currentMemoryBytes {
+                                    inferenceMemory.withLock { $0 = bytes }
+                                }
+                                if let tower = event.visionTowerMappedBytes {
+                                    inferenceTowerMemory.withLock { $0 = tower }
+                                }
+                            }) else {
+                                // The visible stream has ended. Keep this sole
+                                // receiver registered and drain numeric data
+                                // through its terminal without updating a new UI.
+                                if event.kind == .finished || event.kind == .cancelled
+                                    || event.kind == .failed || event.kind == .lineageLost {
+                                    break
+                                }
+                                continue
+                            }
+                        } else {
+                            if let bytes = event.currentMemoryBytes {
+                                inferenceMemory.withLock { $0 = bytes }
+                            }
+                            if let tower = event.visionTowerMappedBytes {
+                                inferenceTowerMemory.withLock { $0 = tower }
+                            }
                         }
                         guard event.generationID == generationID else { continue }
+                        if event.kind == .measurement { continue }
 
                         if event.kind == .toolCall {
                             guard let call = event.toolCall,
@@ -217,7 +341,13 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             continue
                         }
                         if event.kind == .snapshot {
-                            generationTranscriptMailbox.append(event.textDelta)
+                            if let measurementConsumer {
+                                guard measurementConsumer.performIfActive({
+                                    generationTranscriptMailbox.append(event.textDelta)
+                                }) else { continue }
+                            } else {
+                                generationTranscriptMailbox.append(event.textDelta)
+                            }
                             // Keep the newest snapshot, including nil clearing a
                             // completed draft, until the UI cadence or terminal flush.
                             pendingThinkingToken = AppTokenEvent(
@@ -291,21 +421,39 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                         default:
                             continue
                         }
-                        return
+                        break
                     }
                 } catch {
-                    if let pendingThinkingToken {
+                    if measurementConsumer?.isCancelled != true, let pendingThinkingToken {
                         continuation.yield(.token(pendingThinkingToken))
                     }
                     continuation.finish(throwing: error)
+                }
+                // This is the receive owner's actual exit, including setup and
+                // connection failures. UI cancellation alone must not release
+                // the footer reservation or unregister its live socket consumer.
+                if let measurementConsumer {
+                    measurementConsumer.finish()
+                    currentMeasurementConsumer.withLock {
+                        if $0 === measurementConsumer { $0 = nil }
+                    }
+                }
+                if let measurementReceiver {
+                    measurementReceiver.responses.abandonMeasurementReception(measurementReceiver.id)
+                }
+                if let capture = request.runtimeMeasurementCapture {
+                    await AgentInferenceTrace.shared?.runtimeMeasurementReceptionEnded(
+                        capture: capture, conversation: request.conversationEpoch,
+                        turn: request.turnIndex)
                 }
             }
             continuation.onTermination = { [weak self] termination in
                 // A completed old stream must not send an unscoped Stop that
                 // can arrive after the next generation has begun.
                 guard case .cancelled = termination else { return }
+                measurementConsumer?.cancel()
                 task.cancel()
-                self?.cancel()
+                if measurementConsumer == nil { self?.cancel() }
             }
         }
     }
@@ -337,7 +485,39 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         }
     }
 
+    public func contextCheckpoint(_ request: DecodeContextCheckpointRequest) async throws
+        -> DecodeContextCheckpointReceipt {
+        try Task.checkCancellation()
+        guard let handles = currentHandles() else { throw AppInferenceError.modelNotLoaded }
+        let cancellation = AppGenerationStop()
+        return try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            try write(.contextCheckpoint(request), to: handles.input, expecting: handles.responses)
+            cancellation.activate { [self] in
+                try? write(.cancelGeneration(request.requestID), to: handles.input, expecting: handles.responses)
+            }
+            defer { cancellation.finish() }
+            let event = try await handles.responses.next(matching: request.requestID)
+            guard event.kind == .contextCheckpoint, let receipt = event.contextCheckpoint,
+                  receipt.checkpointID == request.checkpointID,
+                  receipt.replacementEpoch == request.replacementEpoch,
+                  receipt.committed == request.commit else {
+                throw AppInferenceError.conversationLineageLost(event.error
+                    ?? "Checkpoint acknowledgement did not match. The task stopped without replaying its action.")
+            }
+            // Return a committed acknowledgement even if Stop raced it. The
+            // app must record the new epoch before reporting interruption.
+            return receipt
+        } onCancel: {
+            cancellation.requestStop()
+        }
+    }
+
     public func cancel() {
+        if let measurementConsumer = currentMeasurementConsumer.withLock({ $0 }) {
+            measurementConsumer.requestStop()
+            return
+        }
         guard let handles = currentHandles() else { return }
         try? write(.cancel, to: handles.input, expecting: handles.responses)
     }
@@ -578,6 +758,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     private static func decodeToolTurn(_ turn: AppToolTurn?) throws
         -> DecodeToolTurn? {
         switch turn {
+        case .checkpoint(let id):
+            return .checkpoint(id)
         case .user(let developerPrompt, let tools):
             return .user(
                 developerPrompt: developerPrompt,

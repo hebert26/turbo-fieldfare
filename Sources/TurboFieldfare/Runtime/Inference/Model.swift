@@ -48,9 +48,18 @@ public struct Model {
     let streamersBox: StreamersBox
     let streamersQueue: DispatchQueue
 
+    /// Attached only for an explicitly selected request, independently of GPU
+    /// tracing. Generation ownership serializes attach/clear with forward work.
+    /// The nil getter is a reference read, with no clocks, locks or allocations.
+    public var measurementCapture: RuntimeMeasurementCapture? {
+        get { streamersBox.measurementCapture }
+        nonmutating set { streamersQueue.sync { streamersBox.measurementCapture = newValue } }
+    }
+
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
+        var measurementCapture: RuntimeMeasurementCapture?
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
@@ -271,6 +280,7 @@ public struct Model {
         if streamersBox.streamers[L] != nil {
             return
         }
+        let wasVerified = streamersBox.layerVerified[L]
         let basename = packedExpertsLayout.layers[L].file
         let url = directoryURL
             .appendingPathComponent("packed_experts")
@@ -318,6 +328,14 @@ public struct Model {
             cachePolicy: expertCachePolicy,
             fileDescriptor: layerFD)
         streamersBox.layerVerified[L] = true
+        if let capture = streamersBox.measurementCapture,
+           let streamer = streamersBox.streamers[L] {
+            // time, layer, reopened-after-release, slots, aligned scratch bytes.
+            capture.record(.streamerOpened, DispatchTime.now().uptimeNanoseconds,
+                           UInt64(L), wasVerified ? 1 : 0, UInt64(slotCount),
+                           streamer.diagnosticSlotScratchBytes)
+            streamer.recordMeasurementSnapshot(capture, layer: L, reason: wasVerified ? 5 : 4)
+        }
     }
 
     /// Test hook: how many layer files have been opened so far.
@@ -738,6 +756,12 @@ extension Model {
             let releasedBytes = streamersBox.streamers.compactMap { $0 }.reduce(UInt64(0)) {
                 $0 + $1.diagnosticSlotScratchBytes
             }
+            if let capture = streamersBox.measurementCapture,
+               capture.shouldCapturePreRelease(openLayers: releasedLayerCount) {
+                // Preserve the first populated baseline across several fresh images
+                // before a single prefill. Later empty releases cannot replace it.
+                recordMeasurementCacheSnapshotLocked(capture, reason: 7, position: -1)
+            }
             if policy == .onDemand {
                 var released = streamersBox.streamers
                 streamersBox.streamers = Array(
@@ -748,6 +772,13 @@ extension Model {
                 released.removeAll()
             }
             let remaining = streamersBox.streamers.compactMap { $0 }
+            if let capture = streamersBox.measurementCapture {
+                // time, policy(1 release/2 keep), released layers, released bytes, GPU drain.
+                capture.record(.residencyRelease, DispatchTime.now().uptimeNanoseconds,
+                               policy == .onDemand ? 1 : 2,
+                               UInt64(policy == .onDemand ? releasedLayerCount : 0),
+                               policy == .onDemand ? releasedBytes : 0, gpuDrainNanoseconds)
+            }
             return VisionExpertResidencyTransition(
                 policy: policy,
                 gpuDrainNanoseconds: gpuDrainNanoseconds,
@@ -759,6 +790,46 @@ extension Model {
                 },
                 wallNanoseconds: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - start)
         }
+    }
+
+    /// Enabled-only snapshots copy numeric values into fixed capture storage.
+    /// A negative position is exported as UInt64.max (unknown), never as zero.
+    public func recordMeasurementCacheSnapshot(reason: UInt64, position: Int) {
+        guard let capture = measurementCapture else { return }
+        streamersQueue.sync {
+            recordMeasurementCacheSnapshotLocked(capture, reason: reason, position: position)
+        }
+    }
+
+    private func recordMeasurementCacheSnapshotLocked(
+        _ capture: RuntimeMeasurementCapture, reason: UInt64, position: Int
+    ) {
+        var openCount: UInt64 = 0
+        var scratchBytes: UInt64 = 0
+        for streamer in streamersBox.streamers {
+            if let streamer {
+                openCount += 1
+                scratchBytes += streamer.diagnosticSlotScratchBytes
+            }
+        }
+        capture.record(.cacheBoundary, reason, position >= 0 ? UInt64(position) : .max,
+                       DispatchTime.now().uptimeNanoseconds, openCount, scratchBytes)
+        for layer in streamersBox.streamers.indices {
+            if let streamer = streamersBox.streamers[layer] {
+                streamer.recordMeasurementSnapshot(capture, layer: layer, reason: reason)
+            } else {
+                capture.record(.cacheLayer, UInt64(layer), reason, 0, 0, 0)
+            }
+        }
+    }
+
+    /// Full prefill endpoint, including retained-feature replay. Fresh image
+    /// encoding sets the pending flag, so that path gets a distinct reason.
+    public func completeMeasurementPostImagePrefill(position: Int) {
+        guard let capture = measurementCapture else { return }
+        let postImage = capture.needsPostImagePrefillSnapshot
+        recordMeasurementCacheSnapshot(reason: postImage ? 2 : 3, position: position)
+        if postImage { capture.finishPostImagePrefill() }
     }
 
 }

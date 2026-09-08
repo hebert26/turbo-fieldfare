@@ -198,6 +198,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let greedyTokenBuf: MTLBuffer // 4 B UInt32 fused-head output
     private var prefillChunkState = PrefillChunkCommitState()
     private var prefillScratch: PrefillChunkScratchBuffers?
+    /// Allocated only for an explicit numeric capture. Holds no capture strongly.
+    private var fullAttentionStageTiming: FullAttentionStageTiming?
 
     private static let rdadviseBoundedMissCap = 12
     private static let rdadviseBoundedMaxCallNanos: UInt64 = 250_000
@@ -580,6 +582,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 writeFinalHead: spanIndex == spans.count - 1)
             onProgress(span.completedCount)
         }
+        if let capture = model.measurementCapture {
+            // End of the entire successful prefill, after all chunks and their
+            // existing GPU waits. Payload: time, start, count, image spans, reserved.
+            capture.record(.prefillComplete, DispatchTime.now().uptimeNanoseconds,
+                           UInt64(startPosition), UInt64(tokens.count), 0, 0)
+            model.completeMeasurementPostImagePrefill(position: startPosition + tokens.count)
+        }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
                                  seed: .greedyToken(lastGreedyToken))
@@ -667,6 +676,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     : nil)
             completed += item.range.count
             onProgress(completed)
+        }
+        if let capture = model.measurementCapture {
+            // Image features may be retained from an earlier turn. Only a fresh
+            // encode arms the model's pending post-image snapshot.
+            capture.record(.prefillComplete, DispatchTime.now().uptimeNanoseconds,
+                           UInt64(startPosition), UInt64(tokens.count),
+                           UInt64(input.imageSpans.count), 0)
+            model.completeMeasurementPostImagePrefill(position: startPosition + tokens.count)
         }
         if outputMode == .greedyIfAvailable, useFusedGreedyHead {
             return PrefillResult(newPosition: startPosition + tokens.count,
@@ -778,6 +795,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let sqrtHidden = Float(D).squareRoot()
         let t = tokens.count
         let emb = model.embedding
+        let measurementCapture = model.measurementCapture
 
         func encodeInt4Projection(commandBuffer: MTLCommandBuffer,
                                   family: PrefillProjectionFamily,
@@ -1125,6 +1143,12 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         routeIDs.append(min(idPtr[i], UInt32(cfg.numExperts - 1)))
                         routeWeights.append(weightPtr[i])
                     }
+                    if let capture = measurementCapture,
+                       capture.recordPrefillRoutes(layer: L, startPosition: startPosition,
+                                                   tokenCount: t, topK: cfg.topKExperts,
+                                                   expertIDs: routeIDs) {
+                        model.recordMeasurementCacheSnapshot(reason: 1, position: startPosition)
+                    }
                     let pairs = PrefillRouter.makeTokenExpertPairs(indices: routeIDs,
                                                                    weights: routeWeights,
                                                                    queryCount: t,
@@ -1147,6 +1171,18 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         numExperts: cfg.numExperts,
                         tileExpertCount: routeTileExpertCount,
                         expertSortKeys: model.routedExpertPhysicalOffsets(layer: L))
+                    if let capture = measurementCapture {
+                        // Identity: position bits 0...31, layer 32...39, image 40,
+                        // chunk token count 48...63. Remaining payload: unique
+                        // experts, tiles, routed pairs, allocated persistent scratch.
+                        capture.record(.prefillChunk,
+                                       Self.measurementPrefillIdentity(
+                                        startPosition: startPosition, layer: L,
+                                        tokenCount: t, isImage: embeddingOverride != nil),
+                                       UInt64(routes.groups.count), UInt64(routes.tiles.count),
+                                       UInt64(routes.sortedPairs.count),
+                                       UInt64(scratch.layout.totalPersistentBytes))
+                    }
 
                     guard let sharedCB = ctx.queue.makeCommandBuffer() else {
                         throw ModelError.residentBufferWrapFailed
@@ -1264,6 +1300,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                     detail: "routed tile scheduler requested pending action without pending tile")
                             }
                         }
+                        let fetchStarted = measurementCapture != nil
+                            ? DispatchTime.now().uptimeNanoseconds : 0
                         let fetch = try await PrefillStreamedTileBinding.fetchBindingForTile(
                             model: model,
                             layer: L,
@@ -1271,6 +1309,21 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             routes: routes,
                             plannedFetch: plannedFetch,
                             avoidingSlots: Set(pendingTiles.flatMap(\.fetch.plannedAssignedSlots)))
+                        if let capture = measurementCapture {
+                            let fetchNanoseconds = DispatchTime.now().uptimeNanoseconds - fetchStarted
+                            // Successful caller await duration, including planning
+                            // inside fetchBindingForTile. Failed reads are recorded
+                            // by ModelExpertIO, with completed byte volume unknown.
+                            // Payload: identity, tile, duration, exact hits, misses.
+                            capture.record(.prefillFetch,
+                                           Self.measurementPrefillIdentity(
+                                           startPosition: startPosition, layer: L,
+                                            tokenCount: t, isImage: embeddingOverride != nil),
+                                           UInt64(tileIndex), fetchNanoseconds,
+                                           fetch.usedPlannedFetch ? UInt64(fetch.plannedHits) : UInt64.max,
+                                           fetch.usedPlannedFetch
+                                            ? UInt64(fetch.plannedMissIndices.count) : UInt64.max)
+                        }
                         try fetch.binding.validateCoversPairs(routes.sortedPairs,
                                                               pairStart: Int(tile.pairStart),
                                                               pairCount: Int(tile.pairCount))
@@ -1295,7 +1348,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                         }
                         tileCB.label =
                             "prefill start=\(startPosition) count=\(t) layer=\(L) phase=routed_tile"
-                        _ = prefillGroupedMoE.encodeStreamedBatched(
+                        let microbatchCount = prefillGroupedMoE.encodeStreamedBatched(
                             commandBuffer: tileCB,
                             hidden: scratch.routedX,
                             sortedPairs: metadata.sortedPairs,
@@ -1307,6 +1360,17 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             params: streamedParams,
                             pairMicrobatchRows: scratch.layout.routedPairMicrobatchRows)
                         tileCB.commit()
+                        if let capture = measurementCapture {
+                            // Payload: identity, tile, occupied pair rows, live
+                            // experts, actual microbatches encoded. Exact expert
+                            // IDs and cache slots are in the correlated plan record.
+                            capture.record(.prefillTile,
+                                           Self.measurementPrefillIdentity(
+                                            startPosition: startPosition, layer: L,
+                                            tokenCount: t, isImage: embeddingOverride != nil),
+                                           UInt64(tileIndex), UInt64(tile.pairCount),
+                                           UInt64(tile.groupCount), UInt64(microbatchCount))
+                        }
                         pendingTiles.append(PendingPrefillTile(tileIndex: tileIndex,
                                                                commandBuffer: tileCB,
                                                                fetch: fetch,
@@ -1414,6 +1478,14 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         prefillChunkState.markCommitted()
     }
 
+    private static func measurementPrefillIdentity(startPosition: Int, layer: Int,
+                                                    tokenCount: Int, isImage: Bool) -> UInt64 {
+        UInt64(UInt32(clamping: startPosition))
+            | (UInt64(UInt8(clamping: layer)) << 32)
+            | (isImage ? UInt64(1) << 40 : 0)
+            | (UInt64(UInt16(clamping: tokenCount)) << 48)
+    }
+
     private func produceToken(token: Int32,
                               position: Int,
                               into logits: MTLBuffer,
@@ -1432,6 +1504,27 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
         let sqrtHidden = Float(cfg.hiddenSize).squareRoot()
+        let measurementCapture = model.measurementCapture
+        var stageTiming: FullAttentionStageTiming?
+        if let measurementCapture {
+            if fullAttentionStageTiming?.capture !== measurementCapture {
+                fullAttentionStageTiming = FullAttentionStageTiming(
+                    device: ctx.device, fullLayerMask: cfg.fullAttentionLayerMask,
+                    capture: measurementCapture)
+            }
+            if fullAttentionStageTiming?.beginForward(position: position) == true {
+                stageTiming = fullAttentionStageTiming
+            }
+        } else if fullAttentionStageTiming != nil {
+            // The previous serial forward already completed every sampled pass.
+            fullAttentionStageTiming = nil
+        }
+        var forwardSucceeded = false
+        defer {
+            if let stageTiming, let measurementCapture {
+                stageTiming.finishForward(capture: measurementCapture, succeeded: forwardSucceeded)
+            }
+        }
         struct PendingRoutedCommand {
             let cb: MTLCommandBuffer
             let sharedCB: MTLCommandBuffer?
@@ -1581,6 +1674,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     preconditionFailure("FP16 attention requires an FP16 KV cache")
                 }
                 if isFull {
+                    stageTiming?.beginLayer(L)
                     attention.encodeFull(commandBuffer: cb,
                                          q: qScratch,
                                          k: kSlot.buffer, kOffset: 0,
@@ -1590,7 +1684,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          numQHeads: UInt32(cfg.numHeads),
                                          numKVHeads: UInt32(numKVL),
                                          seqLen: seqLen,
-                                         scale: 1.0)
+                                         scale: 1.0,
+                                         stageTiming: stageTiming)
                 } else {
                     let ringCapacity = kv?.ringCapacity(layer: L) ?? 0
                     let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
@@ -1660,6 +1755,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             waitUntilCompleted(cb)
             let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
+            if isFull {
+                stageTiming?.completedLayer(L, buffer: cb,
+                                            encodeCommitNanos: tWait - tCb1Start,
+                                            waitNanos: waitNanos)
+            }
             let completedPending = pendingRoutedCommand
             if let pending = completedPending {
                 try finishPendingRoutedCommand(pending, waitIfNeeded: false)
@@ -1685,6 +1785,10 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             var experts = [Int](repeating: 0, count: cfg.topKExperts)
             for i in 0..<cfg.topKExperts {
                 experts[i] = min(Int(idxPtr[i]), cfg.numExperts - 1)
+            }
+            if let capture = measurementCapture,
+               capture.recordDecodeRoutes(layer: L, position: position, expertIDs: experts) {
+                model.recordMeasurementCacheSnapshot(reason: 1, position: position)
             }
 
             let routedOffsets = model.routedExpertOffsets(layer: L)
@@ -1830,6 +1934,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
             let layerIo = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tIoStart
             totalIoNanos &+= layerIo
+            if let capture = measurementCapture {
+                // Existing caller duration, with no additional clock reads.
+                // Payload: position, layer, await time, exact hits, misses.
+                capture.record(.decodeFetch, UInt64(position), UInt64(L), layerIo,
+                               plannedFetch.map { UInt64($0.hits) } ?? UInt64.max,
+                               plannedFetch.map { UInt64($0.misses.count) } ?? UInt64.max)
+            }
             let routedBufs = blobs.map { $0.buffer }
             let tCb2Start = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
             let scalarPtr = layerScalarView.buffer.contents()
@@ -1944,6 +2055,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         kv?.advance()
+        forwardSucceeded = true
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) throws {

@@ -1,0 +1,42 @@
+Processes: 1344 total, 6 running, 1338 sleeping, 9415 threads 
+2026/09/07 18:54:38
+Load Avg: 7.56, 8.14, 7.51 
+CPU usage: 18.8% user, 19.68% sys, 62.23% idle 
+SharedLibs: 559M resident, 125M data, 89M linkedit.
+MemRegions: 823719 total, 5818M resident, 306M private, 2981M shared.
+PhysMem: 30G used (6521M wired, 12G compressor), 918M unused.
+VM: 588T vsize, 6144M framework vsize, 1248371(0) swapins, 2418001(0) swapouts.
+Networks: packets: 44706645/47G in, 14602929/7544M out.
+Disks: 156693896/34T read, 14420910/388G written.
+
+PID    COMMAND          %CPU MEM   RPRVT VSIZE #TH TIME    
+30791  TurboFieldfareDe 0.0  4813M N/A   N/A   6   07:27.92
+30726  TurboFieldfareMa 0.0  135M  N/A   N/A   9   02:06.64
+Processes: 1344 total, 4 running, 1340 sleeping, 9421 threads 
+2026/09/07 18:54:48
+Load Avg: 7.89, 8.20, 7.54 
+CPU usage: 22.84% user, 15.68% sys, 61.47% idle 
+SharedLibs: 559M resident, 125M data, 89M linkedit.
+MemRegions: 970 total, 8736K resident, 306M private, 2981M shared.
+PhysMem: 30G used (6613M wired, 12G compressor), 1244M unused.
+VM: 588T vsize, 6144M framework vsize, 1248407(36) swapins, 2418001(0) swapouts.
+Networks: packets: 44707658/47G in, 14603890/7544M out.
+Disks: 156693971/34T read, 14421398/388G written.
+
+PID    COMMAND          %CPU MEM   RPRVT VSIZE #TH TIME    
+30726  TurboFieldfareMa 0.2  135M  N/A   N/A   9   02:06.67
+30791  TurboFieldfareDe 0.0  4813M N/A   N/A   6   07:27.92
+Processes: 1343 total, 12 running, 1331 sleeping, 9406 threads 
+2026/09/07 18:54:58
+Load Avg: 8.44, 8.29, 7.58 
+CPU usage: 22.37% user, 15.35% sys, 62.27% idle 
+SharedLibs: 559M resident, 125M data, 89M linkedit.
+MemRegions: 957 total, 8736K resident, 306M private, 2981M shared.
+PhysMem: 30G used (6612M wired, 12G compressor), 1214M unused.
+VM: 588T vsize, 6144M framework vsize, 1248415(8) swapins, 2418001(0) swapouts.
+Networks: packets: 44708935/47G in, 14605642/7545M out.
+Disks: 156694132/34T read, 14421827/388G written.
+
+PID    COMMAND          %CPU MEM   RPRVT VSIZE #TH TIME    
+30726  TurboFieldfareMa 0.2  135M  N/A   N/A   9   02:06.70
+30791  TurboFieldfareDe 0.0  4813M N/A   N/A   6   07:27.92

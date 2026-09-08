@@ -1,0 +1,18 @@
+{
+  "agentModeEnabled" : true,
+  "contextTokens" : 65536,
+  "expertCacheSlots" : 32,
+  "loadModelOnLaunch" : false,
+  "newlineShortcut" : "return",
+  "prefillEnabled" : true,
+  "rdadvisePolicy" : "off",
+  "showPromptExamples" : true,
+  "temperature" : 0.2,
+  "toolThinkingEnabled" : true,
+  "topK" : 64,
+  "topKEnabled" : true,
+  "topP" : 0.95,
+  "topPEnabled" : true,
+  "version" : 4,
+  "visionResidencyPolicy" : "on-demand"
+}

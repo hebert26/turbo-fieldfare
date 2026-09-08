@@ -202,7 +202,8 @@ final class Attention {
                            numQHeads: UInt32,
                            numKVHeads: UInt32,
                            seqLen: UInt32,
-                           scale: Float? = nil) {
+                           scale: Float? = nil,
+                           stageTiming: FullAttentionStageTiming? = nil) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -216,7 +217,8 @@ final class Attention {
                     v: v, vOffset: vOffset, out: out, outOffset: outOffset,
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
-                    preferGQASWA: false)
+                    preferGQASWA: false,
+                    stageTiming: stageTiming)
     }
 
 
@@ -233,7 +235,8 @@ final class Attention {
                              headDim: UInt32, numQHeads: UInt32, numKVHeads: UInt32,
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
-                             ringCapacity: UInt32 = 0) {
+                             ringCapacity: UInt32 = 0,
+                             stageTiming: FullAttentionStageTiming? = nil) {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
@@ -256,7 +259,13 @@ final class Attention {
                                          ringCapacity: ringCapacity)
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
 
-        guard let p1 = commandBuffer.makeComputeCommandEncoder() else { return }
+        let partialEncoder: MTLComputeCommandEncoder?
+        if let stageTiming {
+            partialEncoder = stageTiming.makeEncoder(commandBuffer: commandBuffer, pass: .partial)
+        } else {
+            partialEncoder = commandBuffer.makeComputeCommandEncoder()
+        }
+        guard let p1 = partialEncoder else { return }
         p1.setComputePipelineState(partialPSO)
         p1.setBuffer(q, offset: qOffset, index: 0)
         p1.setBuffer(k, offset: kOffset, index: 1)
@@ -279,7 +288,13 @@ final class Attention {
                                 threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
         p1.endEncoding()
 
-        guard let p2 = commandBuffer.makeComputeCommandEncoder() else { return }
+        let combineEncoder: MTLComputeCommandEncoder?
+        if let stageTiming {
+            combineEncoder = stageTiming.makeEncoder(commandBuffer: commandBuffer, pass: .combine)
+        } else {
+            combineEncoder = commandBuffer.makeComputeCommandEncoder()
+        }
+        guard let p2 = combineEncoder else { return }
         let combinePSO = combinePipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,

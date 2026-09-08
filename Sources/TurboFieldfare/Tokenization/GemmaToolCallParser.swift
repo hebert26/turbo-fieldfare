@@ -210,13 +210,13 @@ private struct Parser {
         try consume("\"")
         var result = ""
         while !isAtEnd {
-            if take("\"") { return result }
-            if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
-            if take("\\") {
+            let character = characters[index]
+            index += 1
+            if character == "\"" { return result }
+            if character == "\\" {
                 result += try escapedFragment()
             } else {
-                result.append(characters[index])
-                index += 1
+                result.append(character)
             }
         }
         if allowsIncomplete { throw IncompleteToolCallPrefix() }

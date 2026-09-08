@@ -39,6 +39,7 @@ struct OutputPaneView: View {
     }
 
     private var transcript: some View {
+        // Live counters stay in the HUD so status updates do not edit text storage.
         IncrementalTranscriptView(
             history: model.transcriptHistory,
             historyActivities: model.transcriptAgentActivityHistory,
@@ -55,8 +56,7 @@ struct OutputPaneView: View {
             isTerminal: !model.isRunning,
             showsPrefillPlaceholder: model.isRunning
                 && model.outputResponsePlainText.isEmpty,
-            runIdentity: model.runIdentity,
-            generationStatusText: model.generationStatusText)
+            runIdentity: model.runIdentity)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) {
                 if !model.isRunning && !model.outputResponsePlainText.isEmpty {
@@ -67,27 +67,7 @@ struct OutputPaneView: View {
             .padding(.horizontal, 24)
             .padding(.vertical, 20)
             .safeAreaInset(edge: .bottom, spacing: 0) {
-                VStack(spacing: 0) {
-                    if let preview = model.thinkingPreview, !preview.text.isEmpty {
-                        LiveGenerationPreviewPanel(
-                            title: "Gemma thinking",
-                            detail: "Recent text from this model step. This is not a final answer or a verified app result.",
-                            text: preview.text,
-                            omissionNotice: preview.earlierTextOmitted
-                                ? "Earlier thinking omitted. Showing the latest 8 KiB of text." : nil,
-                            accessibilityID: "gemma-thinking-panel")
-                    }
-                    if let preview = model.toolCallPreview {
-                        LiveGenerationPreviewPanel(
-                            title: "Preparing tool call · Not sent to VisionCapture",
-                            detail: "Latest received raw draft. It may be incomplete or invalid and is not an executable request. Stop may leave the final tokens undisplayed.",
-                            text: preview.text,
-                            omissionNotice: preview.middleTextOmitted
-                                ? "Middle text omitted. Up to the first 2 KiB and latest 6 KiB are joined in this preview." : nil,
-                            accessibilityID: "gemma-tool-call-draft-panel",
-                            monospaced: true)
-                    }
-                }
+                LiveGenerationPreviews(model: model)
             }
     }
 
@@ -196,6 +176,35 @@ struct OutputPaneView: View {
     }
 }
 
+/// Streaming previews observe the model here, independently of transcript construction.
+private struct LiveGenerationPreviews: View {
+    let model: AppModel
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let preview = model.thinkingPreview, !preview.text.isEmpty {
+                LiveGenerationPreviewPanel(
+                    title: "Gemma thinking",
+                    detail: "Recent text from this model step. This is not a final answer or a verified app result.",
+                    text: preview.text,
+                    omissionNotice: preview.earlierTextOmitted
+                        ? "Earlier thinking omitted. Showing the latest 8 KiB of text." : nil,
+                    accessibilityID: "gemma-thinking-panel")
+            }
+            if let preview = model.toolCallPreview {
+                LiveGenerationPreviewPanel(
+                    title: "Preparing tool call · Not sent to VisionCapture",
+                    detail: "Latest received raw draft. It may be incomplete or invalid and is not an executable request. Stop may leave the final tokens undisplayed.",
+                    text: preview.text,
+                    omissionNotice: preview.middleTextOmitted
+                        ? "Middle text omitted. Up to the first 2 KiB and latest 6 KiB are joined in this preview." : nil,
+                    accessibilityID: "gemma-tool-call-draft-panel",
+                    monospaced: true)
+            }
+        }
+    }
+}
+
 private struct LiveGenerationPreviewPanel: View {
     let title: String
     let detail: String
@@ -203,7 +212,6 @@ private struct LiveGenerationPreviewPanel: View {
     let omissionNotice: String?
     let accessibilityID: String
     var monospaced = false
-    @State private var scrollPosition = ScrollPosition(edge: .bottom)
     @State private var followsLatest = true
 
     var body: some View {
@@ -214,37 +222,20 @@ private struct LiveGenerationPreviewPanel: View {
                 Spacer()
                 Button("Follow latest") {
                     followsLatest = true
-                    scrollPosition.scrollTo(edge: .bottom)
                 }
                 .disabled(followsLatest)
                 .controlSize(.small)
+                .accessibilityIdentifier(accessibilityID + "-follow-latest")
             }
             Text(detail)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            ScrollView {
-                Text(text.isEmpty ? "Waiting for draft text…" : text)
-                    .font(monospaced ? .system(.body, design: .monospaced) : .body)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .simultaneousGesture(DragGesture(minimumDistance: 0).onChanged { _ in
-                        followsLatest = false
-                    })
-            }
-            .scrollPosition($scrollPosition)
-            .onScrollPhaseChange { _, phase in
-                if phase == .tracking || phase == .interacting || phase == .decelerating {
-                    followsLatest = false
-                }
-            }
-            .onChange(of: text) { _, _ in
-                if followsLatest { scrollPosition.scrollTo(edge: .bottom) }
-            }
-            .onAppear {
-                followsLatest = true
-                scrollPosition.scrollTo(edge: .bottom)
-            }
-            .frame(maxHeight: 150)
+            LiveGenerationPreviewText(
+                text: text.isEmpty ? "Waiting for draft text…" : text,
+                monospaced: monospaced,
+                accessibilityID: accessibilityID + "-text",
+                followsLatest: $followsLatest)
+                .frame(height: 150)
             if let omissionNotice {
                 Text(omissionNotice)
                     .font(.caption)

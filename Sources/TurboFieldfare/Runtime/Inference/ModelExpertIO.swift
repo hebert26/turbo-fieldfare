@@ -5,15 +5,19 @@ import TurboFieldfareFormat
 public struct RoutedExpertFetchPlan: Sendable {
     public let layer: Int
     public let cachePlan: ExpertCachePlan
+    /// nil means the plan was created without capture. Zero means its exact
+    /// details were outside the bounded window, while aggregate counts remain.
+    public let measurementPlanID: UInt64?
 
     public var experts: [Int] { cachePlan.experts }
     public var misses: [Int] { cachePlan.misses }
     public var hits: Int { cachePlan.hits }
     public var assignedSlots: [Int] { cachePlan.assignedSlots }
 
-    public init(layer: Int, cachePlan: ExpertCachePlan) {
+    public init(layer: Int, cachePlan: ExpertCachePlan, measurementPlanID: UInt64? = nil) {
         self.layer = layer
         self.cachePlan = cachePlan
+        self.measurementPlanID = measurementPlanID
     }
 }
 
@@ -64,9 +68,9 @@ extension Model {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
         let validSlots = Set(avoidingSlots.filter { $0 >= 0 && $0 < streamer.slotCount })
-        return RoutedExpertFetchPlan(
-            layer: layer,
-            cachePlan: streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots))
+        let cachePlan = streamer.planExpertsCached(experts: experts, avoidingSlots: validSlots)
+        return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan,
+                                     measurementPlanID: measurementCapture?.recordPlan(layer: layer, plan: cachePlan))
     }
 
     public func planRoutedExpertsIfPossible(layer: Int,
@@ -82,7 +86,8 @@ extension Model {
         else {
             return nil
         }
-        return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan)
+        return RoutedExpertFetchPlan(layer: layer, cachePlan: cachePlan,
+                                     measurementPlanID: measurementCapture?.recordPlan(layer: layer, plan: cachePlan))
     }
 
     public func routedExpertCacheSlotCount(layer _: Int) -> Int? {
@@ -108,6 +113,13 @@ extension Model {
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        if let capture = measurementCapture {
+            return try await Self.fetchMeasuredExperts(streamer: streamer, layer: plan.layer,
+                                                       existingPlan: plan, experts: plan.experts,
+                                                       capture: capture)
+        }
+        // Disabled path keeps the existing dispatch, continuation and buffer views.
+        // No measurement object, timestamp or cache snapshot is constructed.
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
@@ -126,6 +138,11 @@ extension Model {
     public func fetchRoutedExperts(layer: Int, experts: [Int]) async throws -> [TensorView] {
         try ensureLayerOpened(layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[layer]! }
+        if let capture = measurementCapture {
+            return try await Self.fetchMeasuredExperts(streamer: streamer, layer: layer,
+                                                       existingPlan: nil, experts: experts,
+                                                       capture: capture)
+        }
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 do {
@@ -139,6 +156,57 @@ extension Model {
                 }
             }
         }
+    }
+
+    private struct MeasuredExpertFetch: @unchecked Sendable {
+        let result: Result<[TensorView], Error>
+        let planID: UInt64
+        let allHit: Bool
+        let enqueued: UInt64
+        let entered: UInt64
+        let completed: UInt64
+    }
+
+    /// Keeps the existing global-queue boundary, including all-hit plans. Timing
+    /// distinguishes queue delay, closure work and continuation resume delay.
+    private static func fetchMeasuredExperts(
+        streamer: PreadExpertStreamer, layer: Int, existingPlan: RoutedExpertFetchPlan?,
+        experts: [Int], capture: RuntimeMeasurementCapture
+    ) async throws -> [TensorView] {
+        let fetched: MeasuredExpertFetch = await withCheckedContinuation { continuation in
+            let enqueued = DispatchTime.now().uptimeNanoseconds
+            DispatchQueue.global(qos: .userInitiated).async {
+                let entered = DispatchTime.now().uptimeNanoseconds
+                // The unplanned path still plans inside this same worker, exactly
+                // where loadExpertsCached did. Never run the stateful planner twice.
+                let cachePlan = existingPlan?.cachePlan ?? streamer.planExpertsCached(experts: experts)
+                let planID = existingPlan?.measurementPlanID
+                    ?? capture.recordPlan(layer: layer, plan: cachePlan)
+                let result: Result<[TensorView], Error>
+                do {
+                    let buffers = try streamer.executeExpertCachePlan(
+                        cachePlan, measurement: capture, measurementPlanID: planID,
+                        measurementLayer: layer)
+                    result = .success(Self.makeExpertViews(buffers, layer: layer, experts: experts))
+                } catch {
+                    result = .failure(error)
+                }
+                let completed = DispatchTime.now().uptimeNanoseconds
+                continuation.resume(returning: MeasuredExpertFetch(
+                    result: result, planID: planID, allHit: cachePlan.misses.isEmpty,
+                    enqueued: enqueued, entered: entered, completed: completed))
+            }
+        }
+        let resumed = DispatchTime.now().uptimeNanoseconds
+        let failed: Bool
+        switch fetched.result {
+        case .success: failed = false
+        case .failure: failed = true
+        }
+        capture.recordFetch(layer: layer, planID: fetched.planID, allHit: fetched.allHit,
+                            enqueued: fetched.enqueued, entered: fetched.entered,
+                            completed: fetched.completed, resumed: resumed, failed: failed)
+        return try fetched.result.get()
     }
 
     private static func makeExpertViews(

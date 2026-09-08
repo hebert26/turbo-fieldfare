@@ -20,13 +20,16 @@ enum VisionCaptureToolDefinitions {
             description: """
             Choose one simple app-navigation action. The host privately handles the configured
             target, observation, sessions, execution evidence, and the exact VisionCapture request.
-            Use selectors and roles only from the latest sanitized available_actions. For typing,
-            use the exact selector and selector_kind from available_text_fields.
+            Choose an operation from allowed_next. For tap, set_boolean, or type, copy the target ID
+            from a choice in the latest packet. IDs expire when a new packet arrives.
+            For swipe, choose a direction from can_swipe. Direction is finger movement. The host
+            reads the screen after one gesture; a submitted gesture does not prove its intended effect.
             Observe once to obtain current facts, then choose an available action or answer; do
             not repeat observe while the sanitized screen and choices are unchanged. Use screenshot
             when a complex form, selection state, completion, or navigation is unclear from text. It is read-only, requires installed
-            image support, and retires old cache handles. Screenshot pixels may help match a control to a latest
-            offered position; submit only that action's exact selector and role. Mutations remain accessibility-only:
+            image support, and retires old choices. The host then reads accessibility facts and returns current
+            target IDs when permitted. Image and read are sequential, with visual agreement unverified.
+            Offered positions belong to the later read; submit only a current target ID. Mutations remain accessibility-only:
             no pointer actions, Computer Use, recordings, or visual bypass. Native iOS system-alert buttons remain simple tap
             choices with role system_alert_button; the host privately uses VisionCapture's
             existing guarded system-alert route.
@@ -45,27 +48,22 @@ enum VisionCaptureToolDefinitions {
                             .string("set_boolean"),
                             .string("type"),
                             .string("back"),
+                            .string("swipe"),
                         ]),
                         "description": .string(
                             "One high-level navigation choice. Observe is a read-only refresh, not a waiting loop: after it returns unchanged current choices, choose an action or answer instead of observing again."),
                     ]),
-                    "selector": .object([
+                    "direction": .object([
+                        "type": .string("string"),
+                        "enum": .array([.string("up"), .string("down"), .string("left"), .string("right")]),
+                        "description": .string(
+                            "Required only for swipe. Copy a direction from can_swipe. This is finger movement, with no target, distance, or coordinates."),
+                    ]),
+                    "target": .object([
                         "type": .string("string"),
                         "minLength": .integer(1),
                         "description": .string(
-                            "For tap or set_boolean, copy the exact selector from available_actions. For type, copy it from available_text_fields. The current sanitized result does not publish focused-field proof, so do not omit a type selector."),
-                    ]),
-                    "selector_kind": .object([
-                        "type": .string("string"),
-                        "enum": .array([.string("label"), .string("identifier"), .string("placeholder")]),
-                        "description": .string(
-                            "For a named type action, copy the exact selector_kind paired with selector in available_text_fields."),
-                    ]),
-                    "role": .object([
-                        "type": .string("string"),
-                        "minLength": .integer(1),
-                        "description": .string(
-                            "Required for set_boolean. For tap, copy the exact role or omit it only when the exact selector identifies one action in the latest available_actions or its still-permitted confirming_action; the host then uses that offered role. After a correction, include the explicit role. A native alert button uses system_alert_button."),
+                            "Required for tap, set_boolean, and type. Copy the exact id from the latest choices. Never reuse an ID from an older packet or substitute a label."),
                     ]),
                     "desired_state": .object([
                         "type": .string("boolean"),

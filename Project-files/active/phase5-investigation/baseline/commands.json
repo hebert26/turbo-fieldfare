@@ -1,0 +1,151 @@
+[
+  {
+    "name": "source-head",
+    "argv": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.089646+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "410d7c86ed10c95d7ed61e1f3e05c7da4b91253721de390699fb5f19483a2921"
+  },
+  {
+    "name": "source-status",
+    "argv": [
+      "git",
+      "status",
+      "--short",
+      "--untracked-files=all"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.102040+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "e6d4eaa9a6e39c4cae1df52074cdbba9174928f717e927b6006731ac1d7e4827"
+  },
+  {
+    "name": "source-diff-stat",
+    "argv": [
+      "git",
+      "diff",
+      "--stat",
+      "HEAD"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.126768+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "3c2ef0822d349a36fe96c2394cdf797d3eb7043b3008d3d6c4b27a517fd50072"
+  },
+  {
+    "name": "source-tracked-diff",
+    "argv": [
+      "git",
+      "diff",
+      "--binary",
+      "HEAD"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.150361+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "acdf3f6d1399219fe8685420f630b2c9bb9b56872a49502a1d1b8e97a93a046d"
+  },
+  {
+    "name": "workspace-head",
+    "argv": [
+      "git",
+      "rev-parse",
+      "HEAD"
+    ],
+    "cwd": "/Users/dev-machine/.codex/worktrees/2a2f/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.174200+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "019c693bfa70f3de7b633503b40ca4b5817faec01e3dd63e730e1359763728d6"
+  },
+  {
+    "name": "macos",
+    "argv": [
+      "sw_vers"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.186348+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "e369ac71ae1ffdf3230a664aee3f2258f8786b9262a715c677cd1ab59d0b615b"
+  },
+  {
+    "name": "swift",
+    "argv": [
+      "swift",
+      "--version"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.197021+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "6b37a5114255f9ddfe79851091ba00d07a78e827a9a9ae69fe925bac4d03d36f"
+  },
+  {
+    "name": "hardware",
+    "argv": [
+      "sysctl",
+      "hw.model",
+      "hw.memsize",
+      "hw.ncpu",
+      "machdep.cpu.brand_string"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.676623+00:00",
+    "exit_code": 1,
+    "stdout_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "name": "disk",
+    "argv": [
+      "df",
+      "-h",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal",
+      "/Users/dev-machine/Library/Application Support/TurboFieldfare/gemma4.gturbo"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.681273+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "339e4bc56fa56dfc4b5f4f7647c0f5b69ee4916ac288b37141c1b22e65534e6c"
+  },
+  {
+    "name": "power",
+    "argv": [
+      "pmset",
+      "-g",
+      "custom"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.685056+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "045eb7d642d2df67a2ee85ceae3cdb2a0319a991a9d45465c135b14a5e1691f7"
+  },
+  {
+    "name": "power-source",
+    "argv": [
+      "pmset",
+      "-g",
+      "batt"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.694504+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "14726fc52ddf54b166819a66551cc819147724eae55b3e45b20676b0545c7234"
+  },
+  {
+    "name": "source-git-files",
+    "argv": [
+      "git",
+      "ls-files",
+      "-co",
+      "--exclude-standard",
+      "-z"
+    ],
+    "cwd": "/Users/dev-machine/dev/turbo-fieldfare-personal",
+    "started_utc": "2026-09-07T17:53:50.701744+00:00",
+    "exit_code": 0,
+    "stdout_sha256": "621ea0c3faba615b424acfb6d52ea2a2aaa27c4d94ac1cf72f9d2b19b355a7fb"
+  }
+]

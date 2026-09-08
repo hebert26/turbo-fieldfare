@@ -1,0 +1,272 @@
+{
+  "time_utc": "2026-09-07T18:02:13.750563+00:00",
+  "metal_resources": [
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Attention/attention.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Attention/attention.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Fusions/fused.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Fusions/fused.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/MoE/moe.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/MoE/moe.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Prefill/prefill.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Prefill/prefill.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Primitives/rmsnorm.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Primitives/rmsnorm.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Primitives/rope.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Primitives/rope.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Primitives/utility.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Primitives/utility.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Quant/dequant_int4.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Quant/dequant_int4.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Quant/dequant_int8.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Quant/dequant_int8.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Sampling/logit.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Sampling/logit.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/TensorCore/tensorops.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/TensorCore/tensorops.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Vision/vision.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Vision/vision.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Vision/vision_register_gemm.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Vision/vision_register_gemm.metal"
+      ]
+    },
+    {
+      "installed": "/Applications/TurboFieldfare.app/Contents/Resources/TurboFieldfare_TurboFieldfare.bundle/Metal/Vision/vision_resize.metal",
+      "source_matches": [
+        "Sources/TurboFieldfare/Metal/Vision/vision_resize.metal"
+      ]
+    }
+  ],
+  "model_file_sizes_only": [
+    {
+      "path": "model_weights.bin",
+      "expected_bytes": 1353771068,
+      "actual_bytes": 1353771068
+    },
+    {
+      "path": "packed_experts/layer_00.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_01.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_02.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_03.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_04.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_05.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_06.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_07.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_08.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_09.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_10.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_11.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_12.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_13.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_14.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_15.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_16.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_17.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_18.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_19.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_20.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_21.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_22.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_23.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_24.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_25.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_26.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_27.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_28.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layer_29.bin",
+      "expected_bytes": 429916160,
+      "actual_bytes": 429916160
+    },
+    {
+      "path": "packed_experts/layout.json",
+      "expected_bytes": 8450186,
+      "actual_bytes": 8450186
+    },
+    {
+      "path": "tokenizer/chat_template.jinja",
+      "expected_bytes": 17466,
+      "actual_bytes": 17466
+    },
+    {
+      "path": "tokenizer/config.json",
+      "expected_bytes": 12180,
+      "actual_bytes": 12180
+    },
+    {
+      "path": "tokenizer/tokenizer_config.json",
+      "expected_bytes": 2740,
+      "actual_bytes": 2740
+    },
+    {
+      "path": "tokenizer/tokenizer.json",
+      "expected_bytes": 32169626,
+      "actual_bytes": 32169626
+    }
+  ],
+  "note": "No model-weight hashes recalculated. Size checks do not validate contents."
+}

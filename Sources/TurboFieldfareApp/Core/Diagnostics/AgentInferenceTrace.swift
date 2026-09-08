@@ -22,9 +22,37 @@ actor AgentInferenceTrace {
         let conversation: UUID?
         let turn: Int?
         let startedAt: ContinuousClock.Instant
+        var measurementRequest: DecodeRuntimeMeasurementRequest?
     }
 
     private let file: FileHandle
+    private let checkpointRequestPath: String
+    private let measurementFile: FileHandle?
+    private let measurementPausePath: String?
+    private var measurementFileBytes: Int
+    private var measurementStopped = false
+    private var measurementDroppedBatches: UInt64 = 0
+    private var measurementDroppedBytes: UInt64 = 0
+    private var measurementBucketBytes: [Int] = []
+    private var measurementBucketStopped: [Bool] = []
+    private struct MeasurementReservation {
+        let stepID: UUID
+        var remainingFooterBytes: Int
+        var detailStopped = false
+        var generationID: UUID?
+    }
+    private var measurementReservation: MeasurementReservation?
+    private static let maximumMeasurementWrapperBytes = 2_048
+    private static var footerReservationBytes: Int {
+        // Includes the collector's one possible mixed tail batch, all aggregate
+        // rows, their wrappers, the small transport footer and terminal record.
+        RuntimeMeasurementCapture.maximumSerializedFooterBytes
+            + (RuntimeMeasurementCapture.maximumFooterBatchCount(
+                maximumBytes: DecodeRuntimeMeasurementLimits.maximumBatchBytes) + 2)
+                * maximumMeasurementWrapperBytes
+    }
+    private var confirmedConversation: UUID?
+    private var confirmedRetainedTokens: Int?
     private var nextStepIndex = 0
     private var latestStep: Step?
 
@@ -42,10 +70,308 @@ actor AgentInferenceTrace {
             return nil
         }
         file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        checkpointRequestPath = path + ".checkpoint.request"
+        var captureFile: FileHandle?
+        var captureBytes = 0
+        if ProcessInfo.processInfo.environment[
+            "TURBOFIELDFARE_RUNTIME_MEASUREMENT_CAPTURE"] == "1" {
+            let captureDescriptor = Darwin.open(
+                path + ".runtime-measurements.jsonl",
+                O_WRONLY | O_CREAT | O_APPEND | O_NOFOLLOW | O_CLOEXEC,
+                S_IRUSR | S_IWUSR)
+            if captureDescriptor >= 0 {
+                var captureInfo = stat()
+                if fstat(captureDescriptor, &captureInfo) == 0,
+                   captureInfo.st_mode & S_IFMT == S_IFREG,
+                   captureInfo.st_uid == geteuid(),
+                   fchmod(captureDescriptor, S_IRUSR | S_IWUSR) == 0 {
+                    captureFile = FileHandle(
+                        fileDescriptor: captureDescriptor, closeOnDealloc: true)
+                    captureBytes = Int(clamping: captureInfo.st_size)
+                } else {
+                    Darwin.close(captureDescriptor)
+                }
+            }
+        }
+        measurementFile = captureFile
+        measurementPausePath = captureFile == nil ? nil : path + ".runtime-measurements.paused"
+        measurementFileBytes = captureBytes
+        measurementStopped = captureBytes >= DecodeRuntimeMeasurementLimits.maximumArtifactBytes - 4_096
+        if captureFile != nil {
+            measurementBucketBytes = [Int](repeating: 0, count: 4)
+            measurementBucketStopped = [Bool](repeating: false, count: 4)
+        }
+        if captureFile != nil, captureBytes > 0, !measurementStopped {
+            // Restore reservations when an existing trace path is reused. Each
+            // read and line is bounded, and no complete capture is materialized.
+            if let recovered = Self.recoverMeasurementBuckets(
+                path: path + ".runtime-measurements.jsonl") {
+                measurementBucketBytes = recovered.bytes
+                measurementBucketStopped = recovered.stopped
+            } else {
+                measurementStopped = true
+            }
+        }
+    }
+
+    func runtimeMeasurementRequest(for step: Step?) -> DecodeRuntimeMeasurementRequest? {
+        step?.measurementRequest
+    }
+
+    /// The socket receive owner calls this on actual exit, including failures
+    /// before dispatch. The visible stream may have been cancelled much earlier.
+    func runtimeMeasurementReceptionEnded(
+        capture: DecodeRuntimeMeasurementRequest, conversation: UUID?, turn: Int?
+    ) {
+        guard measurementReservation?.stepID == capture.stepID else { return }
+        appendMeasurementStop(
+            capture: capture, conversation: conversation, turn: turn,
+            generationID: measurementReservation?.generationID,
+            reason: "receive_ended_without_measurement_terminal")
+        measurementReservation = nil
+    }
+
+    private struct MeasurementEnvelope: Decodable {
+        let event: String
+        let context_bucket: Int?
+        let context_bucket_capture_disabled: Bool?
+    }
+
+    private static func recoverMeasurementBuckets(path: String)
+        -> (bytes: [Int], stopped: [Bool])? {
+        let descriptor = Darwin.open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return nil }
+        let reader = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        var counts = [Int](repeating: 0, count: 4)
+        var stopped = [Bool](repeating: false, count: 4)
+        var buffer = Data()
+        var readBytes = 0
+        let maximumLine = DecodeRuntimeMeasurementLimits.maximumBatchBytes + 4_096
+        do {
+            while let chunk = try reader.read(upToCount: 32 * 1_024), !chunk.isEmpty {
+                readBytes += chunk.count
+                guard readBytes <= DecodeRuntimeMeasurementLimits.maximumArtifactBytes else { return nil }
+                buffer.append(chunk)
+                while let newline = buffer.firstIndex(of: 0x0a) {
+                    let bytes = buffer.distance(from: buffer.startIndex, to: newline) + 1
+                    guard bytes <= maximumLine else { return nil }
+                    let envelope: MeasurementEnvelope? = autoreleasepool {
+                        try? JSONDecoder().decode(
+                            MeasurementEnvelope.self, from: Data(buffer[..<newline]))
+                    }
+                    guard let envelope else { return nil }
+                    // Small stop notices use the shared reserved space. Numeric
+                    // batches always carry one of the four exact bucket indices.
+                    if let bucket = envelope.context_bucket {
+                        guard (0..<4).contains(bucket) else { return nil }
+                        if envelope.event == "capture_stopped" {
+                            if envelope.context_bucket_capture_disabled == true { stopped[bucket] = true }
+                        } else {
+                            counts[bucket] += bytes
+                            if counts[bucket] >= DecodeRuntimeMeasurementLimits.maximumContextBucketBytes {
+                                stopped[bucket] = true
+                            }
+                        }
+                    } else if envelope.event != "capture_stopped" { return nil }
+                    buffer.removeSubrange(...newline)
+                }
+                guard buffer.count <= maximumLine else { return nil }
+            }
+            return buffer.isEmpty ? (counts, stopped) : nil
+        } catch { return nil }
+    }
+
+    /// Called after the IPC generation check. The identity comes from the request,
+    /// never `latestStep`, which may already refer to a later cancelled/retried turn.
+    func runtimeMeasurementEvent(
+        _ event: DecodeServiceEvent, capture: DecodeRuntimeMeasurementRequest,
+        conversation: UUID?, turn: Int?
+    ) {
+        autoreleasepool {
+            persistRuntimeMeasurementEvent(
+                event, capture: capture, conversation: conversation, turn: turn)
+        }
+    }
+
+    private func persistRuntimeMeasurementEvent(
+        _ event: DecodeServiceEvent, capture: DecodeRuntimeMeasurementRequest,
+        conversation: UUID?, turn: Int?
+    ) {
+        guard measurementFile != nil else { return }
+        guard (0..<4).contains(capture.contextBucket) else { return }
+        let terminal = event.kind == .finished || event.kind == .cancelled
+            || event.kind == .failed || event.kind == .lineageLost
+        guard event.kind == .measurement || terminal
+            || event.measurementDroppedBatches != nil else { return }
+        guard measurementReservation?.stepID == capture.stepID else { return }
+        measurementReservation?.generationID = event.generationID
+        defer {
+            if terminal { measurementReservation = nil }
+        }
+        let requiresReservation = event.measurementContainsFooter == true
+            || event.measurementFinal == true || terminal
+        let batchBytes = event.measurementBatchJSON?.utf8.count ?? 0
+        guard !measurementStopped else {
+            measurementDroppedBatches &+= event.measurementDroppedBatches ?? 0
+            measurementDroppedBytes &+= event.measurementDroppedBytes ?? 0
+            if event.measurementBatchJSON != nil {
+                measurementDroppedBatches &+= 1
+                measurementDroppedBytes &+= UInt64(batchBytes)
+            }
+            if terminal {
+                appendMeasurementStop(
+                    capture: capture, conversation: conversation, turn: turn,
+                    generationID: event.generationID,
+                    reason: measurementStopped ? "artifact_limit_or_write_failure" : "context_bucket_byte_limit")
+            }
+            return
+        }
+        if measurementReservation?.detailStopped == true, !requiresReservation {
+            measurementDroppedBatches &+= event.measurementDroppedBatches ?? 0
+            measurementDroppedBytes &+= event.measurementDroppedBytes ?? 0
+            if event.measurementBatchJSON != nil {
+                measurementDroppedBatches &+= 1
+                measurementDroppedBytes &+= UInt64(batchBytes)
+            }
+            return
+        }
+        var values: [String: JSONValue] = [
+            "schema_version": .integer(1),
+            "event": .string(terminal ? "terminal" : "runtime_measurements"),
+            "step_id": .string(capture.stepID.uuidString),
+            "step_index": Self.integer(capture.stepIndex),
+            "generation_id": .string(event.generationID.uuidString),
+            "context_bucket": Self.integer(capture.contextBucket),
+            "request_start_retained_tokens": Self.integer(capture.requestStartRetainedTokens),
+            "conversation_id": conversation.map { .string($0.uuidString) } ?? .null,
+            "turn_index": Self.integer(turn),
+            "timestamp_unix_seconds": .number(Date().timeIntervalSince1970),
+        ]
+        if let dropped = event.measurementDroppedBatches {
+            values["transport_dropped_batches"] = .unsignedInteger(dropped)
+            values["transport_dropped_bytes"] = .unsignedInteger(event.measurementDroppedBytes ?? 0)
+        }
+        if terminal {
+            values["terminal_kind"] = .string(event.kind.rawValue)
+            values["stop_reason"] = event.stopReason.map(JSONValue.string) ?? .null
+            values["current_memory_bytes"] = event.currentMemoryBytes.map(JSONValue.unsignedInteger) ?? .null
+            values["sampled_peak_memory_bytes"] = event.peakMemoryBytes.map(JSONValue.unsignedInteger) ?? .null
+            if measurementReservation?.detailStopped == true {
+                values["detail_capture_stopped"] = .bool(true)
+                values["capture_dropped_batches_total"] = .unsignedInteger(measurementDroppedBatches)
+                values["capture_dropped_bytes_total"] = .unsignedInteger(measurementDroppedBytes)
+            }
+        }
+        let validBatch = event.kind == .measurement
+            && event.measurementCaptureID == capture.stepID
+            && batchBytes <= DecodeRuntimeMeasurementLimits.maximumBatchBytes
+        if event.measurementBatchJSON != nil, !validBatch {
+            values["rejected_batch_bytes"] = .unsignedInteger(UInt64(batchBytes))
+        }
+        if let final = event.measurementFinal { values["final_batch"] = .bool(final) }
+        if let footer = event.measurementContainsFooter { values["contains_footer"] = .bool(footer) }
+        guard var data = try? JSONEncoder().encode(JSONValue.object(values)) else { return }
+        if validBatch, let batch = event.measurementBatchJSON {
+            // The service's bounded numeric JSON is embedded directly. Avoid
+            // decoding thousands of numeric fields into duplicate object trees.
+            data.removeLast()
+            data.append(contentsOf: ",\"batch\":".utf8)
+            data.append(contentsOf: batch.utf8)
+            data.append(0x7d)
+        }
+        data.append(0x0a)
+        let remainingFooter = measurementReservation?.remainingFooterBytes ?? 0
+        let cap = DecodeRuntimeMeasurementLimits.maximumArtifactBytes
+        let wrapperBytes = data.count - (validBatch ? batchBytes : 0)
+        let boundedEnvelopeBytes = event.measurementContainsFooter == true ? wrapperBytes : data.count
+        if requiresReservation,
+           data.count > remainingFooter || boundedEnvelopeBytes > Self.maximumMeasurementWrapperBytes {
+            measurementStopped = true
+            appendMeasurementStop(
+                capture: capture, conversation: conversation, turn: turn,
+                generationID: event.generationID, reason: "footer_reservation_exceeded")
+            return
+        }
+        let protectedRemainder = requiresReservation ? 0 : remainingFooter
+        if !requiresReservation,
+           measurementBucketBytes[capture.contextBucket] + data.count + protectedRemainder
+                > DecodeRuntimeMeasurementLimits.maximumContextBucketBytes
+                || measurementFileBytes + data.count + protectedRemainder > cap {
+            measurementBucketStopped[capture.contextBucket] = true
+            measurementReservation?.detailStopped = true
+            measurementDroppedBatches &+= 1
+            measurementDroppedBytes &+= UInt64(batchBytes)
+            appendMeasurementStop(
+                capture: capture, conversation: conversation, turn: turn,
+                generationID: event.generationID, reason: "context_bucket_byte_limit")
+            return
+        }
+        guard measurementFileBytes + data.count <= cap,
+              measurementBucketBytes[capture.contextBucket] + data.count
+                <= DecodeRuntimeMeasurementLimits.maximumContextBucketBytes else {
+            measurementStopped = true
+            measurementDroppedBatches &+= 1
+            measurementDroppedBytes &+= UInt64(batchBytes)
+            appendMeasurementStop(
+                capture: capture, conversation: conversation, turn: turn,
+                generationID: event.generationID, reason: "artifact_byte_limit")
+            return
+        }
+        do {
+            try measurementFile?.write(contentsOf: data)
+            measurementFileBytes += data.count
+            measurementBucketBytes[capture.contextBucket] += data.count
+            if requiresReservation {
+                measurementReservation?.remainingFooterBytes -= data.count
+            }
+        } catch {
+            measurementStopped = true
+            appendMeasurementStop(
+                capture: capture, conversation: conversation, turn: turn,
+                generationID: event.generationID, reason: "artifact_write_failure")
+        }
+    }
+
+    private func appendMeasurementStop(
+        capture: DecodeRuntimeMeasurementRequest, conversation: UUID?, turn: Int?,
+        generationID: UUID?, reason: String
+    ) {
+        let body: [String: JSONValue] = [
+            "generation_id": generationID.map { .string($0.uuidString) } ?? .null,
+            "reason": .string(reason),
+            "artifact_bytes": Self.integer(measurementFileBytes),
+            "context_bucket": Self.integer(capture.contextBucket),
+            "context_bucket_bytes": Self.integer(measurementBucketBytes[capture.contextBucket]),
+            "context_bucket_capture_disabled": .bool(measurementBucketStopped[capture.contextBucket]),
+            "dropped_batches": .unsignedInteger(measurementDroppedBatches),
+            "dropped_bytes": .unsignedInteger(measurementDroppedBytes),
+            "subsequent_requests_capture_disabled": .bool(measurementStopped),
+        ]
+        let step = Step(id: capture.stepID, index: capture.stepIndex,
+                        conversation: conversation, turn: turn, startedAt: .now)
+        append(step: step, event: "runtime_measurement_capture_stopped", body: body,
+               maximumBytes: 2_048)
+        // Reserve enough artifact space to make truncation visible in the
+        // numeric artifact as well as the existing trace, without exceeding cap.
+        var record = body
+        record["event"] = .string("capture_stopped")
+        record["step_id"] = .string(capture.stepID.uuidString)
+        if var data = try? JSONEncoder().encode(JSONValue.object(record)) {
+            data.append(0x0a)
+            let noticeBytes = measurementFileBytes - measurementBucketBytes.reduce(0, +)
+            if noticeBytes + data.count <= 4_096,
+               measurementFileBytes + data.count + (measurementReservation?.remainingFooterBytes ?? 0)
+                <= DecodeRuntimeMeasurementLimits.maximumArtifactBytes {
+                do {
+                    try measurementFile?.write(contentsOf: data)
+                    measurementFileBytes += data.count
+                } catch { /* A failed private trace must not fail inference. */ }
+            }
+        }
     }
 
     func begin(_ request: AppGenerationRequest) -> Step {
-        let step = Step(
+        var step = Step(
             id: UUID(), index: nextStepIndex,
             conversation: request.conversationEpoch, turn: request.turnIndex,
             startedAt: .now)
@@ -72,7 +398,60 @@ actor AgentInferenceTrace {
                 "vision_residency_policy": .string(request.runtimeOptions.visionResidencyPolicy.rawValue),
             ]),
         ]
+        if measurementFile != nil {
+            var retained: Int?
+            if let conversation = step.conversation, conversation == confirmedConversation {
+                retained = confirmedRetainedTokens
+            } else if step.conversation != nil, step.turn == 0,
+                      request.continuesConversation, case .user = request.toolTurn {
+                // The app awaits the service's new-epoch reset before this
+                // opening request. A tool-result continuation never enters here.
+                retained = 0
+            }
+            let bucket: Int? = retained.flatMap { tokens in
+                guard (0...65_536).contains(tokens) else { return nil }
+                if tokens < 8_192 { return 0 }
+                if tokens < 32_768 { return 1 }
+                if tokens < 49_152 { return 2 }
+                return 3
+            }
+            let disposition: String
+            // Exactly one pause-file check per opted-in request. It does not
+            // change any inference input or runtime setting.
+            if measurementStopped { disposition = "artifact_unavailable_or_full" }
+            else if measurementReservation != nil { disposition = "capture_request_in_flight" }
+            else if let measurementPausePath,
+                    FileManager.default.fileExists(atPath: measurementPausePath) {
+                disposition = "paused"
+            } else if let bucket, let retained {
+                if measurementBucketStopped[bucket] { disposition = "context_bucket_full" }
+                else if measurementBucketBytes[bucket] + Self.footerReservationBytes
+                            > DecodeRuntimeMeasurementLimits.maximumContextBucketBytes
+                    || measurementFileBytes + Self.footerReservationBytes
+                            > DecodeRuntimeMeasurementLimits.maximumArtifactBytes {
+                    disposition = "insufficient_footer_reservation"
+                }
+                else {
+                    disposition = "enabled"
+                    step.measurementRequest = DecodeRuntimeMeasurementRequest(
+                        stepID: step.id, stepIndex: step.index,
+                        requestStartRetainedTokens: retained, contextBucket: bucket)
+                    measurementReservation = MeasurementReservation(
+                        stepID: step.id, remainingFooterBytes: Self.footerReservationBytes)
+                }
+            } else { disposition = "unknown_request_start_context" }
+            input["runtime_measurement_capture"] = .object([
+                "disposition": .string(disposition),
+                "request_start_retained_tokens": Self.integer(retained),
+                "context_bucket": Self.integer(bucket),
+                "context_bucket_byte_limit": Self.integer(DecodeRuntimeMeasurementLimits.maximumContextBucketBytes),
+                "footer_reserved_bytes": Self.integer(step.measurementRequest == nil ? 0 : Self.footerReservationBytes),
+            ])
+        }
         switch request.toolTurn {
+        case .checkpoint(let id):
+            input["kind"] = .string("checkpoint_resume")
+            input["checkpoint_id"] = .string(id.uuidString)
         case .user(let developerPrompt, let tools):
             input["kind"] = .string("user")
             input["developer_prompt"] = developerPrompt.map(JSONValue.string) ?? .null
@@ -117,6 +496,15 @@ actor AgentInferenceTrace {
         toolCallPreview: DecodeToolCallPreview? = nil
     ) {
         guard let step else { return }
+        // Logical completion does not end the socket receiver. In particular,
+        // Stop can finish this trace before its protected numeric footer arrives.
+        if measurementFile != nil {
+            confirmedConversation = step.conversation
+            // Only a successful service result confirms retained positions.
+            // A rollback, missing result or lost lineage is recorded as unknown.
+            confirmedRetainedTokens = error == nil && !cancelled
+                ? diagnostics?.conversationTokens : nil
+        }
         let elapsed = step.startedAt.duration(to: .now).components
         var output: [String: JSONValue] = [
             "content": .string(content),
@@ -217,6 +605,81 @@ actor AgentInferenceTrace {
     }
 
     func currentStep() -> Step? { latestStep }
+
+    /// Local one-use diagnostic, available only when an explicit trace opened.
+    /// Claim the pathname first, then validate and read that exact descriptor.
+    /// Invalid files are restored where possible, never silently discarded.
+    func consumeCheckpointRequest() -> Bool {
+        let claimed = checkpointRequestPath + ".claimed." + UUID().uuidString
+        guard renameatx_np(AT_FDCWD, checkpointRequestPath, AT_FDCWD, claimed, UInt32(RENAME_EXCL)) == 0 else {
+            return false
+        }
+        var consumed = false
+        defer {
+            if !consumed {
+                _ = renameatx_np(AT_FDCWD, claimed, AT_FDCWD, checkpointRequestPath, UInt32(RENAME_EXCL))
+            }
+        }
+        let descriptor = Darwin.open(claimed, O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard descriptor >= 0 else { return false }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              info.st_mode & S_IFMT == S_IFREG, info.st_uid == geteuid(),
+              info.st_mode & 0o777 == 0o600, info.st_size == 11,
+              let data = try? handle.read(upToCount: 12),
+              data == Data("checkpoint\n".utf8) else { return false }
+        var pathInfo = stat()
+        guard lstat(claimed, &pathInfo) == 0, pathInfo.st_dev == info.st_dev,
+              pathInfo.st_ino == info.st_ino, unlink(claimed) == 0 else { return false }
+        consumed = true
+        if let step = latestStep {
+            append(step: step, event: "forced_context_checkpoint_requested", body: ["one_use": .bool(true)])
+        }
+        return true
+    }
+
+    func checkpoint(_ receipt: DecodeContextCheckpointReceipt, callID: String,
+                    sourceEpoch: UUID, forced: Bool) {
+        if receipt.committed {
+            confirmedConversation = receipt.replacementEpoch
+            confirmedRetainedTokens = 0
+        }
+        guard let step = latestStep else { return }
+        append(step: step, event: "context_checkpoint", body: [
+            "checkpoint_id": .string(receipt.checkpointID.uuidString),
+            "settled_call_id": .string(callID),
+            "source_epoch": .string(sourceEpoch.uuidString),
+            "replacement_epoch": .string(receipt.replacementEpoch.uuidString),
+            "committed": .bool(receipt.committed), "needed": .bool(receipt.needed),
+            "trigger": .string(forced ? "explicit_comparison" : "capacity_forecast"),
+            "existing_prompt_tokens": Self.integer(receipt.existingPromptTokens),
+            "replacement_prompt_tokens": Self.integer(receipt.replacementPromptTokens),
+            "forecast_reserve_tokens": Self.integer(receipt.reserveTokens),
+            "next_result_allowance_tokens": Self.integer(receipt.resultAllowanceTokens),
+            "retained_image_count": Self.integer(receipt.retainedImageCount),
+            "retained_image_rows": Self.integer(receipt.retainedImageRows),
+            "retained_feature_bytes": Self.integer(receipt.retainedFeatureBytes),
+            "released_feature_bytes": .integer(0),
+            "preparation_seconds": .number(receipt.preparationSeconds),
+            "rebuild_timing": .string("reported by the following checkpoint_resume prefill"),
+            "latency_prediction": .null,
+        ])
+    }
+
+    func checkpointRead(id: UUID, seconds: Double) {
+        guard let step = latestStep else { return }
+        append(step: step, event: "context_checkpoint_read", body: [
+            "checkpoint_id": .string(id.uuidString), "read_seconds": .number(seconds)])
+    }
+
+    func checkpointFailure(id: UUID, commit: Bool, error: String) {
+        guard let step = latestStep else { return }
+        append(step: step, event: "context_checkpoint_failed", body: [
+            "checkpoint_id": .string(id.uuidString), "commit_requested": .bool(commit),
+            "error": .string(error)], maximumBytes: 8_192)
+    }
 
     /// Diagnostic-only projection of an already-returned failure. It is captured
     /// before identity validation, so none of these fields grant execution rights.

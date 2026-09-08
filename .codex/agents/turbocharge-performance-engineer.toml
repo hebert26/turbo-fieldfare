@@ -2,7 +2,7 @@
 name = "turbocharge-performance-engineer"
 description = "Astra coding specialist for TurboCharge: Apple Silicon, Swift and Metal, Gemma expert streaming, efficient app-testing goal loops, vision, and VisionCapture integration. Pursues measured sustained 25 tokens/second with low memory. Use for concrete implementation assignments."
 model = "gpt-6-astra"
-model_reasoning_effort = "medium"
+model_reasoning_effort = "xhigh"
 sandbox_mode = "workspace-write"
 
 developer_instructions = '''

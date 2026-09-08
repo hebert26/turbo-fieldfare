@@ -49,3 +49,7 @@ __pycache__/
 *.pyc
 .venv/
 /dist/TurboFieldfare.app
+/docs/experiments
+/Project-files/active/google-deep-investigation-20260907/evaluation
+/Project-files/active/google-deep-investigation-20260907
+/Project-files/active/mcp-concise-responses/evidence

@@ -77,6 +77,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
 
     public init(tokenizer: GFTokenizer,
                 allowedTools: Set<String>,
+                startsInThoughtChannel: Bool = false,
                 acceptsUnknownToolNames: Bool = false,
                 captureFailureEvidence: Bool = false,
                 captureThoughtPreview: Bool = false,
@@ -89,6 +90,13 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         self.captureFailureEvidence = captureFailureEvidence
         self.captureThoughtPreview = captureThoughtPreview
         self.idGenerator = idGenerator
+        // The opener belongs to the prompt, not generated output. Seed state
+        // directly so its tokens cannot inflate generated progress counters.
+        if startsInThoughtChannel {
+            channel = .thought
+            isKnownThoughtChannel = true
+            progress.stage = .thinking
+        }
     }
 
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {

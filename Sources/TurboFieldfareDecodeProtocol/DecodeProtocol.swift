@@ -65,6 +65,35 @@ public struct DecodeLoadRequest: Codable, Sendable {
     }
 }
 
+/// Private local measurement identity. Absence leaves the runtime collector off.
+public struct DecodeRuntimeMeasurementRequest: Codable, Sendable, Equatable {
+    public var stepID: UUID
+    public var stepIndex: Int
+    /// Exact retained KV positions reported by the preceding successful service
+    /// result, or zero for a confirmed new opening. Excludes the upcoming prompt.
+    public var requestStartRetainedTokens: Int
+    /// 0: below 8K, 1: 8K..<32K, 2: 32K..<48K, 3: 48K...64K.
+    public var contextBucket: Int
+
+    public init(stepID: UUID, stepIndex: Int,
+                requestStartRetainedTokens: Int, contextBucket: Int) {
+        self.stepID = stepID
+        self.stepIndex = stepIndex
+        self.requestStartRetainedTokens = requestStartRetainedTokens
+        self.contextBucket = contextBucket
+    }
+}
+
+public enum DecodeRuntimeMeasurementLimits {
+    /// Numeric JSON before the enclosing IPC frame. Far below the 4 MiB limit.
+    public static let maximumBatchBytes = 48 * 1_024
+    public static let maximumQueuedBytes = 128 * 1_024
+    public static let maximumQueuedBatches = 8
+    public static let maximumArtifactBytes = 32 * 1_024 * 1_024
+    /// Four equal byte reservations, with 4 KiB kept for truncation notices.
+    public static let maximumContextBucketBytes = (maximumArtifactBytes - 4_096) / 4
+}
+
 public struct DecodeGenerationRequest: Codable, Sendable {
     /// One user turn, never a rendered transcript. In conversation mode the
     /// service appends exactly this onto the retained KV; re-rendering history
@@ -102,6 +131,10 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var captureToolFailureEvidence: Bool?
     /// Absent means off. Enabled only by the process-opt-in agent trace.
     public var captureGPUCompletionTiming: Bool?
+    /// Separate from GPU timing, so collector off/on measurements use the same timing mode.
+    public var runtimeMeasurementCapture: DecodeRuntimeMeasurementRequest?
+    /// Opted-in capture cancellation follows this exact generation across admission.
+    public var scopedCancellation: Bool?
 
     public init(prompt: String,
                 imageAttachments: [DecodeImageAttachment]? = nil,
@@ -160,6 +193,79 @@ public struct DecodeToolResult: Codable, Equatable, Sendable {
 public enum DecodeToolTurn: Codable, Equatable, Sendable {
     case user(developerPrompt: String?, tools: [DecodeToolDefinition])
     case results([DecodeToolResult])
+    /// Resume a previously acknowledged replacement, without appending a user turn.
+    case checkpoint(UUID)
+}
+
+/// Two-phase, idle-only replacement of a satisfied tool handoff. The request
+/// identity is transport-only. checkpointID identifies the immutable transaction.
+public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
+    public var requestID: UUID
+    public var checkpointID: UUID
+    public var sourceEpoch: UUID
+    public var sourceTurnIndex: Int
+    public var replacementEpoch: UUID
+    public var pendingCall: DecodeToolCall
+    public var result: DecodeToolResult
+    public var record: String
+    public var commit: Bool
+    public var force: Bool
+    public var generationAllowance: Int
+    public var finalAnswerAllowance: Int
+    public var permitsScreenshot: Bool
+
+    public init(requestID: UUID = UUID(), checkpointID: UUID, sourceEpoch: UUID,
+                sourceTurnIndex: Int, replacementEpoch: UUID, pendingCall: DecodeToolCall,
+                result: DecodeToolResult, record: String, commit: Bool, force: Bool = false,
+                generationAllowance: Int = 8_192, finalAnswerAllowance: Int = 2_048,
+                permitsScreenshot: Bool = true) {
+        self.requestID = requestID
+        self.checkpointID = checkpointID
+        self.sourceEpoch = sourceEpoch
+        self.sourceTurnIndex = sourceTurnIndex
+        self.replacementEpoch = replacementEpoch
+        self.pendingCall = pendingCall
+        self.result = result
+        self.record = record
+        self.commit = commit
+        self.force = force
+        self.generationAllowance = generationAllowance
+        self.finalAnswerAllowance = finalAnswerAllowance
+        self.permitsScreenshot = permitsScreenshot
+    }
+}
+
+public struct DecodeContextCheckpointReceipt: Codable, Equatable, Sendable {
+    public var checkpointID: UUID
+    public var replacementEpoch: UUID
+    public var committed: Bool
+    public var needed: Bool
+    public var existingPromptTokens: Int
+    public var replacementPromptTokens: Int?
+    public var reserveTokens: Int
+    public var resultAllowanceTokens: Int
+    public var retainedImageCount: Int
+    public var retainedImageRows: Int
+    public var retainedFeatureBytes: Int
+    public var preparationSeconds: Double
+
+    public init(checkpointID: UUID, replacementEpoch: UUID, committed: Bool, needed: Bool,
+                existingPromptTokens: Int, replacementPromptTokens: Int?, reserveTokens: Int,
+                resultAllowanceTokens: Int, retainedImageCount: Int, retainedImageRows: Int,
+                retainedFeatureBytes: Int, preparationSeconds: Double) {
+        self.checkpointID = checkpointID
+        self.replacementEpoch = replacementEpoch
+        self.committed = committed
+        self.needed = needed
+        self.existingPromptTokens = existingPromptTokens
+        self.replacementPromptTokens = replacementPromptTokens
+        self.reserveTokens = reserveTokens
+        self.resultAllowanceTokens = resultAllowanceTokens
+        self.retainedImageCount = retainedImageCount
+        self.retainedImageRows = retainedImageRows
+        self.retainedFeatureBytes = retainedFeatureBytes
+        self.preparationSeconds = preparationSeconds
+    }
 }
 
 public struct DecodeToolCall: Codable, Equatable, Sendable {
@@ -190,7 +296,9 @@ public enum DecodeServiceCommand: Codable, Sendable {
     case load(DecodeLoadRequest)
     case generate(DecodeGenerationRequest)
     case resetConversation(DecodeResetConversationRequest)
+    case contextCheckpoint(DecodeContextCheckpointRequest)
     case cancel
+    case cancelGeneration(UUID)
     case unload(UUID)
     case shutdown
 }
@@ -204,6 +312,8 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
     /// Carries a live memory reading while image encoding or another silent
     /// phase has not produced progress or tokens yet.
     case memory
+    /// Bounded numeric records, always separate from terminal diagnostics.
+    case measurement
     case finished
     case cancelled
     case failed
@@ -212,6 +322,7 @@ public enum DecodeServiceEventKind: String, Codable, Sendable {
     /// leaves the conversation resumable.
     case lineageLost
     case conversationReset
+    case contextCheckpoint
     case unloaded
 }
 
@@ -328,6 +439,7 @@ public struct DecodeToolCallPreview: Codable, Equatable, Sendable {
 }
 
 public struct DecodeServiceEvent: Codable, Sendable {
+    public var contextCheckpoint: DecodeContextCheckpointReceipt?
     public var kind: DecodeServiceEventKind
     public var generationID: UUID
     public var sequence: UInt64
@@ -370,6 +482,15 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var structuredProgress: DecodeStructuredProgress?
     public var thinkingPreview: DecodeThinkingPreview?
     public var toolCallPreview: DecodeToolCallPreview?
+    public var measurementCaptureID: UUID?
+    public var measurementBatchJSON: String?
+    /// True only for a batch containing fixed aggregate footer rows, including
+    /// at most one mixed tail batch. Detail-only batches remain lossy.
+    public var measurementContainsFooter: Bool?
+    /// Marks the final bounded transport status batch.
+    public var measurementFinal: Bool?
+    public var measurementDroppedBatches: UInt64?
+    public var measurementDroppedBytes: UInt64?
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
                 sequence: UInt64 = 0, textDelta: String = "",

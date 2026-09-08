@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareDecodeProtocol
 
 public struct AppToolDefinition: Equatable, Sendable {
     public let name: String
@@ -38,6 +39,12 @@ public struct AppToolResult: Equatable, Sendable {
 public enum AppToolTurn: Equatable, Sendable {
     case user(developerPrompt: String?, tools: [AppToolDefinition])
     case results([AppToolResult])
+    case checkpoint(UUID)
+}
+
+public protocol AppContextCheckpointClient: AppInferenceClient {
+    func contextCheckpoint(_ request: DecodeContextCheckpointRequest) async throws
+        -> DecodeContextCheckpointReceipt
 }
 
 public struct AppGenerationRequest: Equatable, Sendable {
@@ -75,6 +82,8 @@ public struct AppGenerationRequest: Equatable, Sendable {
     public var captureToolFailureEvidence: Bool = false
     /// Bounded GPU timing metadata for the process-opt-in agent trace only.
     public var captureGPUCompletionTiming: Bool = false
+    /// Explicit request identity for the separate process-opt-in numeric capture.
+    public var runtimeMeasurementCapture: DecodeRuntimeMeasurementRequest?
 
     public init(modelDirectory: URL,
                 prompt: String,
@@ -114,7 +123,11 @@ public struct AppGenerationRequest: Equatable, Sendable {
 
     public func validate(fileManager: FileManager = .default,
                          requireModelDirectory: Bool = true) throws {
-        let carriesToolResults: Bool = if case .results = toolTurn { true } else { false }
+        let carriesToolResults: Bool
+        switch toolTurn {
+        case .results, .checkpoint: carriesToolResults = true
+        default: carriesToolResults = false
+        }
         guard !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || !imageAttachments.isEmpty || carriesToolResults else {
             throw AppInferenceError.invalidRequest("Prompt or image cannot be empty.")

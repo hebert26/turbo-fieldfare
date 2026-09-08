@@ -1,8 +1,27 @@
 import Darwin
 import TurboFieldfare
 import Foundation
+import Synchronization
 import TurboFieldfareAppCore
 import TurboFieldfareDecodeProtocol
+
+private final class ScopedGenerationStops: Sendable {
+    private let pending = Mutex<[UUID: AppGenerationStop]>([:])
+
+    func prepare(_ id: UUID) {
+        pending.withLock { values in
+            guard values[id] == nil, values.count < 8 else { return }
+            values[id] = AppGenerationStop()
+        }
+    }
+
+    func get(_ id: UUID) -> AppGenerationStop? { pending.withLock { $0[id] } }
+
+    func retire(_ id: UUID) {
+        let latch = pending.withLock { $0.removeValue(forKey: id) }
+        latch?.finish()
+    }
+}
 
 enum DecodeServiceError: Error, CustomStringConvertible {
     case attachmentOutsideStore(path: String)
@@ -38,11 +57,25 @@ enum DecodeServiceError: Error, CustomStringConvertible {
         DecodeUnixSocket.ignoreSIGPIPEProcessWide()
         let client = RealInferenceClient()
         let commands = DecodeCommandQueue()
+        let scopedStops = ScopedGenerationStops()
         let input = Thread {
             do {
                 while true {
                     let command = try DecodeFrameCodec.read(
                         DecodeServiceCommand.self, from: handles.input)
+                    if case .generate(let request) = command,
+                       request.scopedCancellation == true {
+                        // Arm before enqueue: Stop can arrive before the main
+                        // loop admits this request or its producer resets flags.
+                        scopedStops.prepare(request.generationID)
+                    }
+                    if case .contextCheckpoint(let request) = command {
+                        scopedStops.prepare(request.requestID)
+                    }
+                    if case .cancelGeneration(let id) = command {
+                        scopedStops.get(id)?.requestStop()
+                        continue
+                    }
                     if case .cancel = command {
                         // Cooperative: end the turn at the next token boundary
                         // and keep what it produced, so the conversation can
@@ -118,7 +151,63 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     try? handles.output.close()
                     return
                 }
+            case .contextCheckpoint(let request):
+                defer { scopedStops.retire(request.requestID) }
+                var checkpointWasCommitted = false
+                do {
+                    if let previous = try conversation.previousCheckpoint(request) {
+                        checkpointWasCommitted = previous.committed
+                        var event = DecodeServiceEvent(kind: .contextCheckpoint, generationID: request.requestID)
+                        event.contextCheckpoint = previous
+                        try write(event, to: handles.output)
+                        continue
+                    }
+                    try conversation.validateCheckpoint(request)
+                    guard let checkpointAdmission = pendingToolAdmission,
+                          Self.matches(checkpointAdmission, epoch: request.sourceEpoch,
+                                       index: request.sourceTurnIndex),
+                          let stop = scopedStops.get(request.requestID) else {
+                        throw DecodeConversationGate.Rejection.checkpointMismatch
+                    }
+                    for attachment in request.result.imageAttachments ?? [] {
+                        guard AppImageAttachmentStore.contains(URL(fileURLWithPath: attachment.path)) else {
+                            throw DecodeServiceError.attachmentOutsideStore(path: attachment.path)
+                        }
+                    }
+                    let receipt = try await client.contextCheckpoint(request, stop: stop)
+                    checkpointWasCommitted = receipt.committed
+                    try conversation.recordCheckpoint(request, receipt: receipt)
+                    if receipt.committed { pendingToolAdmission = nil }
+                    var event = DecodeServiceEvent(kind: .contextCheckpoint, generationID: request.requestID,
+                        conversationTokenCount: receipt.committed ? 0 : client.currentConversationTokens,
+                        conversationEpoch: conversation.openEpoch)
+                    event.contextCheckpoint = receipt
+                    // If this acknowledgement is lost, the app stops on EOF.
+                    // Retrying this identity returns the same receipt, never resets twice.
+                    try write(event, to: handles.output)
+                } catch {
+                    if checkpointWasCommitted {
+                        // The replacement may already be the only valid KV
+                        // lineage. A failed acknowledgement must become EOF,
+                        // never a silent wait or another admitted command.
+                        FileHandle.standardError.write(Data(
+                            "Decode service closing after a lost checkpoint acknowledgement: \(error)\n".utf8))
+                        try? handles.output.close()
+                        return
+                    }
+                    try? write(DecodeServiceEvent(kind: .failed, generationID: request.requestID,
+                        error: "Context checkpoint failed: \(error)",
+                        conversationEpoch: conversation.openEpoch), to: handles.output)
+                }
             case .generate(let request):
+                let generationStop = scopedStops.get(request.generationID)
+                defer { scopedStops.retire(request.generationID) }
+                if request.scopedCancellation == true, generationStop == nil {
+                    try? write(DecodeServiceEvent(
+                        kind: .failed, generationID: request.generationID,
+                        error: "scoped cancellation request limit reached"), to: handles.output)
+                    continue
+                }
                 guard let modelDirectory else {
                     try? write(DecodeServiceEvent(
                         kind: .failed, generationID: request.generationID,
@@ -179,12 +268,21 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                 let isConversationTurn: Bool
                 if case .turn = admission { isConversationTurn = true }
                 else { isConversationTurn = false }
+                // Measurement labels are defined for the agreed chunked-128
+                // path. Unsupported settings run normally with an explicit
+                // capture status and no collector allocation.
+                let measurementSupported = request.runtimeOptions.prefillEnabled
+                    && request.runtimeOptions.prefillChunkTokens == 128
+                let measurementCapture = request.runtimeMeasurementCapture != nil
+                    && measurementSupported ? RuntimeMeasurementCapture() : nil
                 let outbox = DecodeServiceOutbox(
                     generationID: request.generationID,
                     towerBytes: { client.currentVisionTowerBytes },
                     conversationTokens: {
                         isConversationTurn ? client.currentConversationTokens : nil
-                    })
+                    },
+                    measurementRequest: request.runtimeMeasurementCapture,
+                    measurementCapture: measurementCapture)
                 let writerFinished = DispatchSemaphore(value: 0)
                 let writer = Thread {
                     defer { writerFinished.signal() }
@@ -238,8 +336,11 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         toolTurn: try appToolTurn(request.toolTurn))
                     generation.captureToolFailureEvidence = request.captureToolFailureEvidence == true
                     generation.captureGPUCompletionTiming = request.captureGPUCompletionTiming == true
+                    generation.runtimeMeasurementCapture = request.runtimeMeasurementCapture
                     var terminalStopReason: AppStopReason?
-                    for try await event in client.generate(generation) {
+                    for try await event in client.generate(
+                        generation, measurementCapture: measurementCapture,
+                        generationStop: generationStop) {
                         if case .finished(let diagnostics) = event {
                             terminalStopReason = diagnostics.stopReason
                         }
@@ -252,6 +353,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                     // it either, and a one-sided count rejects every later turn.
                     // A turn stopped by the user does reach here: it ends at a
                     // token boundary with its partial reply committed.
+                    if case .checkpoint = request.toolTurn { conversation.checkpointResumed() }
                     if request.toolTurn != nil,
                        terminalStopReason == .toolCalls {
                         pendingToolAdmission = admission
@@ -269,7 +371,7 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         continuation.resume()
                     }
                 }
-            case .cancel:
+            case .cancel, .cancelGeneration(_):
                 break
             case .unload(let requestID):
                 await client.unload()
@@ -341,6 +443,8 @@ enum DecodeServiceError: Error, CustomStringConvertible {
     private static func appToolTurn(_ turn: DecodeToolTurn?) throws
         -> AppToolTurn? {
         switch turn {
+        case .checkpoint(let id):
+            return .checkpoint(id)
         case .user(let developerPrompt, let tools):
             return .user(
                 developerPrompt: developerPrompt,

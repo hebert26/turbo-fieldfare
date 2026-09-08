@@ -133,6 +133,17 @@ public struct ConversationToolResult: Equatable, Sendable {
     }
 }
 
+public struct ConversationCheckpointReceipt: Sendable {
+    public let needed: Bool
+    public let existingPromptTokens: Int
+    public let replacementPromptTokens: Int?
+    public let reserveTokens: Int
+    public let resultAllowanceTokens: Int
+    public let retainedImageCount: Int
+    public let retainedImageRows: Int
+    public let retainedFeatureBytes: Int
+}
+
 /// A stateful multi-turn conversation that owns its own KV lineage.
 ///
 /// The server has to *match* a stateless request against a cached prefix and
@@ -190,6 +201,11 @@ public actor MultimodalConversation {
     private var uncommittedBoundary: [Int32] = []
     private var boundaryNeedsReplay = false
     private var toolState: ToolState?
+    private var checkpointOpening: (id: UUID, turn: EncodedTurn, state: ToolState)?
+    private var assessedResultBridge: (result: ConversationToolResult,
+        calls: [GFTokenizer.HistoricalToolCall], tokens: [Int32])?
+    private var largestCheckpointResultTokens = 0
+    private var largestCheckpointGenerationTokens = 0
 
     public init(model: Model,
                 context: MetalContext,
@@ -227,6 +243,8 @@ public actor MultimodalConversation {
         // straight after this, and resetting under a live decode either aborts
         // that turn mid-stream or lets two turns drive one runner at once.
         await waitForGeneration()
+        checkpointOpening = nil
+        assessedResultBridge = nil
         committedImageSpans.removeAll()
         kvNeedsRebuild = false
         provisionalToolResultPrefix = nil
@@ -261,6 +279,165 @@ public actor MultimodalConversation {
 
     /// Whether a turn is decoding right now.
     public var isGenerating: Bool { generating }
+
+    /// Inspect, then explicitly interrupt a settled tool handoff. This is not
+    /// ordinary result continuation: no model final answer is manufactured.
+    /// The old token/feature record is untouched until every count and image
+    /// has validated. Replacement prefill uses the same runner on resume.
+    public func checkpoint(
+        id: UUID, pendingCall: GFTokenizer.HistoricalToolCall,
+        result: ConversationToolResult, record: String, imageProvenance: [String],
+        generationAllowance: Int, finalAnswerAllowance: Int, permitsScreenshot: Bool,
+        force: Bool, commit: Bool,
+        checkCancellation: @escaping @Sendable () throws -> Void = {}
+    ) throws -> ConversationCheckpointReceipt {
+        guard !closed, !lineageBroken else { throw MultimodalConversationError.lineageBroken }
+        guard !generating, !resetting, pending == nil, checkpointOpening == nil,
+              provisionalToolResultPrefix == nil else { throw MultimodalConversationError.busy }
+        guard let state = toolState, state.awaitingResults,
+              let assistant = state.messages.last,
+              assistant.toolCalls == [pendingCall],
+              result.callID == pendingCall.id, result.name == pendingCall.name,
+              generationAllowance > 0, finalAnswerAllowance > 0,
+              generationAllowance <= max(8_192, maxContext),
+              finalAnswerAllowance <= max(2_048, maxContext) else {
+            throw MultimodalConversationError.invalidToolContinuation
+        }
+        try checkCancellation()
+        guard !record.contains(MultimodalPromptRenderer.placeholder),
+              !result.content.contains(MultimodalPromptRenderer.placeholder),
+              !imageProvenance.contains(where: { $0.contains(MultimodalPromptRenderer.placeholder) }) else {
+            throw MultimodalPromptRendererError.reservedImageMarker
+        }
+        let toolMessage = GFTokenizer.Message(role: .tool, content: result.content,
+            toolCallID: result.callID, name: result.name, toolImageCount: result.images.count)
+        let bridge: [Int32]
+        if let assessed = assessedResultBridge, assessed.result == result,
+           assessed.calls == assistant.toolCalls {
+            bridge = assessed.tokens
+        } else {
+            bridge = try tokenizer.encodeToolResultContinuation(
+                cachedMessages: Array(state.messages.dropLast()), assistant: assistant,
+                incomingMessages: state.messages + [toolMessage], tools: state.tools)
+        }
+        guard bridge.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == result.images.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+        if !result.images.isEmpty, visionRuntime == nil {
+            throw MultimodalConversationError.imageUnavailable(reason: visionRuntimeError.map(String.init(describing:)))
+        }
+        let plans = try result.images.map { url in
+            try Gemma4ImagePreprocessor(device: context.device, config: visionRuntime!.config).plan(fileURL: url)
+        }
+        let oldFeatures = committedImageSpans.map(\.features)
+        let rowCounts = oldFeatures.map(\.tokenCount) + plans.map(\.geometry.softTokenCount)
+        guard imageProvenance.count == rowCounts.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+        let currentImageExpansion = plans.reduce(0) { $0 + $1.geometry.softTokenCount + 1 }
+        let existingCount = kvTokenIDs.count + (boundaryNeedsReplay ? uncommittedBoundary.count : 0)
+            + bridge.count + currentImageExpansion
+        // Forecast only. No generation cap is changed. A future packet uses
+        // twice the largest measured text bridge, plus one maximum screenshot.
+        let resultTextCount = bridge.count - result.images.count
+        largestCheckpointResultTokens = max(largestCheckpointResultTokens, resultTextCount)
+        let resultReserve = max(min(1_024, max(1, maxContext / 64)), largestCheckpointResultTokens * 2)
+            + (permitsScreenshot ? VisionImageTokenBudget.maximumTokensPerImage : 0)
+        // Scale forecast floors for smaller selected contexts without changing
+        // the 64K policy. These allowances never alter generation limits.
+        let generationReserve = max(min(generationAllowance, max(1, maxContext / 8)),
+                                    largestCheckpointGenerationTokens * 2)
+        let finalReserve = min(finalAnswerAllowance, max(1, maxContext / 32))
+        let reserve = generationReserve + resultReserve + finalReserve
+        let needed = force || existingCount >= maxContext - reserve
+        var replacementCount: Int?
+        if commit {
+            var openingText = record
+            for (index, source) in imageProvenance.enumerated() {
+                openingText += "\nRetained image \(index + 1). \(source)\n" + MultimodalPromptRenderer.placeholder
+            }
+            var messages = state.messages.filter { $0.role == .system || $0.role == .developer }
+            messages.append(GFTokenizer.Message(role: .user, content: openingText))
+            let template = try tokenizer.encodeToolChat(messages: messages, tools: state.tools)
+            guard template.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == rowCounts.count else {
+                throw MultimodalPromptRendererError.placeholderMismatch
+            }
+            let count = template.count + rowCounts.reduce(0) { $0 + $1 + 1 }
+            replacementCount = count
+            guard needed, !record.isEmpty, count < existingCount, count < maxContext - reserve else {
+                throw MultimodalConversationError.contextExhausted(prompt: count + reserve, maxContext: maxContext)
+            }
+            var features = oldFeatures
+            for plan in plans {
+                try checkCancellation()
+                let encoded = try visionRuntime!.encodeImage(
+                    plan: plan, languageModel: model, residencyPolicy: visionResidency,
+                    checkCancellation: checkCancellation)
+                guard encoded.tokenCount == plan.geometry.softTokenCount else {
+                    throw MultimodalPromptRendererError.placeholderMismatch
+                }
+                features.append(encoded)
+            }
+            let input = try MultimodalPromptRenderer.expandingImageTokens(template, features: features)
+            guard input.effectiveTokenIDs.count == count else {
+                throw MultimodalPromptRendererError.placeholderMismatch
+            }
+            try checkCancellation()
+            // No await after the final cancellation check or before the new
+            // record is installed. Old GPU work is settled by the idle guard.
+            runner.reset()
+            kvTokenIDs.removeAll()
+            committedImageSpans.removeAll()
+            uncommittedBoundary.removeAll()
+            boundaryNeedsReplay = false
+            kvNeedsRebuild = false
+            toolState = nil
+            assessedResultBridge = nil
+            checkpointOpening = (id, EncodedTurn(effectiveTokenIDs: input.effectiveTokenIDs,
+                prefillInput: features.isEmpty ? nil : input),
+                ToolState(messages: messages, tools: state.tools, awaitingResults: false))
+        } else {
+            // Reuse the exact suffix on ordinary continuation. Assess does not
+            // construct or tokenize the growing replacement ledger.
+            assessedResultBridge = (result, assistant.toolCalls, bridge)
+        }
+        return ConversationCheckpointReceipt(needed: needed, existingPromptTokens: existingCount,
+            replacementPromptTokens: replacementCount, reserveTokens: reserve,
+            resultAllowanceTokens: resultReserve, retainedImageCount: rowCounts.count,
+            retainedImageRows: rowCounts.reduce(0, +),
+            retainedFeatureBytes: oldFeatures.reduce(0) { $0 + $1.buffer.length }
+                + plans.reduce(0) { $0 + $1.geometry.softTokenCount * model.config.hiddenSize * MemoryLayout<Float16>.stride })
+    }
+
+    public func resumeCheckpoint(
+        id: UUID, config: GenerationConfig, prefillConfig: PrefillRuntimeConfig,
+        checkCancellation: @escaping @Sendable () throws -> Void,
+        shouldStop: (@Sendable () -> Bool)?, captureToolFailureEvidence: Bool,
+        maximumConsecutiveInvisibleTokens: Int?, captureThoughtPreview: Bool,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)?,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)?
+    ) async throws -> StructuredConversationTurnResult {
+        guard !closed, !lineageBroken else { throw MultimodalConversationError.lineageBroken }
+        guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        guard var opening = checkpointOpening, opening.id == id, kvTokenIDs.isEmpty else {
+            throw MultimodalConversationError.invalidToolContinuation
+        }
+        try checkCancellation()
+        generating = true
+        defer { finishGeneration() }
+        let completion = try await completeEncodedTurn(opening.turn, config: config,
+            prefillConfig: prefillConfig, checkCancellation: checkCancellation,
+            shouldStop: shouldStop, allowedTools: Set(opening.state.tools.map(\.name)),
+            acceptsUnknownToolNames: true, captureToolFailureEvidence: captureToolFailureEvidence,
+            maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+            captureThoughtPreview: captureThoughtPreview, onProgress: onProgress,
+            onStructuredProgress: onStructuredProgress)
+        opening.state.messages.append(Self.assistantMessage(for: completion))
+        opening.state.awaitingResults = !completion.toolCalls.isEmpty
+        toolState = opening.state
+        checkpointOpening = nil
+        return completion
+    }
 
     /// Stages the next user turn without prefilling it.
     public func append(parts: [MultimodalContinuationPart], images: [URL] = []) throws {
@@ -324,6 +501,10 @@ public actor MultimodalConversation {
         uncommittedBoundary = []
         boundaryNeedsReplay = false
         toolState = nil
+        checkpointOpening = nil
+        assessedResultBridge = nil
+        largestCheckpointResultTokens = 0
+        largestCheckpointGenerationTokens = 0
     }
 
     /// Ends this conversation and clears the KV it was using. It deliberately
@@ -343,6 +524,8 @@ public actor MultimodalConversation {
         provisionalToolResultPrefix = nil
         pending = nil
         toolState = nil
+        checkpointOpening = nil
+        assessedResultBridge = nil
     }
 
     /// Appends one user turn and generates the reply, prefilling only the new
@@ -546,11 +729,16 @@ public actor MultimodalConversation {
         }
         let cached = Array(state.messages.dropLast())
         let incoming = state.messages + toolMessages
-        let bridge = try tokenizer.encodeToolResultContinuation(
-            cachedMessages: cached,
-            assistant: assistant,
-            incomingMessages: incoming,
-            tools: state.tools)
+        let bridge: [Int32]
+        if let assessed = assessedResultBridge, results == [assessed.result],
+           assessed.calls == assistant.toolCalls {
+            bridge = assessed.tokens
+        } else {
+            bridge = try tokenizer.encodeToolResultContinuation(
+                cachedMessages: cached, assistant: assistant,
+                incomingMessages: incoming, tools: state.tools)
+        }
+        assessedResultBridge = nil
         let images = results.flatMap(\.images)
         guard !results.contains(where: { $0.content.contains(MultimodalPromptRenderer.placeholder) }) else {
             throw MultimodalPromptRendererError.reservedImageMarker
@@ -758,6 +946,7 @@ public actor MultimodalConversation {
             StructuredAssistantDecoder(
                 tokenizer: tokenizer,
                 allowedTools: $0,
+                startsInThoughtChannel: tokenizer.promptEndsInThoughtChannel(turn.effectiveTokenIDs),
                 acceptsUnknownToolNames: acceptsUnknownToolNames,
                 captureFailureEvidence: captureToolFailureEvidence,
                 captureThoughtPreview: captureThoughtPreview)
@@ -973,6 +1162,7 @@ public actor MultimodalConversation {
             reason: result.reason,
             prefillSeconds: result.prefillSeconds,
             decodeSeconds: result.decodeSeconds)
+        largestCheckpointGenerationTokens = max(largestCheckpointGenerationTokens, result.newTokens)
         return StructuredConversationTurnResult(
             turn: turnResult,
             toolCalls: calls)

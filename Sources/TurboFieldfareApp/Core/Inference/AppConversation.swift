@@ -29,12 +29,9 @@ public struct AppChatTurn: Identifiable, Equatable, Sendable {
 /// The app's half of one conversation: what the transcript shows, and the turn
 /// order the decode service's gate checks against.
 ///
-/// The invariant this type exists to hold is that **the transcript equals the
-/// model's context**. A turn shown here that is not in the KV is a lie the user
-/// cannot see, and one in the KV but not here is context they cannot account
-/// for. Both counts move together or not at all, which is why a turn is only
-/// committed once its generation stream completed: a turn that threw was
-/// rewound by the runtime, so it is in neither place.
+/// Visible turns and internal inference segments normally advance together.
+/// An acknowledged checkpoint starts a new internal segment of the same visible
+/// turn. Its transcript marker explains that earlier context was condensed.
 public struct AppConversation: Equatable, Sendable {
     /// What a turn must present to the service to be admitted.
     public struct Ticket: Equatable, Sendable {
@@ -52,6 +49,7 @@ public struct AppConversation: Equatable, Sendable {
     /// Set when the runtime reports the KV no longer matches this conversation.
     /// Nothing can continue it; only a new chat clears it.
     public private(set) var isLineageLost: Bool
+    public private(set) var checkpointCount = 0
     private var pendingUserTurnID: UUID?
 
     public init(epoch: UUID = UUID()) {
@@ -81,6 +79,28 @@ public struct AppConversation: Equatable, Sendable {
     }
     public var hasTurnInFlight: Bool { pendingUserTurnID != nil }
     public var canSend: Bool { !isLineageLost && pendingUserTurnID == nil }
+    public var pendingTicket: Ticket? {
+        pendingUserTurnID.map { _ in Ticket(epoch: epoch, index: committedTurns) }
+    }
+
+    public mutating func acceptCheckpoint(epoch: UUID, source: Ticket) -> Bool {
+        guard !isLineageLost, pendingTicket == source, epoch != self.epoch else { return false }
+        self.epoch = epoch
+        committedTurns = 0
+        kvTokens = 0
+        checkpointCount += 1
+        return true
+    }
+
+    /// A replaced segment cannot be restored to the composer as unexecuted
+    /// work. Preserve the visible user turn and its explicit interruption.
+    public mutating func interruptAfterCheckpoint(text: String) {
+        guard pendingUserTurnID != nil else { return }
+        turns.append(AppChatTurn(role: .assistant, text: text, stopReason: .failed))
+        pendingUserTurnID = nil
+        isLineageLost = true
+        kvTokens = nil
+    }
 
     /// Starts a fresh lineage. The caller is responsible for telling the
     /// inference side about `epoch` before the next turn is sent.

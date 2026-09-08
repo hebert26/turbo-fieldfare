@@ -17,7 +17,6 @@ Avoid using slop words or phrases like "Bottom Line:" in conclusions, "delve," "
 
 State the intended action directly. Avoid adding what you won't do, what will remain unchanged, or how you'll separate or categorize results. Do not use contrastive framing such as "X, not Y" or "X—not Y" that introduces an unprompted alternative that the user didn't ask about. Avoid invented compound labels like "exact-head checks" and "editorial-row layouts", vague qualifiers, and canned transitions; use plain verbs and prepositions to state the actual relationship directly.
 
-If at any point you can parallelize work by delegating tasks to another agent (no matter if you are the root or subagent), you should do so using collaboration tools if it could save time or improve quality.
 avoid at all cost wasting tokens on un related work, such writing unitest or validation that no one asked.
 
 Messages that you send to other agents and your final answer may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.
@@ -26,6 +25,26 @@ Messages that you send to other agents and your final answer may be read by a hu
 if you need to open a document, such .html please use safari
 
 Thanks so much,for helping to build this product.
+
+## Delegated work
+
+Use the main task as the coordinator and native Codex subagents for concrete, independent assignments whenever delegation can save time or improve quality. This is the default workflow for this project.
+
+- Start named subagents with `collaboration.spawn_agent` so their activity appears inside the main task and can be inspected in the app. Use clear names describing the assignment, such as `turbocharge_phase1_engineer`. Create a separate sidebar task only when the user explicitly requests one.
+- Give each subagent a bounded assignment, the relevant context, exact files or responsibilities it owns, and an observable completion condition. Tell agents they share the workspace, must preserve others' edits, and must coordinate overlapping changes.
+- The main agent owns the overall outcome, continues useful independent work, answers the user, reviews returned changes and evidence, and combines the results into one concise response. Delegate additional independent assignments when useful, including from a subagent.
+- Reuse existing subagents for related work through `collaboration.followup_task`. Use `collaboration.send_message` for updates during their work and `collaboration.wait_agent` to wait efficiently for results. Do not end with required delegated work still outstanding.
+- Follow the existing scope and model-process rules across the whole team. Coordinate model runs so only one agent runs a model process at a time. Keep verification proportionate to the requested change.
+- Create a persistent goal only when the user explicitly requests one. For requested scheduled follow-ups or continued work later, use a heartbeat automation attached to the main task. Preserve any requested deadline and stop conditions, reuse existing agents, and notify only on meaningful progress, completion, failure, or required user action. A screenshot of a previous goal or schedule does not authorize starting another one.
+
+## Document location
+
+Always save project documents in the main project at `/Users/dev-machine/dev/turbo-fieldfare-personal`, including documents produced by subagents working in a worktree.
+
+- Save new plans, reports, trackers, briefs, diagrams, and other documents under `/Users/dev-machine/dev/turbo-fieldfare-personal/docs/`, using the existing folder structure. Keep supporting images and other document assets there too. Update existing documents at their established path inside the main project.
+- Do not create or switch to a worktree for document work. If already working in a worktree, use the absolute main-project path when reading, creating, or editing documents. Do not save document deliverables in `.codex/worktrees`, temporary folders, or outside the main project.
+- Include this rule and the exact absolute document destination in every delegated assignment that produces or edits documents. The main agent must check the saved location before reporting completion.
+- Link to the document in the main project when reporting results. If that location is unavailable, report the blocker instead of silently choosing another location.
 
 # TurboFieldfare
 

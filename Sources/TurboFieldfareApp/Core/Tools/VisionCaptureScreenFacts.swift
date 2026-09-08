@@ -17,6 +17,7 @@ struct VisionCaptureScreenFacts {
         let value: String?
         let enabled: Bool?
         let selected: Bool?
+        let position: JSONValue?
     }
 
     private let elements: [Element]
@@ -37,7 +38,8 @@ struct VisionCaptureScreenFacts {
                 value: role == "secure_text_field" || type == "XCUIElementTypeSecureTextField"
                     ? nil : Self.rawText(object["value"]),
                 enabled: Self.boolean(object["enabled"]),
-                selected: Self.boolean(object["selected"]))
+                selected: Self.boolean(object["selected"]),
+                position: Self.position(in: object))
         }
         navigationFacts = navigation.flatMap { navigation in
             [("tab_bars", "Selected tab"), ("segmented_controls", "Selected segment")]
@@ -65,7 +67,15 @@ struct VisionCaptureScreenFacts {
         if let selected = element.selected { properties["selected"] = .bool(selected) }
         if let enabled = element.enabled { properties["enabled"] = .bool(enabled) }
         if let value = element.value { properties["value"] = .string(value) }
+        if let position = element.position { properties["position"] = position }
         return properties
+    }
+
+    func readableLabel(selector: String, role: String, selectorKind: String? = nil) -> String? {
+        guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
+              let label = elements[index].label.flatMap(Self.displayText),
+              !label.hasPrefix("__vc") else { return nil }
+        return label
     }
 
     /// Observation suggests a target to validate, never permission to tap it.
@@ -106,25 +116,16 @@ struct VisionCaptureScreenFacts {
         var excluded = Set(controls.compactMap { matchingIndex(selector: $0.selector, role: $0.role) })
         var lines: [String] = []
         for fact in navigationFacts where !lines.contains(fact) { lines.append(fact) }
-        // Include the exact current choices in the human summary without changing their arrays.
+        // Choices already carry their facts in the arrays. Exclude only the
+        // exact element they represent, never another control with a shared label.
         for choice in availableActions + editableFields {
             guard case .object(let object) = choice,
                   let role = Self.text(object["role"]),
-                  let selector = Self.rawText(object["selector"]),
-                  let name = Self.text(object["label"]) ?? Self.displayText(selector) else { continue }
+                  let selector = Self.rawText(object["selector"]) else { continue }
             let selectorKind = Self.text(object["selector_kind"])
-            if selectorKind != "placeholder",
-               let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind) {
+            if let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind) {
                 excluded.insert(index)
             }
-            let value = role == "secure_text_field" ? nil : Self.text(object["value"])
-            let content = [name, value].compactMap { $0 }
-                .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
-                .joined(separator: ": ")
-            var line = "[\(role)] \(content)"
-            if object["selected"] == .bool(true) { line += " selected" }
-            if object["enabled"] == .bool(false) { line += " disabled" }
-            if !lines.contains(line) { lines.append(line) }
         }
         for (index, element) in elements.enumerated() {
             guard !excluded.contains(index), element.type != "XCUIElementTypeKey" else { continue }
@@ -132,11 +133,24 @@ struct VisionCaptureScreenFacts {
                 .compactMap { $0.flatMap(Self.displayText) }
                 .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
                 .joined(separator: ": ")
-            guard !content.isEmpty else { continue }
-            var line = "[\(element.role)] \(content)"
-            if element.selected == true { line += " selected" }
-            if element.enabled == false { line += " disabled" }
-            if !lines.contains(line) { lines.append(line) }
+            let isControl = ["button", "cell", "tab", "link", "switch", "text_field",
+                             "secure_text_field", "interactive", "segmented_item"].contains(element.role)
+            guard !content.isEmpty || isControl else { continue }
+            var line = "[\(element.role)] \(content.isEmpty ? "label unavailable" : content)"
+            if content.isEmpty || element.role == "segmented_item", case .object(let position)? = element.position,
+               case .integer(let x)? = position["x_norm"], case .integer(let y)? = position["y_norm"] {
+                line += " at (\(x), \(y))"
+            }
+            if element.role == "segmented_item" {
+                // Preserve independent observed state without joining rounded
+                // positions to a private action selector.
+                if let selected = element.selected { line += " selected=\(selected)" }
+                if let enabled = element.enabled { line += " enabled=\(enabled)" }
+            } else {
+                if element.selected == true { line += " selected" }
+                if element.enabled == false { line += " disabled" }
+            }
+            lines.append(line)
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
@@ -153,7 +167,10 @@ struct VisionCaptureScreenFacts {
             switch selectorKind {
             case "identifier": return exactMatch(element.identifier)
             case "label": return exactMatch(element.label)
-            default: return exactMatch(element.identifier) || exactMatch(element.label)
+            case nil: return exactMatch(element.identifier) || exactMatch(element.label)
+            // The observation has no placeholder field. Do not infer its
+            // provenance from an identifier or label with the same text.
+            default: return false
             }
         }
         return matches.count == 1 ? matches.first : nil
@@ -176,5 +193,12 @@ struct VisionCaptureScreenFacts {
     private static func boolean(_ value: JSONValue?) -> Bool? {
         guard case .bool(let boolean) = value else { return nil }
         return boolean
+    }
+
+    private static func position(in object: [String: JSONValue]) -> JSONValue? {
+        guard case .integer(let x)? = object["x_norm"],
+              case .integer(let y)? = object["y_norm"],
+              (0...1000).contains(x), (0...1000).contains(y) else { return nil }
+        return .object(["x_norm": .integer(x), "y_norm": .integer(y)])
     }
 }

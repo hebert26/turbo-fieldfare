@@ -45,7 +45,7 @@ public enum GFTokenizerError: Error, CustomStringConvertible {
 public struct GFTokenizer: @unchecked Sendable {
     public static let modelID = "google/gemma-4-26B-A4B-it"
     public static let chatTemplateIdentity = "gemma4-it-text-no-tools-v1"
-    public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-v1"
+    public static let toolChatTemplateIdentity = "gemma4-it-tools-jinja-post-tool-thought-v2"
 
     /// Default for callers without an explicit session setting. A configured
     /// tokenizer keeps its own fixed mode for the lifetime of its conversation.
@@ -80,6 +80,7 @@ public struct GFTokenizer: @unchecked Sendable {
     @usableFromInline
     let tokenizer: any Tokenizer
     public private(set) var enableToolThinking: Bool
+    private let thoughtOpeningTokenIDs: [Int32]
 
     /// Shares the loaded tokenizer data, changing only this value's chat setting.
     /// Configure before creating a conversation, never during a retained turn.
@@ -253,6 +254,9 @@ public struct GFTokenizer: @unchecked Sendable {
         }
         self.stopTokenIDs = [self.eosID, self.endOfTurnID, self.toolResponseID]
         self.vocabSize = 262_144
+        self.thoughtOpeningTokenIDs = try tokenizer.encode(
+            text: "<|channel>thought\n", addSpecialTokens: false
+        ).map { try Self.int32ID("thought opener", $0) }
     }
 
     /// Encode UTF-8 text to token IDs. `addBOS = true` prepends `<bos>`.
@@ -264,6 +268,15 @@ public struct GFTokenizer: @unchecked Sendable {
     public func encode(_ text: String, addBOS: Bool = true) -> [Int32] {
         let base = tokenizer.encode(text: text, addSpecialTokens: false).map(Int32.init)
         return addBOS ? [bosID] + base : base
+    }
+
+    /// Generated tokens start inside a known thought channel only when the
+    /// actual prompt ends with its opener. Thinking ON alone is insufficient:
+    /// ordinary user prompts leave the model header open without this cue.
+    public func promptEndsInThoughtChannel(_ tokenIDs: [Int32]) -> Bool {
+        !thoughtOpeningTokenIDs.isEmpty
+            && tokenIDs.suffix(thoughtOpeningTokenIDs.count)
+                .elementsEqual(thoughtOpeningTokenIDs)
     }
 
     /// Decode token IDs to text. `skipSpecialTokens` strips BOS/EOS/turn markers from the output.
@@ -416,7 +429,7 @@ public struct GFTokenizer: @unchecked Sendable {
                 ] as [String: any Sendable],
             ]
         }
-        return try tokenizer.applyChatTemplate(
+        var tokenIDs = try tokenizer.applyChatTemplate(
             messages: upstreamMessages,
             chatTemplate: nil,
             addGenerationPrompt: true,
@@ -425,6 +438,15 @@ public struct GFTokenizer: @unchecked Sendable {
             tools: upstreamTools,
             additionalContext: ["enable_thinking": enableToolThinking]
         ).map(Int32.init)
+        // Backport only Google's 4d7ae498 post-tool generation cue. Keep the
+        // installed template, ordinary user framing and OFF suffix unchanged.
+        // A newer template may already supply it. Apply once after the final
+        // response (and its images), never to an unfinished tool call.
+        if enableToolThinking, messages.last?.role == .tool,
+           tokenIDs.contains(toolResponseEndID), !promptEndsInThoughtChannel(tokenIDs) {
+            tokenIDs.append(contentsOf: thoughtOpeningTokenIDs)
+        }
+        return tokenIDs
     }
 
     public func encodeTextContinuation(userContent: String) -> [Int32] {

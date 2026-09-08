@@ -269,7 +269,10 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             hits: experts.count - misses.count)
     }
 
-    public func executeExpertCachePlan(_ plan: ExpertCachePlan) throws
+    public func executeExpertCachePlan(_ plan: ExpertCachePlan,
+                                       measurement: RuntimeMeasurementCapture? = nil,
+                                       measurementPlanID: UInt64 = 0,
+                                       measurementLayer: Int = 0) throws
         -> [(buffer: MTLBuffer, offset: UInt64, size: UInt64)] {
         precondition(plan.experts.count <= slotCount,
                      "expert cache plan exceeds slot count")
@@ -285,6 +288,14 @@ public final class PreadExpertStreamer: @unchecked Sendable {
                     layer: 0,
                     expert: plan.experts[index],
                     slot: plan.assignedSlots[index])
+                if let measurement {
+                    // Count each fully successful logical read even when another
+                    // miss in this plan fails. Partial failed reads remain unknown.
+                    measurement.recordSuccessfulMiss(
+                        layer: measurementLayer, planID: measurementPlanID,
+                        expert: plan.experts[index], slot: plan.assignedSlots[index],
+                        bytes: self.layout.expertStride)
+                }
             } catch {
                 errorLock.lock()
                 if firstError == nil { firstError = error }
@@ -419,5 +430,13 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     /// ownership or lifetime API.
     public var diagnosticSlotScratchBytes: UInt64 {
         UInt64(slotCount) * UInt64(slotAllocationSize)
+    }
+
+    func recordMeasurementSnapshot(_ capture: RuntimeMeasurementCapture, layer: Int, reason: UInt64) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        capture.recordCacheLayer(layer: layer, reason: reason, slots: slotExpert,
+                                 lastUse: slotLastUse, frequencies: expertUseCount,
+                                 useClock: useClock, scratchBytes: diagnosticSlotScratchBytes)
     }
 }

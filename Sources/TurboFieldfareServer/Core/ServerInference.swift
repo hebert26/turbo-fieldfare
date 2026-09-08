@@ -565,7 +565,12 @@ public actor ServerModelSession: ServerInferenceBackend {
                                            maxContext: maxContext,
                                            runtimeConfiguration: runtime)
         let scratch = try RawCompletionScratch(context: context, vocab: model.config.vocabSize)
-        let templateDigest = SHA256.hash(data: try Data(contentsOf: templateURL))
+        // The effective prompt includes code-owned framing beyond the Jinja
+        // sidecar. Cache identity must include that version and thinking mode.
+        var templateIdentity = try Data(contentsOf: templateURL)
+        templateIdentity.append(contentsOf:
+            "\0\(GFTokenizer.toolChatTemplateIdentity)\0thinking=\(tokenizer.enableToolThinking)".utf8)
+        let templateDigest = SHA256.hash(data: templateIdentity)
             .map { String(format: "%02x", $0) }
             .joined()
         let runtimeIdentity = Self.runtimeIdentityString(runtime: runtime)
@@ -980,7 +985,8 @@ public actor ServerModelSession: ServerInferenceBackend {
         let decoder = needsToolTemplate
             ? StructuredAssistantDecoder(
                 tokenizer: tokenizer,
-                allowedTools: Set(request.tools.map(\.name)))
+                allowedTools: Set(request.tools.map(\.name)),
+                startsInThoughtChannel: tokenizer.promptEndsInThoughtChannel(effectivePromptIDs))
             : nil
         var stopMatcher = StreamingStopMatcher(stops: request.generationConfig.stopStrings)
         var content = ""

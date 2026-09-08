@@ -150,6 +150,9 @@ public final class AppModel {
     private var visionInstallTask: Task<Void, Never>?
     private var unloadTask: Task<Void, Never>?
     private var agentToolLoop = VisionCaptureToolLoop()
+    private var agentCheckpointRequested = false
+    private var agentCheckpointRecord: String?
+    private var agentCheckpointPrepared = false
     private var activeAgentActivityTurnID: UUID?
     private var loadGeneration: UInt64 = 0
     /// The highest load-phase sequence already applied. Each `onState` callback
@@ -1983,6 +1986,9 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         runIdentity &+= 1
         let generation = runIdentity
+        agentCheckpointRequested = false
+        agentCheckpointRecord = nil
+        agentCheckpointPrepared = false
         outputPromptText = request.prompt
         outputAgentActivities = []
         activeAgentActivityTurnID = agentConfiguration == nil
@@ -2033,13 +2039,25 @@ public final class AppModel {
                 guard let self else { return }
                 do {
                     try await self.openConversationIfNeeded()
+                    let checkpoint: VisionCaptureToolLoop.Checkpoint?
+                    if client is any AppContextCheckpointClient {
+                        checkpoint = { @Sendable (proposal: AgentContextCheckpointProposal) async throws -> DecodeContextCheckpointReceipt in
+                            try await self.applyAgentCheckpoint(proposal, client: client, generation: generation)
+                        }
+                    } else {
+                        checkpoint = nil
+                    }
                     let result = try await loop.run(
                         configuration: agentConfiguration,
                         activity: { event in
                             await self.applyAgentActivity(
                                 event,
                                 generation: generation)
-                        }
+                        },
+                        userPrompt: request.prompt,
+                        userImages: request.imageAttachments,
+                        checkpoint: checkpoint,
+                        forceCheckpoint: { await self.shouldForceAgentCheckpoint() }
                     ) { toolTurn in
                         try await self.generateAgentStep(
                             client: client,
@@ -2092,6 +2110,98 @@ public final class AppModel {
         client.cancel()
     }
 
+    /// Callable by coordinated local comparisons. The same capacity, evidence,
+    /// image and transaction checks apply. It never interrupts a live action.
+    public func requestAgentContextCheckpoint() {
+        guard agentModeEnabled, isRunning else { return }
+        agentCheckpointRequested = true
+    }
+
+    private func shouldForceAgentCheckpoint() async -> Bool {
+        if await AgentInferenceTrace.shared?.consumeCheckpointRequest() == true {
+            agentCheckpointRequested = true
+        }
+        return agentCheckpointRequested
+    }
+
+    private func applyAgentCheckpoint(_ proposal: AgentContextCheckpointProposal,
+        client: any AppInferenceClient, generation: Int
+    ) async throws -> DecodeContextCheckpointReceipt {
+        guard generation == runIdentity, isRunning,
+              let ticket = conversation.pendingTicket,
+              let checkpointClient = client as? any AppContextCheckpointClient else {
+            throw AppInferenceError.conversationLineageLost("The active task changed before its checkpoint.")
+        }
+        let request = DecodeContextCheckpointRequest(checkpointID: proposal.id,
+            sourceEpoch: ticket.epoch, sourceTurnIndex: ticket.index,
+            replacementEpoch: proposal.replacementEpoch,
+            pendingCall: DecodeToolCall(id: proposal.call.id, name: proposal.call.name,
+                argumentsJSON: try proposal.call.arguments.encoded()),
+            result: DecodeToolResult(callID: proposal.result.callID, name: proposal.result.name,
+                content: proposal.result.content, imageAttachments: proposal.result.imageAttachments.map {
+                    DecodeImageAttachment(id: $0.id, path: $0.fileURL.path, displayName: $0.displayName,
+                        encodedBytes: $0.encodedBytes, sha256: $0.sha256)
+                }),
+            record: proposal.record, commit: proposal.commit, force: proposal.force,
+            permitsScreenshot: proposal.permitsScreenshot)
+        let receipt: DecodeContextCheckpointReceipt
+        if proposal.commit { agentCheckpointRecord = proposal.record }
+        do {
+            receipt = try await checkpointClient.contextCheckpoint(request)
+        } catch {
+            await AgentInferenceTrace.shared?.checkpointFailure(id: proposal.id, commit: proposal.commit,
+                error: String(describing: error))
+            throw error
+        }
+        guard generation == runIdentity, isRunning else {
+            throw AppInferenceError.conversationLineageLost("The task changed while the checkpoint was being acknowledged.")
+        }
+        await AgentInferenceTrace.shared?.checkpoint(receipt, callID: proposal.call.id,
+            sourceEpoch: ticket.epoch, forced: proposal.force)
+        if receipt.committed {
+            guard conversation.acceptCheckpoint(epoch: receipt.replacementEpoch, source: ticket) else {
+                throw AppInferenceError.conversationLineageLost("The service accepted a checkpoint for a different visible task.")
+            }
+            serviceEpoch = receipt.replacementEpoch
+            agentCheckpointRecord = proposal.record
+            agentCheckpointRequested = false
+            guard let replacementCount = receipt.replacementPromptTokens else {
+                throw AppInferenceError.conversationLineageLost("The accepted checkpoint omitted its rendered token count.")
+            }
+            outputAgentActivities.append(AppAgentActivity(id: UUID(),
+                kind: .modelResult(callID: proposal.id.uuidString, toolName: "context_checkpoint", imageCount: receipt.retainedImageCount),
+                body: "Earlier context condensed: \(receipt.existingPromptTokens) → \(replacementCount) input tokens. Rebuilding the same loaded model context and resuming the current task. Original instructions, execution records and \(receipt.retainedImageCount) images retained.",
+                status: .succeeded))
+        } else if receipt.needed {
+            agentCheckpointPrepared = true
+            outputAgentActivities.append(AppAgentActivity(id: UUID(),
+                kind: .modelResult(callID: proposal.id.uuidString, toolName: "context_checkpoint", imageCount: 0),
+                body: "Condensing earlier context. Saving completed actions and unfinished work, then reading current screen facts.",
+                status: .succeeded))
+        }
+        return receipt
+    }
+
+    private func agentRequest(_ base: AppGenerationRequest, toolTurn: AppToolTurn,
+                              generation: Int) throws -> AppGenerationRequest {
+        guard generation == runIdentity, isRunning, let ticket = conversation.pendingTicket else {
+            throw CancellationError()
+        }
+        var request = base
+        request.conversationEpoch = ticket.epoch
+        request.turnIndex = ticket.index
+        request.toolTurn = toolTurn
+        if case .checkpoint = toolTurn {
+            request.prompt = agentCheckpointRecord ?? ""
+            request.imageAttachments = []
+            request.conversationTokens = 0
+        } else if case .results(let results) = toolTurn {
+            request.prompt = ""
+            request.imageAttachments = results.flatMap(\.imageAttachments)
+        }
+        return request
+    }
+
     private nonisolated func generateAgentStep(
         client: any AppInferenceClient,
         baseRequest: AppGenerationRequest,
@@ -2100,16 +2210,12 @@ public final class AppModel {
         allowsMalformedRegeneration: Bool = true
     ) async throws -> VisionCaptureModelCompletion {
         await beginAgentStep(generation: generation)
-        var request = baseRequest
-        request.toolTurn = toolTurn
-        if case .results(let results) = toolTurn {
-            request.prompt = ""
-            request.imageAttachments = results.flatMap(\.imageAttachments)
-        }
+        var request = try await agentRequest(baseRequest, toolTurn: toolTurn, generation: generation)
         let trace = AgentInferenceTrace.shared
         let traceStep = await trace?.begin(request)
         request.captureToolFailureEvidence = traceStep != nil
         request.captureGPUCompletionTiming = traceStep != nil
+        request.runtimeMeasurementCapture = await trace?.runtimeMeasurementRequest(for: traceStep)
         var content = ""
         var calls: [AppToolCall] = []
         var terminal: AppDiagnostics?
@@ -2204,7 +2310,7 @@ public final class AppModel {
                 let feedback = """
 
 
-                Host generation feedback: The previous model response was malformed. No tool call from that response was executed. Use exactly visioncapture_navigate with an action argument. Use Gemma's native delimiters around every string argument. The action must be exactly one of launch, observe, screenshot, tap, set_boolean, type, or back. Choose only from the latest supplied facts and choices. Do not invent tool names or selectors.
+                Host generation feedback: The previous model response was malformed. No tool call from that response was executed. Use exactly visioncapture_navigate with an action argument. Use Gemma's native delimiters around every string argument. The action must be exactly one of launch, observe, screenshot, tap, set_boolean, type, back, or swipe, and must be offered in allowed_next. For tap, set_boolean, or type, copy the exact target ID from the latest choices and use its listed operation. Never reuse an old ID or substitute a label. For swipe, send only action and a direction from can_swipe. Do not invent tool names or target IDs.
                 """
                 let corrected = results.map {
                     AppToolResult(callID: $0.callID, name: $0.name, content: $0.content + feedback,
@@ -2257,6 +2363,8 @@ public final class AppModel {
             }
         }
         switch request.toolTurn {
+        case .checkpoint(let id):
+            body = "Explicit checkpoint resume: \(id.uuidString). Original system/tool configuration and retained image features are reconstructed by the service.\n\(request.prompt)"
         case .user(let developerPrompt, let tools):
             if let developerPrompt {
                 body += "Developer message configuration (may already be retained):\n\(developerPrompt)\n\n"
@@ -2424,7 +2532,12 @@ public final class AppModel {
         guard generation == runIdentity, !hasHandledTerminalEvent else { return }
         hasHandledTerminalEvent = true
         error = appError
-        if let abandoned = conversation.markLineageLost() {
+        if conversation.checkpointCount > 0 || agentCheckpointPrepared {
+            let interruption = "Task interrupted during context compaction or its resumed work. Completed actions remain recorded. \(appError)"
+            if !outputText.isEmpty { outputText += "\n\n" }
+            outputText += interruption
+            conversation.interruptAfterCheckpoint(text: outputText)
+        } else if let abandoned = conversation.markLineageLost() {
             restoreComposer(from: abandoned)
         }
         finishTerminalRun()

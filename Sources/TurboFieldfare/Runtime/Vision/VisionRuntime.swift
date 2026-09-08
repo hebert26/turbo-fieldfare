@@ -352,6 +352,24 @@ public final class VisionRuntime {
         checkCancellation: () throws -> Void = {}
     ) throws -> VisionFeatures {
         try checkCancellation()
+        let measurementCapture = languageModel?.measurementCapture
+        var measurementSucceeded = false
+        if let capture = measurementCapture {
+            capture.beginFreshImage()
+            // Fresh encode starts after geometry planning and the initial
+            // cancellation check, before GPU drain, release and preprocessing.
+            // Payload: uptime, patch grid width/height, token count, residency.
+            capture.record(.visionBegin, DispatchTime.now().uptimeNanoseconds,
+                           UInt64(plan.geometry.patchGridWidth),
+                           UInt64(plan.geometry.patchGridHeight),
+                           UInt64(plan.geometry.softTokenCount),
+                           residencyPolicy == .onDemand ? 1 : 2)
+        }
+        defer {
+            if let capture = measurementCapture, !measurementSucceeded {
+                capture.record(.visionFailure, DispatchTime.now().uptimeNanoseconds)
+            }
+        }
         let preprocessor = Gemma4ImagePreprocessor(device: context.device, config: config,
                                                    gpuResize: imageResize)
         try checkCancellation()
@@ -362,7 +380,7 @@ public final class VisionRuntime {
             residencyPolicy, gpuDrainNanoseconds: gpuDrainNanoseconds)
         try checkCancellation()
         let input = try preprocessor.preprocess(plan)
-        return try encodePreparedPatches(
+        let features = try encodePreparedPatches(
             patchesBF16: input.patchesBF16,
             positionsInt32x2: input.positionsInt32x2,
             patchGridWidth: input.geometry.patchGridWidth,
@@ -375,6 +393,11 @@ public final class VisionRuntime {
                 allocatedBytes: input.allocatedBytes),
             retainsWeightRegions: residencyPolicy == .keepReady,
             checkCancellation: checkCancellation)
+        if let capture = measurementCapture {
+            recordCompletedImageMeasurement(features, capture: capture)
+        }
+        measurementSucceeded = true
+        return features
     }
 
     public func encodePatches(
@@ -424,13 +447,29 @@ public final class VisionRuntime {
             throw VisionRuntimeError.invalidInput("patch or position buffer is too small")
         }
 
+        let measurementCapture = languageModel?.measurementCapture
+        var measurementSucceeded = false
+        if let capture = measurementCapture {
+            capture.beginFreshImage()
+            // Caller-supplied patches have no preprocessing interval. This
+            // boundary follows validation, before the existing GPU drain.
+            capture.record(.visionBegin, DispatchTime.now().uptimeNanoseconds,
+                           UInt64(patchGridWidth), UInt64(patchGridHeight),
+                           UInt64(rows / (config.poolingKernel * config.poolingKernel)),
+                           residencyPolicy == .onDemand ? 1 : 2)
+        }
+        defer {
+            if let capture = measurementCapture, !measurementSucceeded {
+                capture.record(.visionFailure, DispatchTime.now().uptimeNanoseconds)
+            }
+        }
         let gpuDrainNanoseconds = try languageModel != nil && residencyPolicy == .onDemand
             ? drainGPU() : 0
         try checkCancellation()
         let transition = languageModel?.prepareExpertResidencyForVision(
             residencyPolicy, gpuDrainNanoseconds: gpuDrainNanoseconds)
         try checkCancellation()
-        return try encodePreparedPatches(
+        let features = try encodePreparedPatches(
             patchesBF16: patchesBF16,
             positionsInt32x2: positionsInt32x2,
             patchGridWidth: patchGridWidth,
@@ -439,6 +478,41 @@ public final class VisionRuntime {
             preprocessing: nil,
             retainsWeightRegions: residencyPolicy == .keepReady,
             checkCancellation: checkCancellation)
+        if let capture = measurementCapture {
+            recordCompletedImageMeasurement(features, capture: capture)
+        }
+        measurementSucceeded = true
+        return features
+    }
+
+    /// Called once only for freshly encoded output, after the tower's existing
+    /// GPU completion waits and before returning features. The collector receives
+    /// scalar copies and cannot retain features, image bytes or Metal resources.
+    private func recordCompletedImageMeasurement(_ features: VisionFeatures,
+                                                capture: RuntimeMeasurementCapture) {
+        // Subtype 0: completion uptime, image token count, reserved, reserved.
+        capture.record(.visionEnd, 0, DispatchTime.now().uptimeNanoseconds,
+                       UInt64(features.tokenCount), 0, 0)
+        // Subtype 1: preprocessing time/bytes, tower wall/GPU time. UInt64.max
+        // means preprocessing was absent, as with caller-supplied patches.
+        capture.record(.visionEnd, 1,
+                       features.preprocessing?.wallNanoseconds ?? UInt64.max,
+                       features.preprocessing.map { UInt64($0.allocatedBytes) } ?? UInt64.max,
+                       features.wall.totalNanoseconds, features.gpuNanoseconds)
+        // Subtype 2: allocated tower scratch, scratch allocation time, weight
+        // mapping time, GPU wait time. CPU encode is derivable from tower wall.
+        capture.record(.visionEnd, 2, UInt64(features.scratchBytes),
+                       features.wall.scratchAllocationNanoseconds,
+                       features.wall.weightMapNanoseconds,
+                       features.wall.gpuWaitNanoseconds)
+        if let transition = features.expertResidencyTransition {
+            // Subtype 3: existing release wall time, remaining open layers/bytes,
+            // GPU drain time. Released layers/bytes are in the model's release event.
+            capture.record(.visionEnd, 3, transition.wallNanoseconds,
+                           UInt64(transition.remainingOpenLayerCount),
+                           transition.remainingSlotScratchBytes,
+                           transition.gpuDrainNanoseconds)
+        }
     }
 
     private func encodePreparedPatches(

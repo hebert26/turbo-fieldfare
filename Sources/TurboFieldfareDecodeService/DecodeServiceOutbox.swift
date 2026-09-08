@@ -24,6 +24,15 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private var state = State()
     private let generationID: UUID
     private let memorySampler = AppMemorySampler()
+    private let measurementRequest: DecodeRuntimeMeasurementRequest?
+    private let measurementCapture: RuntimeMeasurementCapture?
+    // Writer-owned fixed-size transport totals. No batches are queued here.
+    private var measurementBatches: UInt64 = 0
+    private var measurementBytes: UInt64 = 0
+    private var measurementEncodeNanoseconds: UInt64 = 0
+    private var measurementWriteNanoseconds: UInt64 = 0
+    private var measurementDroppedBatches: UInt64 = 0
+    private var measurementDroppedBytes: UInt64 = 0
 
     /// Bytes of image tower currently held mapped, or nil when there is no
     /// vision runtime. Sampled per event so Keep Ready is visible while a run
@@ -35,10 +44,14 @@ final class DecodeServiceOutbox: @unchecked Sendable {
 
     init(generationID: UUID,
          towerBytes: @escaping @Sendable () -> UInt64? = { nil },
-         conversationTokens: @escaping @Sendable () -> Int? = { nil }) {
+         conversationTokens: @escaping @Sendable () -> Int? = { nil },
+         measurementRequest: DecodeRuntimeMeasurementRequest? = nil,
+         measurementCapture: RuntimeMeasurementCapture? = nil) {
         self.conversationTokens = conversationTokens
         self.generationID = generationID
         self.towerBytes = towerBytes
+        self.measurementRequest = measurementRequest
+        self.measurementCapture = measurementCapture
         memorySampler.resetPeak()
     }
 
@@ -107,20 +120,22 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     func runWriter(to handle: FileHandle) throws {
         while true {
             condition.lock()
-            if state.terminal == nil, !state.finished {
+            if !state.finished, state.terminal == nil || measurementRequest != nil {
                 _ = condition.wait(until: Date().addingTimeInterval(0.1))
             }
             let prefill = state.latestPrefill
             let text = state.pendingText
             let token = state.latestToken
             let toolCalls = state.pendingToolCalls
-            let terminal = state.terminal
+            // Keep the collector alive through producer cleanup and drain it
+            // before the terminal event, which ends the app's receive loop.
+            let terminal = measurementRequest == nil || state.finished ? state.terminal : nil
             let done = state.finished
             state.latestPrefill = nil
             state.pendingText = ""
             state.latestToken = nil
             state.pendingToolCalls = []
-            state.terminal = nil
+            if terminal != nil { state.terminal = nil }
             var prefillSequence: UInt64?
             if prefill != nil {
                 state.sequence &+= 1
@@ -133,7 +148,33 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             }
             condition.unlock()
 
-            _ = memorySampler.sample()
+            let currentMemoryBytes = memorySampler.sample()
+            if let measurementCapture {
+                measurementCapture.recordMemorySample(
+                    currentBytes: currentMemoryBytes,
+                    peakBytes: memorySampler.peakBytes,
+                    towerBytes: towerBytes())
+                if terminal != nil || done {
+                    let status: UInt64
+                    if terminal?.kind == .cancelled || terminal?.stopReason == "cancelled" {
+                        status = 2
+                    } else if terminal?.kind == .failed || terminal?.kind == .lineageLost {
+                        status = 1
+                    } else {
+                        status = 0
+                    }
+                    measurementCapture.finish(status: status)
+                    while let batch = measurementCapture.drainJSONBatch(
+                        maximumBytes: DecodeRuntimeMeasurementLimits.maximumBatchBytes) {
+                        try writeMeasurementBatch(
+                            batch.data, containsFooter: batch.containsFooter, to: handle)
+                    }
+                } else if let batch = measurementCapture.drainJSONBatch(
+                    maximumBytes: DecodeRuntimeMeasurementLimits.maximumBatchBytes) {
+                    try writeMeasurementBatch(
+                        batch.data, containsFooter: batch.containsFooter, to: handle)
+                }
+            }
 
             if prefill == nil, text.isEmpty, token == nil, toolCalls.isEmpty,
                terminal == nil, !done {
@@ -181,12 +222,68 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                         argumentsJSON: (try? call.arguments.encoded()) ?? "{}"))
                 try handle.write(contentsOf: DecodeFrameCodec.encode(event))
             }
-            if let terminal {
+            if var terminal {
+                if measurementRequest != nil {
+                    terminal.currentMemoryBytes = currentMemoryBytes
+                    terminal.peakMemoryBytes = memorySampler.peakBytes
+                }
+                if measurementRequest != nil { try writeMeasurementTransportSummary(to: handle) }
                 try handle.write(contentsOf: DecodeFrameCodec.encode(terminal))
             }
             if terminal != nil { return }
-            if done { return }
+            if done {
+                if measurementRequest != nil { try writeMeasurementTransportSummary(to: handle) }
+                return
+            }
         }
+    }
+
+    private func writeMeasurementBatch(
+        _ data: Data, containsFooter: Bool, to handle: FileHandle
+    ) throws {
+        guard let measurementRequest else { return }
+        guard data.count <= DecodeRuntimeMeasurementLimits.maximumBatchBytes,
+              let json = String(data: data, encoding: .utf8) else {
+            measurementDroppedBatches &+= 1
+            measurementDroppedBytes &+= UInt64(data.count)
+            return
+        }
+        try autoreleasepool {
+            let encodeStart = DispatchTime.now().uptimeNanoseconds
+            var event = DecodeServiceEvent(kind: .measurement, generationID: generationID)
+            event.measurementCaptureID = measurementRequest.stepID
+            event.measurementBatchJSON = json
+            event.measurementContainsFooter = containsFooter ? true : nil
+            let frame = try DecodeFrameCodec.encode(event)
+            let writeStart = DispatchTime.now().uptimeNanoseconds
+            measurementEncodeNanoseconds &+= writeStart &- encodeStart
+            try handle.write(contentsOf: frame)
+            measurementWriteNanoseconds &+= DispatchTime.now().uptimeNanoseconds &- writeStart
+            measurementBatches &+= 1
+            measurementBytes &+= UInt64(data.count)
+        }
+    }
+
+    private func writeMeasurementTransportSummary(to handle: FileHandle) throws {
+        guard let measurementRequest else { return }
+        let totals: [String: UInt64] = [
+            "transport_summary": 1,
+            "unsupported_prefill_configuration": measurementCapture == nil ? 1 : 0,
+            "collector_allocated_storage_bytes": UInt64(measurementCapture?.allocatedStorageBytes ?? 0),
+            "batches": measurementBatches,
+            "numeric_json_bytes": measurementBytes,
+            "frame_encode_wall_nanoseconds": measurementEncodeNanoseconds,
+            "socket_write_wall_nanoseconds": measurementWriteNanoseconds,
+            "dropped_batches": measurementDroppedBatches,
+            "dropped_bytes": measurementDroppedBytes,
+            "app_queue_byte_limit": UInt64(DecodeRuntimeMeasurementLimits.maximumQueuedBytes),
+        ]
+        let data = try JSONEncoder().encode(totals)
+        var event = DecodeServiceEvent(kind: .measurement, generationID: generationID)
+        event.measurementCaptureID = measurementRequest.stepID
+        event.measurementBatchJSON = String(decoding: data, as: UTF8.self)
+        event.measurementFinal = true
+        try handle.write(contentsOf: DecodeFrameCodec.encode(event))
     }
 
     private func terminal(_ kind: DecodeServiceEventKind,

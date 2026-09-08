@@ -4,6 +4,44 @@ import TurboFieldfare
 import TurboFieldfareDecodeProtocol
 import Synchronization
 
+/// A bounded request-owned latch bridges service admission and producer startup.
+/// Finishing it synchronizes with any in-flight Stop before another request runs.
+public final class AppGenerationStop: Sendable {
+    private struct State {
+        var requested = false
+        var finished = false
+        var stop: (@Sendable () -> Void)?
+    }
+    private let state = Mutex(State())
+
+    public init() {}
+
+    public func requestStop() {
+        state.withLock { value in
+            guard !value.finished, !value.requested else { return }
+            value.requested = true
+            value.stop?()
+        }
+    }
+
+    public func activate(_ stop: @escaping @Sendable () -> Void) {
+        state.withLock { value in
+            guard !value.finished else { return }
+            value.stop = stop
+            if value.requested { stop() }
+        }
+    }
+
+    public func finish() {
+        state.withLock { value in
+            value.finished = true
+            value.stop = nil
+        }
+    }
+
+    public var isRequested: Bool { state.withLock { $0.requested } }
+}
+
 final class GenerationTaskRegistry: Sendable {
     private struct Entry: Sendable {
         let id: UUID
@@ -98,6 +136,12 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
         await session.resetConversation()
     }
 
+    public func contextCheckpoint(_ request: DecodeContextCheckpointRequest,
+                                  stop: AppGenerationStop? = nil) async throws
+        -> DecodeContextCheckpointReceipt {
+        try await session.contextCheckpoint(request, stop: stop)
+    }
+
     /// In-process, so there is no stale-epoch window to guard: the caller is
     /// the only writer. The epoch is accepted and ignored; the decode service
     /// holds the gate that uses it.
@@ -127,7 +171,16 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
     }
 
     public func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
-        AsyncThrowingStream { continuation in
+        generate(request, measurementCapture: nil)
+    }
+
+    /// The service owns this collector and drains it through its existing writer.
+    /// Ordinary callers never allocate one or attach request measurements.
+    public func generate(
+        _ request: AppGenerationRequest, measurementCapture: RuntimeMeasurementCapture?,
+        generationStop: AppGenerationStop? = nil
+    ) -> AsyncThrowingStream<AppInferenceEvent, Error> {
+        AsyncThrowingStream<AppInferenceEvent, Error> { continuation in
             let generationID = UUID()
             guard generationTasks.reserve(generationID) else {
                 continuation.yield(.failed(.generationInFlight, partial: nil))
@@ -135,7 +188,20 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                 return
             }
             let task = Task { [self] in
+                defer { generationStop?.finish() }
+                let activateStop: (@Sendable () -> Void)?
+                if let generationStop {
+                    let stop: @Sendable () -> Void = { [weak self] in
+                        guard let self else { return }
+                        self.stop()
+                    }
+                    activateStop = { generationStop.activate(stop) }
+                } else {
+                    activateStop = nil
+                }
                 await session.run(request: request,
+                                  measurementCapture: measurementCapture,
+                                  activateStop: activateStop,
                                   memorySampler: memorySampler,
                                   continuation: continuation)
                 generationTasks.clear(generationID)
@@ -219,6 +285,8 @@ actor RealInferenceSession {
     /// The open conversation, when the app is in chat mode. Nil for the
     /// one-shot path, and dropped by any load, unload, or explicit reset.
     private var conversation: MultimodalConversation?
+    /// Immutable identity/provenance in the same order as retained projected features.
+    private var conversationImageProvenance: [String] = []
     /// Bytes of image tower held mapped right now, published outside the actor
     /// so a reader does not have to await it mid-decode.
     nonisolated let towerBytes = Mutex<UInt64?>(nil)
@@ -263,11 +331,63 @@ actor RealInferenceSession {
         // aborts that turn mid-stream or lets two turns drive one runner.
         if let conversation { await conversation.invalidate() }
         conversation = nil
+        conversationImageProvenance.removeAll()
         runner?.reset()
         conversationTokens.withLock { $0 = 0 }
     }
 
     var hasConversation: Bool { conversation != nil }
+
+    func contextCheckpoint(_ request: DecodeContextCheckpointRequest,
+                           stop: AppGenerationStop?) async throws -> DecodeContextCheckpointReceipt {
+        guard let conversation else { throw AppInferenceError.modelNotLoaded }
+        let start = ContinuousClock.now
+        let attachments = (request.result.imageAttachments ?? []).map {
+            AppImageAttachment(id: $0.id, fileURL: URL(fileURLWithPath: $0.path),
+                displayName: $0.displayName, encodedBytes: $0.encodedBytes, sha256: $0.sha256)
+        }
+        let check: @Sendable () throws -> Void = {
+            try Task.checkCancellation()
+            if stop?.isRequested == true { throw CancellationError() }
+        }
+        for attachment in attachments {
+            try check()
+            guard try Sha256Verifier.hashFile(at: attachment.fileURL, chunkBytes: 256 * 1_024) == attachment.sha256 else {
+                throw AppInferenceError.invalidRequest("Checkpoint image changed after observation.")
+            }
+        }
+        let addedProvenance = Self.imageProvenance(attachments, source: "tool result \(request.result.callID)")
+        let arguments = try JSONDecoder().decode(JSONValue.self, from: Data(request.pendingCall.argumentsJSON.utf8))
+        let receipt = try await conversation.checkpoint(id: request.checkpointID,
+            pendingCall: GFTokenizer.HistoricalToolCall(id: request.pendingCall.id,
+                name: request.pendingCall.name, arguments: arguments),
+            result: ConversationToolResult(callID: request.result.callID, name: request.result.name,
+                content: request.result.content, images: attachments.map(\.fileURL)),
+            record: request.record, imageProvenance: conversationImageProvenance + addedProvenance,
+            generationAllowance: request.generationAllowance,
+            finalAnswerAllowance: request.finalAnswerAllowance, permitsScreenshot: request.permitsScreenshot,
+            force: request.force, commit: request.commit, checkCancellation: check)
+        if request.commit {
+            conversationImageProvenance.append(contentsOf: addedProvenance)
+            conversationTokens.withLock { $0 = 0 }
+        }
+        publishTowerBytes()
+        let duration = start.duration(to: .now).components
+        return DecodeContextCheckpointReceipt(checkpointID: request.checkpointID,
+            replacementEpoch: request.replacementEpoch, committed: request.commit,
+            needed: receipt.needed, existingPromptTokens: receipt.existingPromptTokens,
+            replacementPromptTokens: receipt.replacementPromptTokens, reserveTokens: receipt.reserveTokens,
+            resultAllowanceTokens: receipt.resultAllowanceTokens,
+            retainedImageCount: receipt.retainedImageCount, retainedImageRows: receipt.retainedImageRows,
+            retainedFeatureBytes: receipt.retainedFeatureBytes,
+            preparationSeconds: Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
+    }
+
+    private static func imageProvenance(_ attachments: [AppImageAttachment], source: String) -> [String] {
+        attachments.map {
+            "Source: \(source). Attachment \($0.id.uuidString), SHA-256 \($0.sha256), \($0.displayName). Historical observation only, never an executable target."
+        }
+    }
 
     var loadedToolThinkingEnabled: Bool? {
         loadedKey == nil ? nil : tokenizer?.enableToolThinking
@@ -286,6 +406,7 @@ actor RealInferenceSession {
         if loadedKey == key, runner != nil { return }
 
         conversation = nil
+        conversationImageProvenance.removeAll()
         conversationTokens.withLock { $0 = 0 }
         runner = nil
         scratch = nil
@@ -415,6 +536,7 @@ actor RealInferenceSession {
         // one. `invalidate()` is what waits for that decode.
         if let conversation { await conversation.invalidate() }
         conversation = nil
+        conversationImageProvenance.removeAll()
         conversationTokens.withLock { $0 = 0 }
         visionRuntime = nil
         visionRuntimeError = nil
@@ -606,6 +728,16 @@ actor RealInferenceSession {
             let turn: MultimodalTurnResult
             let toolCalls: [ParsedToolCall]
             switch request.toolTurn {
+            case .checkpoint(let id):
+                let completion = try await conversation.resumeCheckpoint(id: id,
+                    config: config, prefillConfig: prefillConfig,
+                    checkCancellation: { try Task.checkCancellation() }, shouldStop: stopFlagReader(),
+                    captureToolFailureEvidence: request.captureToolFailureEvidence,
+                    maximumConsecutiveInvisibleTokens: invisibleTokenLimit, captureThoughtPreview: true,
+                    onProgress: report,
+                    onStructuredProgress: { progress.updateStructuredProgress($0) })
+                turn = completion.turn
+                toolCalls = completion.toolCalls
             case .user(let developerPrompt, let tools):
                 let completion = try await conversation.sendToolUser(
                     parts: parts, images: imageURLs,
@@ -654,6 +786,13 @@ actor RealInferenceSession {
                     onProgress: report)
                 toolCalls = []
             }
+            if !request.imageAttachments.isEmpty {
+                let source: String
+                if case .results(let results) = request.toolTurn {
+                    source = "tool result " + results.map(\.callID).joined(separator: ", ")
+                } else { source = "original user message" }
+                conversationImageProvenance.append(contentsOf: Self.imageProvenance(request.imageAttachments, source: source))
+            }
             progress.promptTokenCount = turn.promptTokens
             // The conversation's own count. `promptTokens + completionTokens`
             // is one too many whenever a run stops on max tokens or is
@@ -695,8 +834,14 @@ actor RealInferenceSession {
     }
 
     func run(request: AppGenerationRequest,
+             measurementCapture: RuntimeMeasurementCapture? = nil,
+             activateStop: (@Sendable () -> Void)? = nil,
              memorySampler: AppMemorySampler,
              continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation) async {
+        // Also covers an unexpected early exit. Normal terminal paths detach
+        // before publishing completion so the writer cannot freeze the collector
+        // before the final cache snapshot has been appended.
+        defer { clearMeasurementCapture(measurementCapture) }
         // Cleared here, before either branch and before anything a stop could
         // race. Resetting them inside the conversational branch left the
         // single-prompt path with a flag nothing ever lowered — after one Stop
@@ -705,6 +850,7 @@ actor RealInferenceSession {
         // still hashing its images.
         stopRequested.withLock { $0 = false }
         decodeBegan.withLock { $0 = false }
+        activateStop?()
         var prefillConfig = request.runtimeOptions.prefillConfig
         // Image spans only run under chunked prefill, and the app's prefill
         // toggle can select `.off`. Coerce rather than fail after the encodes:
@@ -728,6 +874,11 @@ actor RealInferenceSession {
             }
             runner.captureGPUCompletionTiming = request.captureGPUCompletionTiming
             defer { runner.captureGPUCompletionTiming = false }
+            if let measurementCapture {
+                model?.measurementCapture = measurementCapture
+                model?.recordMeasurementCacheSnapshot(
+                    reason: 0, position: request.continuesConversation ? request.conversationTokens : -1)
+            }
             let executedPrefillMode: PrefillExecutedMode =
                 prefillConfig.mode == .chunked ? .chunked : .off
             let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
@@ -799,9 +950,11 @@ actor RealInferenceSession {
                                               computedPrefillTokens: result.computedPrefillTokens,
                                               conversationTokens: result.conversationTokens,
                                               prefill: prefillDiagnostics)
+            clearMeasurementCapture(measurementCapture, position: result.conversationTokens ?? -1)
             continuation.yield(.finished(diagnostics))
             continuation.finish()
         } catch is CancellationError {
+            clearMeasurementCapture(measurementCapture)
             if progress.generated > 0,
                progress.thinkingPreview != nil || progress.toolCallPreview != nil {
                 continuation.yield(.token(AppTokenEvent(
@@ -826,6 +979,7 @@ actor RealInferenceSession {
             continuation.yield(.cancelled(diagnostics))
             continuation.finish(throwing: AppInferenceError.cancelled)
         } catch let prefillError as PrefillError {
+            clearMeasurementCapture(measurementCapture)
             let diagnostics = Self.prefillFailureDiagnostics(config: prefillConfig,
                                                              kvStorageMode: .fp16,
                                                              reason: prefillError.description)
@@ -837,6 +991,7 @@ actor RealInferenceSession {
                            prefill: diagnostics,
                            forcePartialDiagnostics: true)
         } catch let failure as StructuredToolFailure {
+            clearMeasurementCapture(measurementCapture)
             failGeneration(.structuredToolFailure(
                 message: failure.description,
                 canRegenerateToolResult: failure.canRegenerateToolResult,
@@ -844,12 +999,22 @@ actor RealInferenceSession {
                 request: request, memorySampler: memorySampler,
                 progress: progress, continuation: continuation)
         } catch let appError as AppInferenceError {
+            clearMeasurementCapture(measurementCapture)
             failGeneration(appError, request: request, memorySampler: memorySampler,
                            progress: progress, continuation: continuation)
         } catch {
+            clearMeasurementCapture(measurementCapture)
             failGeneration(.unknown("\(error)"), request: request, memorySampler: memorySampler,
                            progress: progress, continuation: continuation)
         }
+    }
+
+    private func clearMeasurementCapture(
+        _ capture: RuntimeMeasurementCapture?, position: Int = -1
+    ) {
+        guard let capture, let model, model.measurementCapture === capture else { return }
+        model.recordMeasurementCacheSnapshot(reason: 6, position: position)
+        model.measurementCapture = nil
     }
 
     private func failGeneration(_ error: AppInferenceError,

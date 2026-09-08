@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import TurboFieldfareDecodeProtocol
 
 /// Decides whether an incoming generate may join the open conversation.
@@ -20,6 +21,7 @@ struct DecodeConversationGate: Equatable {
         /// A one-shot generate arrived while a conversation was open. Running
         /// it would reset the KV under a lineage the app still believes in.
         case oneShotDuringConversation(open: UUID)
+        case checkpointMismatch
     }
 
     enum Admission: Equatable {
@@ -31,12 +33,71 @@ struct DecodeConversationGate: Equatable {
 
     private(set) var openEpoch: UUID?
     private(set) var committedTurns = 0
+    private var assessedCheckpoint: (id: UUID, binding: String)?
+    private var checkpointReceipts: [UUID: (fingerprint: String, receipt: DecodeContextCheckpointReceipt)] = [:]
+    private var awaitingCheckpointResume: UUID?
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.openEpoch == rhs.openEpoch && lhs.committedTurns == rhs.committedTurns
+            && lhs.assessedCheckpoint?.id == rhs.assessedCheckpoint?.id
+            && lhs.assessedCheckpoint?.binding == rhs.assessedCheckpoint?.binding
+            && lhs.awaitingCheckpointResume == rhs.awaitingCheckpointResume
+            && lhs.checkpointReceipts.mapValues(\.fingerprint) == rhs.checkpointReceipts.mapValues(\.fingerprint)
+    }
+
+    private func fingerprint(_ request: DecodeContextCheckpointRequest, bindingOnly: Bool) throws -> String {
+        var value = request
+        value.requestID = UUID(uuid: (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        if bindingOnly { value.record = ""; value.commit = false }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return SHA256.hash(data: try encoder.encode(value)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func previousCheckpoint(_ request: DecodeContextCheckpointRequest) throws -> DecodeContextCheckpointReceipt? {
+        guard let previous = checkpointReceipts[request.checkpointID] else { return nil }
+        guard previous.fingerprint == (try fingerprint(request, bindingOnly: false)) else {
+            throw Rejection.checkpointMismatch
+        }
+        return previous.receipt
+    }
+
+    func validateCheckpoint(_ request: DecodeContextCheckpointRequest) throws {
+        guard request.sourceEpoch == openEpoch, request.sourceTurnIndex == committedTurns,
+              request.replacementEpoch != openEpoch, awaitingCheckpointResume == nil else {
+            throw Rejection.checkpointMismatch
+        }
+        if request.commit {
+            guard assessedCheckpoint?.id == request.checkpointID,
+                  assessedCheckpoint?.binding == (try fingerprint(request, bindingOnly: true)) else {
+                throw Rejection.checkpointMismatch
+            }
+        }
+    }
+
+    mutating func recordCheckpoint(_ request: DecodeContextCheckpointRequest,
+                                   receipt: DecodeContextCheckpointReceipt) throws {
+        if request.commit {
+            checkpointReceipts[request.checkpointID] = (try fingerprint(request, bindingOnly: false), receipt)
+            openEpoch = request.replacementEpoch
+            committedTurns = 0
+            awaitingCheckpointResume = request.checkpointID
+            assessedCheckpoint = nil
+        } else if receipt.needed {
+            assessedCheckpoint = (request.checkpointID, try fingerprint(request, bindingOnly: true))
+        }
+    }
+
+    mutating func checkpointResumed() { awaitingCheckpointResume = nil }
 
     /// Starts a new lineage. The caller drops the KV; this only records that it
     /// did.
     mutating func reset(to epoch: UUID) {
         openEpoch = epoch
         committedTurns = 0
+        assessedCheckpoint = nil
+        checkpointReceipts.removeAll()
+        awaitingCheckpointResume = nil
     }
 
     /// Ends any lineage. Both unload and load reach here: each releases or
@@ -45,9 +106,19 @@ struct DecodeConversationGate: Equatable {
     mutating func endLineage() {
         openEpoch = nil
         committedTurns = 0
+        assessedCheckpoint = nil
+        checkpointReceipts.removeAll()
+        awaitingCheckpointResume = nil
     }
 
     func admit(_ request: DecodeGenerationRequest) -> Result<Admission, Rejection> {
+        if let expected = awaitingCheckpointResume {
+            guard case .checkpoint(let id) = request.toolTurn, id == expected else {
+                return .failure(.checkpointMismatch)
+            }
+        } else if case .checkpoint = request.toolTurn {
+            return .failure(.checkpointMismatch)
+        }
         guard let requested = request.conversationEpoch else {
             if let openEpoch { return .failure(.oneShotDuringConversation(open: openEpoch)) }
             return .success(.oneShot)
@@ -76,6 +147,8 @@ extension DecodeConversationGate.Rejection {
     /// actually open, because "rejected" alone is not a diagnosis.
     var message: String {
         switch self {
+        case .checkpointMismatch:
+            return "checkpoint identity, source, settled result, or resume does not match the pending transaction"
         case .staleConversation(let requested, let open):
             let openText = open.map(\.uuidString) ?? "none"
             return "turn belongs to conversation \(requested.uuidString), "
