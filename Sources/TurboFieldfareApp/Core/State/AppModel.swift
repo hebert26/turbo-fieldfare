@@ -65,8 +65,8 @@ public final class AppModel {
     /// default, because loading takes minutes and holds gigabytes.
     public private(set) var loadModelOnLaunch: Bool = false
     public private(set) var agentModeEnabled: Bool = false
-    public private(set) var agentBundleIdentifier: String = ""
-    public private(set) var agentSimulatorUDID: String = ""
+    public private(set) var agentBundleIdentifier = "com.hebertgo.nestmind.debug"
+    public private(set) var agentSimulatorUDID = "7BE1EC4B-8A9F-4C00-8A2C-D4321F9AB382"
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
     public var installState: AppModelInstallState = .idle
@@ -151,6 +151,9 @@ public final class AppModel {
     private let installer: any AppModelInstallerClient
     private let visionInstaller: any AppVisionPackInstallerClient
     private var runTask: Task<Void, Never>?
+    /// Agent Mode Stop must reach the decode service after decode begins so
+    /// the service can settle and commit the turn at a token boundary.
+    private var agentCancellationIssued = false
     private var loadTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
     private var visionInstallTask: Task<Void, Never>?
@@ -2041,6 +2044,7 @@ public final class AppModel {
             options: request.runtimeOptions,
             forceLogitsHead: !request.isPureGreedy)
         isCancellationPending = false
+        agentCancellationIssued = false
         liveTokenCount = 0
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
@@ -2135,8 +2139,16 @@ public final class AppModel {
         liveStructuredProgress = nil
         isCancellationPending = true
         if agentModeEnabled {
-            runTask?.cancel()
+            issueAgentCancellationAtTokenBoundaryIfReady()
+        } else {
+            client.cancel()
         }
+    }
+
+    private func issueAgentCancellationAtTokenBoundaryIfReady() {
+        guard isCancellationPending, !agentCancellationIssued,
+              phase == .decode, liveTokenCount > 0 else { return }
+        agentCancellationIssued = true
         client.cancel()
     }
 
@@ -2353,6 +2365,7 @@ public final class AppModel {
             request.prompt = agentCheckpointRecord ?? ""
             request.imageAttachments = []
             request.conversationTokens = 0
+            request.runtimeOptions.prefillChunkTokens = 256
         } else if case .results(let results) = toolTurn {
             request.prompt = ""
             request.imageAttachments = results.flatMap(\.imageAttachments)
@@ -2389,7 +2402,7 @@ public final class AppModel {
             await recordAgentModelInput(
                 request, isFormatCorrection: !allowsMalformedRegeneration,
                 generation: generation)
-            for try await event in client.generate(request) {
+            generationEvents: for try await event in client.generate(request) {
                 switch event {
                 case .token(let token):
                     // The first decode event proves this checkpoint's prefill
@@ -2429,7 +2442,7 @@ public final class AppModel {
                     await applyAgentStep(event, generation: generation)
                 case .cancelled(let diagnostics):
                     terminal = diagnostics
-                    throw CancellationError()
+                    break generationEvents
                 case .failed(let error, let partial):
                     terminal = partial
                     // Drain through stream termination before considering a
@@ -2556,13 +2569,18 @@ public final class AppModel {
             body = "Explicit checkpoint resume: \(id.uuidString). Original system/tool configuration and retained image features are reconstructed by the service.\n\(request.prompt)"
         case .user(let developerPrompt, let tools):
             if let developerPrompt {
-                body += "Developer message configuration (may already be retained):\n\(developerPrompt)\n\n"
+                body += "Developer message added to this model context:\n\(developerPrompt)\n\n"
             }
             body += "User message:\n\(request.prompt)\n"
             appendImages(request.imageAttachments)
-            for tool in tools {
-                body += "\nTool definition configuration (may already be retained): \(tool.name)\n\(tool.description)\nParameters (JSON formatted for display):\n"
-                body += Self.prettyAgentActivityJSON(tool.parameters) + "\n"
+            // Tool definitions are encoded only when tool mode opens. Later
+            // user turns carry the same definitions as a consistency check,
+            // while the model reuses the definitions already in its KV prefix.
+            if developerPrompt != nil {
+                for tool in tools {
+                    body += "\nTool definition added to this model context: \(tool.name)\n\(tool.description)\nParameters (JSON formatted for display):\n"
+                    body += Self.prettyAgentActivityJSON(tool.parameters) + "\n"
+                }
             }
         case .results(let results):
             for result in results {
@@ -2602,6 +2620,7 @@ public final class AppModel {
         if !text.isEmpty {
             outputText += text
         }
+        issueAgentCancellationAtTokenBoundaryIfReady()
     }
 
     private func applyAgentStep(_ event: AppInferenceEvent, generation: Int) {
@@ -2927,6 +2946,7 @@ public final class AppModel {
         phase = .idle
         runState = .idle
         isCancellationPending = false
+        agentCancellationIssued = false
         activeRunRuntimeKey = nil
         activeAgentActivityTurnID = nil
         runTask = nil

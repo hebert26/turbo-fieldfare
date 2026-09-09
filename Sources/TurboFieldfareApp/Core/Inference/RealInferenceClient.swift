@@ -250,6 +250,22 @@ struct SessionLoadKey: Equatable, Sendable {
         self.options = options
         self.forceLogitsHead = forceLogitsHead
     }
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.directory == rhs.directory
+            && lhs.maxContext == rhs.maxContext
+            && lhs.loadTimeOptions == rhs.loadTimeOptions
+            && lhs.forceLogitsHead == rhs.forceLogitsHead
+    }
+
+    /// Prefill is selected for each request. The runner allocates for the
+    /// largest supported chunk, so neither prefill field changes loaded state.
+    private var loadTimeOptions: AppRuntimeOptions {
+        var value = options
+        value.prefillEnabled = false
+        value.prefillChunkTokens = 128
+        return value
+    }
 }
 
 struct TokenizerDirectoryCache: Equatable, Sendable {

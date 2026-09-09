@@ -44,6 +44,7 @@ constant uint FC_ATTN_NUM_KV_HEADS [[function_constant(62)]];
 constant bool FC_ATTN_USE_FC [[function_constant(63)]];
 constant float FC_ATTN_SCALE [[function_constant(64)]];
 constant uint FC_ATTN_NUM_CHUNKS [[function_constant(65)]];
+constant bool FC_ATTN_RETAIN_FULL_QUERY [[function_constant(66)]];
 constant uint FC_ATTN_RING_CAP [[function_constant(69)]];
 
 static inline uint attn_fc_head_dim(constant uint& head_dim) {
@@ -176,6 +177,13 @@ void attention_decode_partial(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
+    // Only the exact full-head / 256-thread variant retains two fixed values.
+    // Other shapes and widths keep the original strided query reads below.
+    const bool retain_query = is_function_constant_defined(FC_ATTN_RETAIN_FULL_QUERY) &&
+        FC_ATTN_RETAIN_FULL_QUERY && HD == 512u && lsize == kAttnThreads;
+    const float q_first = retain_query ? q_smem[lid] : 0.0f;
+    const float q_second = retain_query ? q_smem[lid + kAttnThreads] : 0.0f;
+
     constexpr uint kPerThread = (kAttnMaxHeadDim + kAttnThreads - 1) / kAttnThreads;
     float o_local[kPerThread];
     for (uint k = 0; k < kPerThread; ++k) { o_local[k] = 0.0f; }
@@ -192,8 +200,13 @@ void attention_decode_partial(
         device const half* V_row = V + (phys_p * NKV + kv_head) * HD;
 
         float partial = 0.0f;
-        for (uint i = lid; i < HD; i += lsize) {
-            partial = fma(q_smem[i], float(K_row[i]), partial);
+        if (retain_query) {
+            partial = fma(q_first, float(K_row[lid]), partial);
+            partial = fma(q_second, float(K_row[lid + kAttnThreads]), partial);
+        } else {
+            for (uint i = lid; i < HD; i += lsize) {
+                partial = fma(q_smem[i], float(K_row[i]), partial);
+            }
         }
         float s = block_reduce_sum(partial,
                                    simd_lane_id, simd_group_id, simdgroups,

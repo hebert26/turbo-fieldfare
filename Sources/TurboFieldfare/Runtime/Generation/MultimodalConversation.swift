@@ -406,9 +406,19 @@ public actor MultimodalConversation {
                 }
                 features.append(encoded)
             }
-            let input = try MultimodalPromptRenderer.expandingImageTokens(
-                preparedReplacement.template, features: features)
-            guard input.effectiveTokenIDs.count == count else {
+            let turn: EncodedTurn
+            if features.isEmpty {
+                turn = EncodedTurn(
+                    effectiveTokenIDs: preparedReplacement.template,
+                    prefillInput: nil)
+            } else {
+                let input = try MultimodalPromptRenderer.expandingImageTokens(
+                    preparedReplacement.template, features: features)
+                turn = EncodedTurn(
+                    effectiveTokenIDs: input.effectiveTokenIDs,
+                    prefillInput: input)
+            }
+            guard turn.effectiveTokenIDs.count == count else {
                 throw MultimodalPromptRendererError.placeholderMismatch
             }
             try checkCancellation()
@@ -422,8 +432,7 @@ public actor MultimodalConversation {
             kvNeedsRebuild = false
             toolState = nil
             assessedResultBridge = nil
-            checkpointOpening = (id, EncodedTurn(effectiveTokenIDs: input.effectiveTokenIDs,
-                prefillInput: features.isEmpty ? nil : input),
+            checkpointOpening = (id, turn,
                 ToolState(messages: preparedReplacement.messages, tools: state.tools,
                           awaitingResults: false))
         } else {

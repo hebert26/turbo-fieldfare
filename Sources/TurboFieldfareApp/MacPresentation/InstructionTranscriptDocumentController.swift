@@ -1112,7 +1112,7 @@ public final class InstructionTranscriptDocumentController {
                     string: "Sent to Gemma · input attempt #\(attempt)\(isFormatCorrection ? " · format correction" : "")\n",
                     attributes: activityLabelAttributes(color: modelInputAccentColor)))
                 document.append(NSAttributedString(
-                    string: "Complete request text below. Prior conversation is reused separately.\nDeveloper/tool configuration may already be retained.\nTool results are host-sanitized; raw MCP responses have their own cards.\nImages are supplied separately; references are listed below.\nJSON indentation is display-only. Original request text and values are unchanged.\n",
+                    string: "Text added to the retained model context is below. Developer and tool configuration appear only when this input adds them.\nTool results are host-sanitized; raw MCP responses have their own cards.\nImages are supplied separately; references are listed below.\nJSON indentation is display-only. Original request text and values are unchanged.\n",
                     attributes: activityBodyAttributes()))
                 document.append(activityCodeCard(
                     body: formattedModelInputBody(activity.body), cardStyle: .modelInput))

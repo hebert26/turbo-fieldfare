@@ -33,6 +33,8 @@ final class Attention {
     private let psoGQAPartialSWA: MTLComputePipelineState
     private let psoGQAPartialSWAChunks16: MTLComputePipelineState
     private let psoPartialFullChunks16: MTLComputePipelineState
+    private let psoPartialFullQueryRegisters: MTLComputePipelineState
+    private let psoPartialFullChunks16QueryRegisters: MTLComputePipelineState
     private let psoCombineSWA: MTLComputePipelineState
     private let psoCombineFull: MTLComputePipelineState
     private let psoCombineSWAChunks16: MTLComputePipelineState
@@ -92,6 +94,12 @@ final class Attention {
                                                                    numQHeads: 16,
                                                                    numKVHeads: 2,
                                                                    numChunks: 16)
+        self.psoPartialFullQueryRegisters = try Self.specializedPipeline(context,
+            "attention_decode_partial", headDim: 512, numQHeads: 16, numKVHeads: 2,
+            retainFullQuery: true)
+        self.psoPartialFullChunks16QueryRegisters = try Self.specializedPipeline(context,
+            "attention_decode_partial", headDim: 512, numQHeads: 16, numKVHeads: 2,
+            numChunks: 16, retainFullQuery: true)
         self.psoCombineSWA = try Self.specializedPipeline(context,
                                                           "attention_decode_combine",
                                                           headDim: 256,
@@ -251,13 +259,23 @@ final class Attention {
         let useSWAGQAPartial = geometry.useSWAGroupedPartial
         let nChunks = geometry.numChunks
         let chunkLen = geometry.chunkLength
-        let partialPSO = partialPipeline(headDim: headDim,
+        var partialPSO = partialPipeline(headDim: headDim,
                                          numQHeads: numQHeads,
                                          numKVHeads: numKVHeads,
                                          numChunks: nChunks,
                                          useGQAPartial: useSWAGQAPartial,
                                          ringCapacity: ringCapacity)
         let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
+        // Keep the baseline's exact width. A register variant is eligible only
+        // for full attention when its compiled limit also supports 256 threads.
+        if !preferGQASWA, headDim == 512, numQHeads == 16, numKVHeads == 2,
+           tgWidth == Self.threadsPerGroup {
+            let candidate = nChunks == 16
+                ? psoPartialFullChunks16QueryRegisters : psoPartialFullQueryRegisters
+            if candidate.maxTotalThreadsPerThreadgroup >= tgWidth {
+                partialPSO = candidate
+            }
+        }
 
         let partialEncoder: MTLComputeCommandEncoder?
         if let stageTiming {
@@ -327,7 +345,8 @@ final class Attention {
                                             numQHeads: UInt32,
                                             numKVHeads: UInt32,
                                             numChunks: UInt32? = nil,
-                                            ringCapacity: UInt32? = nil) throws -> MTLComputePipelineState {
+                                            ringCapacity: UInt32? = nil,
+                                            retainFullQuery: Bool = false) throws -> MTLComputePipelineState {
         var constants = [
             MetalFunctionConstant(index: 60, value: .uint32(headDim)),
             MetalFunctionConstant(index: 61, value: .uint32(numQHeads)),
@@ -336,6 +355,9 @@ final class Attention {
         ]
         if let numChunks {
             constants.append(MetalFunctionConstant(index: 65, value: .uint32(numChunks)))
+        }
+        if retainFullQuery {
+            constants.append(MetalFunctionConstant(index: 66, value: .bool(true)))
         }
         if let ringCapacity {
             constants.append(MetalFunctionConstant(index: 69, value: .uint32(ringCapacity)))

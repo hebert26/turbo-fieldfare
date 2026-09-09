@@ -642,6 +642,13 @@ actor VisionCaptureToolLoop {
     private var taskCheckpoint = AgentTaskCheckpoint()
     private var checkpointRequestIDs: [UUID] = []
     private var performanceCompactionPolicy = PerformanceCompactionPolicy()
+    private var modelConversationEpoch: UUID?
+    private var knownCallIDs: Set<String> = []
+    private var localProposals = LocalProposalTracker()
+    private var recoverableColdMisses = RecoverableColdMissTracker()
+    private var readOnlyNoProgress = ReadOnlyNoProgressTracker()
+    private var thoughtRecoveryUsed = false
+    private var thoughtRecoveryFacts: String?
 
     private struct GenerationRetryBoundary {
         let call: AppToolCall
@@ -668,37 +675,53 @@ actor VisionCaptureToolLoop {
         inference: @escaping Inference
     ) async throws -> VisionCaptureAgentRunResult {
         try Task.checkCancellation()
+        let resumesRetainedTask = modelConversationEpoch.map {
+            $0 != conversationEpoch
+        } ?? false
         performanceCompactionPolicy.beginConversation(conversationEpoch)
+        if resumesRetainedTask {
+            // The new model context has not observed these private targets.
+            // Retire their host capabilities before it can choose another app action.
+            invalidateScreenObservation()
+            currentManifest = AuthorityManifest()
+            currentSystemAlert = nil
+            permittedNextOperations = [.observe]
+            if AppVisionPackInstallationProbe.status(
+                at: configuration.modelDirectory
+            ) == .complete {
+                permittedNextOperations?.insert(.screenshot)
+            }
+        }
+        let resumeRecord = resumesRetainedTask
+            ? try taskCheckpoint.render(
+                currentPacket: Self.unavailableResumeDecisionPacket(),
+                safety: checkpointSafety(configuration),
+                currentPacketWasRefreshed: false)
+            : nil
         taskCheckpoint.appendUser(userPrompt, images: userImages)
         defer {
             screenshotStore.removeAll()
             currentImageObservation = nil
         }
-        rejectedBeforeSubmissionProposals.removeAll(keepingCapacity: true)
-        invalidateScreenObservation()
-        staleActionConfirmation = nil
-        blockedStaleActions.removeAll(keepingCapacity: true)
-        journeyEvents.removeAll(keepingCapacity: true)
-        currentJourneyHint = nil
         let developerPrompt: String?
-        if hasInjectedPrompt {
+        if hasInjectedPrompt, !resumesRetainedTask {
             developerPrompt = nil
         } else {
-            developerPrompt = Self.instructions(configuration: configuration)
+            let standingInstructions = Self.instructions(configuration: configuration)
+            if let resumeRecord {
+                developerPrompt = standingInstructions + "\n\n" + resumeRecord
+            } else {
+                developerPrompt = standingInstructions
+            }
             hasInjectedPrompt = true
         }
+        modelConversationEpoch = conversationEpoch
         var next = AppToolTurn.user(
             developerPrompt: developerPrompt,
             tools: VisionCaptureToolDefinitions.all)
-        var knownCallIDs: Set<String> = []
-        var localProposals = LocalProposalTracker()
-        var recoverableColdMisses = RecoverableColdMissTracker()
-        var readOnlyNoProgress = ReadOnlyNoProgressTracker()
         var nextReadyOffer: ReadyActionOffer?
         var awaitingCheckpointNote = false
         var retryBoundary: GenerationRetryBoundary?
-        var thoughtRecoveryUsed = false
-        var thoughtRecoveryFacts: String?
         var activeThoughtRecovery: UUID?
 
         while true {
@@ -809,6 +832,12 @@ actor VisionCaptureToolLoop {
                 }
                 let answer = completion.content.trimmingCharacters(
                     in: .whitespacesAndNewlines)
+                if answer.isEmpty,
+                   completion.diagnostics.stopReason == .cancelled {
+                    return VisionCaptureAgentRunResult(
+                        answer: "Generation stopped.",
+                        diagnostics: completion.diagnostics)
+                }
                 guard !answer.isEmpty else {
                     throw VisionCaptureAgentError.incompleteAnswer
                 }
@@ -1166,12 +1195,29 @@ actor VisionCaptureToolLoop {
                     try Task.checkCancellation()
                     performanceCompactionPolicy.didCommit(
                         replacementEpoch: commitProposal.replacementEpoch)
+                    modelConversationEpoch = commitProposal.replacementEpoch
                     next = .checkpoint(commitProposal.id)
                     retryBoundary = nil
                     awaitingCheckpointNote = true
                 }
             }
         }
+    }
+
+    private static func unavailableResumeDecisionPacket() -> String {
+        let packet = JSONValue.object([
+            "origin": .string("host_resume"),
+            "observation": .object([
+                "state": .string("unavailable"),
+                "instruction": .string(
+                    "No settled current app observation was retained before the model context changed.")
+            ]),
+            "choices": .array([]),
+            "allowed_next": .array([]),
+            "guidance": .string(
+                "Continue the retained user task, but obtain a new permitted observation before proposing app input.")
+        ])
+        return (try? packet.encoded()) ?? "{}"
     }
 
     private var checkpointSessionReference: String? {
@@ -3106,74 +3152,25 @@ actor VisionCaptureToolLoop {
     }
 
     private static func instructions(
-        configuration: VisionCaptureAgentConfiguration
+        configuration _: VisionCaptureAgentConfiguration
     ) -> String {
-        let targetState = (try? configuration.validate()) == nil
-            ? "The host target is not configured. Normal chat still works. If navigation is needed, make one navigation proposal and follow the host's configuration result."
-            : "The host target is configured. Never ask for, invent, or include application or device identifiers."
         return """
-        You are in the ordinary TurboFieldfare chat with one optional high-level application-navigation tool.
-        For normal conversation, answer normally and do not call a tool. Use visioncapture_navigate only when
-        the user asks to inspect or drive the configured application.
+        You are the iOS QA tester for the configured simulator app. Turn the user's test goal into
+        observable checks. Within the requested scope, exercise the relevant app flows as a user,
+        compare actual behavior with the expected outcome, gather evidence, and report defects or
+        blocked coverage clearly. Never guess a result or claim behavior you did not verify.
 
-        \(targetState)
+        Make at most one tool call per reply. Continue until every requested check is complete or a
+        factual blocker is verified.
 
-        Use one tool call per assistant turn: visioncapture_navigate for the app, or
-        task_history_read for a page of this task's archived evidence. A history read is
-        local, not a new screen observation. It supplies no actions, does not renew image
-        evidence, and does not replace the current decision packet. Historical statements
-        are observations from then, not current state. Retrieve omitted evidence needed
-        for a claim rather than repeating input. Partial pages cannot establish a complete record.
+        After each app step, last_action describes what happened to the previous action. Observation,
+        facts, and choices describe the screen now. Earlier observations remain historical. Preserve
+        refused, failed, inconclusive, and delivery-unknown outcomes. Do not replay that input. A
+        current confirmation offer is a new permitted decision.
 
-        Each current navigation result has schema_version, observation,
-        last_action, allowed_next, facts, and choices. Choose an action from allowed_next.
-        For tap, set_boolean, or type, copy a target ID from the latest choices and use only
-        its listed operation. IDs expire with the next decision packet. Never substitute a label, an
-        old ID, coordinates, or an invented target. The host privately resolves exact targets,
-        sessions, execution evidence, validation, and safe recovery.
-
-        For swipe, choose a finger-movement direction from can_swipe. Send only action and
-        direction. The host submits one gesture and reads fresh facts before your next decision.
-        A screen change alone does not verify the swipe's intended effect.
-
-        Before the first observation, choose launch, observe, or screenshot as needed.
-        After launch, choose observe. When current facts and choices are unchanged, do not
-        repeat observe as a waiting loop. Choose a current action, request a screenshot if
-        it could clarify a different safe step, answer, or report the factual blocker.
-        Do not tap an already-selected option merely to select it again. It may deselect it.
-        For set_boolean, use an offered allowed_desired_states value. Typing inserts the exact
-        supplied text at the field's cursor or selection without clearing existing content.
-        Repeating text may duplicate it. A null or absent value is unknown, not an empty field.
-
-        Request a screenshot when a form, selection, completion, or navigation is unclear
-        from text. Image support requires the vision companion. A screenshot is read-only,
-        retires existing choices, and does not prove a previous action succeeded. The host
-        then reads accessibility facts and offers new targets when permitted. Image and read are
-        sequential; visual agreement is unverified. Use current text choices without another
-        observe when they are sufficient. Actual positions come from the later read, use 0–1000
-        from the screen's top-left, and never grant pointer input.
-        A choice with requires_screenshot: true cannot be selected yet. Request screenshot,
-        then use only the new choices returned with a usable image/read pair. Earlier images
-        do not identify a later unnamed target. If the current image and facts still leave
-        the target ambiguous, report the ambiguity. Do not guess a target.
-
-        last_action reports the previous action separately from the current observation.
-        Preserve unknown delivery, failure, and inconclusive outcomes. Never automatically
-        replay a refused or uncertain action. A choice with confirmation_attempts: 1 is one
-        permitted new decision following a stale refusal before dispatch. It expires with the
-        next packet and cannot be restored by a correction. Follow the current recovery guidance.
-        A journey_hint reports a return to earlier observed content. Such a return can be valid,
-        including adding another item, and does not establish a lack of task progress.
-
-        Native system-alert buttons are tap choices with role system_alert_button. Choose a
-        current ID. The host uses the existing guarded alert route once and then reads again.
-        If no supported choice serves the goal, explain that factual limitation. A screenshot
-        cannot bypass a refusal or enable unsupported input.
-
-        Follow the user's goal and current observed facts. Do not assume any app-specific
-        route or completion rule. Verified typing or selection does not prove a form was saved.
-        Use current evidence to assess remaining goals without upgrading earlier action proof.
-        Distinguish verified, failed, inconclusive, and unknown outcomes in the final answer.
+        An action result does not prove the user's goal. Verify it from current evidence. If evidence
+        does not support a claim, inspect safely or say it is unknown. Report results as verified,
+        failed, inconclusive, or unknown.
         """
     }
 
@@ -5176,20 +5173,137 @@ actor VisionCaptureToolLoop {
         return values
     }
 
-    private static func validateReturnedIdentity(
+    static func validateReturnedIdentity(
         in value: JSONValue,
         configuration: VisionCaptureAgentConfiguration,
         refusalCode: String?,
         permittedLaunchTimeout: [String: JSONValue]? = nil
     ) throws {
         var inspectedEmbeddedTexts: Set<String> = []
+        var interactionEvidenceCopies = InteractionEvidenceCopies()
+        collectInteractionEvidenceCopies(
+            in: value,
+            inspectedEmbeddedTexts: &inspectedEmbeddedTexts,
+            configuration: configuration,
+            into: &interactionEvidenceCopies)
+        inspectedEmbeddedTexts.removeAll(keepingCapacity: true)
         try validateReturnedIdentityFields(
             in: value,
             inspectedEmbeddedTexts: &inspectedEmbeddedTexts,
             configuration: configuration,
             path: "$",
             refusalCode: refusalCode,
-            permittedLaunchTimeout: permittedLaunchTimeout)
+            permittedLaunchTimeout: permittedLaunchTimeout,
+            globallyPermitsNullObservedBundleID:
+                interactionEvidenceCopies.containsNullObservedBundleID
+                && interactionEvidenceCopies.allCopiesProveRejection
+                && interactionEvidenceCopies.allDispatchFactsProveNoSubmission)
+    }
+
+    private struct InteractionEvidenceCopies {
+        var containsNullObservedBundleID = false
+        var allCopiesProveRejection = true
+        var allDispatchFactsProveNoSubmission = true
+    }
+
+    private static func collectInteractionEvidenceCopies(
+        in value: JSONValue,
+        inspectedEmbeddedTexts: inout Set<String>,
+        configuration: VisionCaptureAgentConfiguration,
+        into copies: inout InteractionEvidenceCopies
+    ) {
+        switch value {
+        case .object(let object):
+            for key in ["dispatch_attempted", "submission_started",
+                        "delivery_acknowledged", "mutation_sent"] {
+                if let returned = object[key], returned != .bool(false) {
+                    copies.allDispatchFactsProveNoSubmission = false
+                }
+            }
+            if let returned = object["interaction_evidence"] {
+                let evidenceCopies: [[String: JSONValue]]
+                switch returned {
+                case .object(let evidence): evidenceCopies = [evidence]
+                case .array(let values):
+                    evidenceCopies = values.compactMap(\.objectValue)
+                    if evidenceCopies.count != values.count {
+                        copies.allCopiesProveRejection = false
+                    }
+                default:
+                    evidenceCopies = []
+                    copies.allCopiesProveRejection = false
+                }
+                if evidenceCopies.isEmpty {
+                    copies.allCopiesProveRejection = false
+                }
+                for evidence in evidenceCopies {
+                    if evidence["binding"]?.objectValue?["observed_bundle_id"] == .null {
+                        copies.containsNullObservedBundleID = true
+                    }
+                    if !permitsNullObservedBundleID(
+                        in: evidence,
+                        configuration: configuration) {
+                        copies.allCopiesProveRejection = false
+                    }
+                }
+            }
+            for child in object.values {
+                collectInteractionEvidenceCopies(
+                    in: child,
+                    inspectedEmbeddedTexts: &inspectedEmbeddedTexts,
+                    configuration: configuration,
+                    into: &copies)
+            }
+        case .array(let values):
+            for child in values {
+                collectInteractionEvidenceCopies(
+                    in: child,
+                    inspectedEmbeddedTexts: &inspectedEmbeddedTexts,
+                    configuration: configuration,
+                    into: &copies)
+            }
+        case .string(let text):
+            guard inspectedEmbeddedTexts.insert(text).inserted else { return }
+            for embedded in embeddedJSONValues(in: text) {
+                collectInteractionEvidenceCopies(
+                    in: embedded,
+                    inspectedEmbeddedTexts: &inspectedEmbeddedTexts,
+                    configuration: configuration,
+                    into: &copies)
+            }
+        default:
+            break
+        }
+    }
+
+    /// A pre-dispatch failure has no observed recipient. VisionCapture reports
+    /// that fact as a null observed bundle in the evidence binding. Accept it
+    /// only when that same complete evidence copy proves that submission never
+    /// began and remains bound to the configured request identity.
+    private static func permitsNullObservedBundleID(
+        in interactionEvidence: [String: JSONValue],
+        configuration: VisionCaptureAgentConfiguration
+    ) -> Bool {
+        guard let binding = interactionEvidence["binding"]?.objectValue,
+              binding["observed_bundle_id"] == .null,
+              binding["requested_bundle_id"] == .string(configuration.bundleIdentifier),
+              binding["udid"] == .string(configuration.simulatorUDID),
+              binding["observed_pid"] == .null,
+              let dispatch = interactionEvidence["dispatch"]?.objectValue,
+              dispatch["status"] == .string("rejected_before_submission"),
+              dispatch["submission_started"] == .bool(false),
+              dispatch["delivery_acknowledged"] == .bool(false),
+              let outcome = interactionEvidence["outcome"]?.objectValue,
+              outcome["status"] == .string("failed"),
+              outcome["scope"] == .string("dispatch"),
+              outcome["reason_code"] == .string("DISPATCH_REJECTED_BEFORE_SUBMISSION"),
+              let target = interactionEvidence["target"]?.objectValue,
+              target["actual_event_recipient_observed"] == .bool(false),
+              target["status"] == .string("unavailable"),
+              target["reason_code"] == .string("TARGET_UNAVAILABLE") else {
+            return false
+        }
+        return true
     }
 
     private static func validateReturnedIdentityFields(
@@ -5200,15 +5314,26 @@ actor VisionCaptureToolLoop {
         refusalCode: String?,
         permittedLaunchTimeout: [String: JSONValue]?,
         isTimeoutOutcome: Bool = false,
-        isTimeoutForeground: Bool = false
+        isTimeoutForeground: Bool = false,
+        isInteractionEvidence: Bool = false,
+        globallyPermitsNullObservedBundleID: Bool = false,
+        permitsNullObservedBundleID: Bool = false
     ) throws {
         switch value {
         case .object(let object):
+            let permitsNullObservedBundleIDInBinding = globallyPermitsNullObservedBundleID
+                && isInteractionEvidence
+                && Self.permitsNullObservedBundleID(
+                    in: object,
+                    configuration: configuration)
             for (key, child) in object {
                 let childPath = path + "[" + (try JSONValue.string(key).encoded()) + "]"
                 if ["bundle_id", "requested_bundle_id", "observed_bundle_id"]
                     .contains(key),
                    child != .string(configuration.bundleIdentifier),
+                   !(permitsNullObservedBundleID
+                       && key == "observed_bundle_id"
+                       && child == .null),
                    !(isTimeoutForeground && key == "bundle_id") {
                     throw VisionCaptureAgentError.returnedIdentityMismatch(
                         fieldPath: boundedIdentityDiagnosticPath(childPath), refusalCode: refusalCode)
@@ -5230,7 +5355,12 @@ actor VisionCaptureToolLoop {
                         && child.objectValue == permittedLaunchTimeout,
                     isTimeoutForeground: isTimeoutOutcome && key == "foreground"
                         && (child.objectValue?["state"] == .string("other")
-                            || child.objectValue?["state"] == .string("system")))
+                            || child.objectValue?["state"] == .string("system")),
+                    isInteractionEvidence: key == "interaction_evidence",
+                    globallyPermitsNullObservedBundleID:
+                        globallyPermitsNullObservedBundleID,
+                    permitsNullObservedBundleID: key == "binding"
+                        && permitsNullObservedBundleIDInBinding)
             }
         case .array(let array):
             for (index, child) in array.enumerated() {
@@ -5240,7 +5370,10 @@ actor VisionCaptureToolLoop {
                     configuration: configuration,
                     path: path + "[\(index)]",
                     refusalCode: refusalCode,
-                    permittedLaunchTimeout: permittedLaunchTimeout)
+                    permittedLaunchTimeout: permittedLaunchTimeout,
+                    isInteractionEvidence: isInteractionEvidence,
+                    globallyPermitsNullObservedBundleID:
+                        globallyPermitsNullObservedBundleID)
             }
         case .string(let text):
             guard inspectedEmbeddedTexts.insert(text).inserted else { return }
@@ -5251,7 +5384,9 @@ actor VisionCaptureToolLoop {
                     configuration: configuration,
                     path: path + ".embeddedJSON[\(index)]",
                     refusalCode: refusalCode,
-                    permittedLaunchTimeout: permittedLaunchTimeout)
+                    permittedLaunchTimeout: permittedLaunchTimeout,
+                    globallyPermitsNullObservedBundleID:
+                        globallyPermitsNullObservedBundleID)
             }
         default:
             break
