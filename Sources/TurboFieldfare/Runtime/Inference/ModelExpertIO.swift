@@ -118,7 +118,13 @@ extension Model {
                                                        existingPlan: plan, experts: plan.experts,
                                                        capture: capture)
         }
-        // Disabled path keeps the existing dispatch, continuation and buffer views.
+        if plan.cachePlan.misses.isEmpty {
+            return Self.makeExpertViews(
+                streamer.expertCachePlanBuffers(plan.cachePlan),
+                layer: plan.layer,
+                experts: plan.experts)
+        }
+        // Cache misses keep the existing dispatch, continuation and buffer views.
         // No measurement object, timestamp or cache snapshot is constructed.
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {

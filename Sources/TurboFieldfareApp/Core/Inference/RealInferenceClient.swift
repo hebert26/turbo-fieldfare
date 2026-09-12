@@ -386,7 +386,7 @@ actor RealInferenceSession {
             performanceRequested: request.trigger == .sustainedSlowDecode,
             commit: request.commit, checkCancellation: check)
         if request.commit {
-            conversationImageProvenance.append(contentsOf: addedProvenance)
+            conversationImageProvenance = addedProvenance
             conversationTokens.withLock { $0 = 0 }
         }
         publishTowerBytes()
@@ -403,9 +403,7 @@ actor RealInferenceSession {
     }
 
     private static func imageProvenance(_ attachments: [AppImageAttachment], source: String) -> [String] {
-        attachments.map {
-            "Source: \(source). Attachment \($0.id.uuidString), SHA-256 \($0.sha256), \($0.displayName). Historical observation only, never an executable target."
-        }
+        attachments.map { _ in "Source: \(source). Observation evidence only." }
     }
 
     var loadedToolThinkingEnabled: Bool? {

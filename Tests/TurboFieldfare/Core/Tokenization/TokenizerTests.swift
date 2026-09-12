@@ -33,6 +33,28 @@ struct TokenizerTests {
         #expect(tok.stopTokenIDs.count == 3)
     }
 
+    @Test("Thinking-off tool result ends with an empty thought channel")
+    func thinkingOffToolResultCue() throws {
+        let call = GFTokenizer.HistoricalToolCall(
+            id: "call_1", name: "observe", arguments: .object([:]))
+        let tools = [GFTokenizer.FunctionDefinition(
+            name: "observe", description: "Read the current screen.",
+            parameters: .object(["type": .string("object")]))]
+        let messages = [
+            GFTokenizer.Message(role: .user, content: "Inspect the app."),
+            GFTokenizer.Message(role: .assistant, content: nil, toolCalls: [call]),
+            GFTokenizer.Message(
+                role: .tool, content: "screen", toolCallID: call.id, name: call.name),
+        ]
+        let configured = tok.withToolThinking(enabled: false)
+        let ids = try configured.encodeToolChat(messages: messages, tools: tools)
+        let expected = configured.encode(
+            "<|channel>thought\n<channel|>", addBOS: false)
+
+        #expect(ids.suffix(expected.count).elementsEqual(expected))
+        #expect(!configured.promptEndsInThoughtChannel(ids))
+    }
+
     @Test("convertTokenToId substitutes unk for absent tokens")
     func convertTokenToIdSubstitutesUnk() {
         // Pins the library behavior `requireTokenID` exists for: BPE resolves an

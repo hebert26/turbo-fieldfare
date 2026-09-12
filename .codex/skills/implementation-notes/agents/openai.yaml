@@ -1,4 +1,0 @@
-interface:
-  display_name: "Implementation Notes"
-  short_description: "Create clear HTML implementation notes"
-  default_prompt: "Use $implementation-notes to create a human-readable implementation notes page from the supplied source material."

@@ -1,4 +1,0 @@
-interface:
-  display_name: "Efficient VisionCapture Exploration"
-  short_description: "Explore app screens with fewer screenshots"
-  default_prompt: "Use $vision-capture-efficient-exploration with $vision-capture to explore this Simulator app from live cache and accessibility evidence."

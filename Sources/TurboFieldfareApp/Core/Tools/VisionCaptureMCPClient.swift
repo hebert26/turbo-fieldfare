@@ -27,6 +27,7 @@ struct VisionCaptureMCPResult: Sendable {
     let isStaleActionCapabilityBeforeDispatch: Bool
     let isSourceLayoutChangedBeforeRevalidation: Bool
     let isActionAuthorizationExpiredBeforeDispatch: Bool
+    let isObservedTapTargetUnavailableBeforeDispatch: Bool
     let isDeliveredTransitionContinuation: Bool
     var isObservationTopologyRefreshBeforeDispatch: Bool = false
 
@@ -223,7 +224,10 @@ actor VisionCaptureMCPClient {
         isPrepared = true
     }
 
-    func execute(arguments: JSONValue) async throws -> VisionCaptureMCPResult {
+    func execute(
+        arguments: JSONValue,
+        beforeDispatch: @Sendable () async throws -> Void = {}
+    ) async throws -> VisionCaptureMCPResult {
         try await prepare()
         let isScreenshot: Bool
         if case .object(let request) = arguments {
@@ -231,6 +235,10 @@ actor VisionCaptureMCPClient {
         } else {
             isScreenshot = false
         }
+        // This callback is the final admission point. No suspension occurs
+        // between its return and entering `send`, so a user instruction that
+        // wins this boundary prevents the request from reaching VisionCapture.
+        try await beforeDispatch()
         let result = try await send(
             method: "tools/call",
             params: .object([
@@ -256,7 +264,7 @@ actor VisionCaptureMCPClient {
             hasConflictingDispatchAttemptEvidence: dispatchAttempts.count > 1,
             isGuardedTargetRejectedBeforeSubmission:
                 isError
-                && refusalCode == "GUARDED_TARGET_REJECTED"
+                && ["GUARDED_TARGET_REJECTED", "NO_BACK_TARGET"].contains(refusalCode)
                 && !dispatchAttempts.contains(true)
                 && dispatchAttempts.count <= 1
                 && Self.provesGuardedTargetRejectionBeforeSubmission(in: result),
@@ -273,6 +281,12 @@ actor VisionCaptureMCPClient {
                 isError
                 && refusalCode == "CACHE_ACTION_CAPABILITY_INVALID"
                 && Self.provesActionAuthorizationExpiredBeforeDispatch(
+                    in: result, arguments: arguments),
+            isObservedTapTargetUnavailableBeforeDispatch:
+                isError
+                && refusalCode == "CACHE_ACTION_CAPABILITY_INVALID"
+                && dispatchAttempts == [false]
+                && Self.provesObservedTapTargetUnavailableBeforeDispatch(
                     in: result, arguments: arguments),
             isDeliveredTransitionContinuation:
                 isError
@@ -374,6 +388,43 @@ actor VisionCaptureMCPClient {
             }
         }
         return isConsistent(value)
+    }
+
+    /// A granted observed tap can become invalid when the live target changes
+    /// before dispatch. Accept only VisionCapture's exact no-dispatch contract;
+    /// generic invalid-capability failures remain terminal.
+    private static func provesObservedTapTargetUnavailableBeforeDispatch(
+        in value: JSONValue, arguments: JSONValue
+    ) -> Bool {
+        guard let request = arguments.objectValue,
+              case .string(let rawRequest)? = request["request"],
+              rawRequest.hasPrefix("tap "),
+              !rawRequest.dropFirst(4).isEmpty,
+              case .string(let bundle)? = request["bundle_id"], !bundle.isEmpty,
+              case .string(let session)? = request["session_id"], !session.isEmpty,
+              request["session_kind"] == .string("flow"),
+              let parameters = request["parameters"]?.objectValue,
+              Set(parameters.keys) == ["udid", "observation_grant"],
+              case .string(let udid)? = parameters["udid"], !udid.isEmpty,
+              case .string(let grant)? = parameters["observation_grant"], !grant.isEmpty,
+              let root = value.objectValue,
+              root["isError"] == .bool(true),
+              root["cache_authorization_phase"] == .string("cold_tap_live_validation"),
+              root["cache_authorization_reason"] == .string("live_target_not_actionable"),
+              root["dispatch_attempted"] == .bool(false),
+              let payload = root["payload"]?.objectValue,
+              let proof = payload["proof"]?.objectValue,
+              proof["verdict"] == .string("failed"),
+              proof["action"] == .string("tap"),
+              proof["target"] == .string(String(rawRequest.dropFirst(4))),
+              proof["checks"] == .object([:]),
+              case .string(let reason)? = proof["reason"], !reason.isEmpty
+        else { return false }
+
+        for key in ["submission_started", "delivery_acknowledged", "mutation_sent"] {
+            if findBooleanValues(named: key, in: value).contains(true) { return false }
+        }
+        return findBooleanValues(named: "dispatch_attempted", in: value) == [false]
     }
 
     /// Only the publisher's complete expired-unused action contract permits

@@ -92,10 +92,78 @@ struct VisionCaptureScreenFacts {
     }
 
     func readableLabel(selector: String, role: String, selectorKind: String? = nil) -> String? {
-        guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
-              let label = elements[index].label.flatMap(Self.displayText),
+        guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind)
+        else { return nil }
+        let element = elements[index]
+        let readable = element.label ?? (
+            ["text_field", "secure_text_field"].contains(element.role)
+                ? element.placeholder : nil)
+        guard let label = readable.flatMap(Self.displayText),
               !label.hasPrefix("__vc") else { return nil }
         return label
+    }
+
+    /// Correlates two private descriptions of one observed element. The index
+    /// is meaningful only inside this observation and is never model-facing.
+    func semanticTargetIdentity(
+        selector: String,
+        role: String,
+        selectorKind: String? = nil,
+        displayLabel: String? = nil,
+        position: JSONValue? = nil
+    ) -> Int? {
+        if let index = matchingIndex(
+            selector: selector, role: role, selectorKind: selectorKind) {
+            return index
+        }
+        guard let displayLabel, let position else { return nil }
+        let matches = elements.indices.filter { index in
+            let element = elements[index]
+            return element.role == role
+                && element.label?.utf8.elementsEqual(displayLabel.utf8) == true
+                && element.position == position
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// Letter entry uses the high-level type action. Keep keyboard controls
+    /// such as return that can submit a form, and suppress only the observed
+    /// mode keys that do not advance an app QA journey.
+    func isLowValueSoftwareKeyboardControl(
+        selector: String,
+        role: String,
+        displayLabel: String? = nil,
+        position: JSONValue? = nil
+    ) -> Bool {
+        let softwareKeyboardIsVisible = elements.contains { $0.type == "XCUIElementTypeKey" }
+        guard softwareKeyboardIsVisible else { return false }
+        let labels = elements.compactMap { element -> String? in
+            guard ["XCUIElementTypeKey", "XCUIElementTypeButton"].contains(element.type),
+                  element.role == role else {
+                return nil
+            }
+            let exactSelector = element.identifier?.utf8.elementsEqual(selector.utf8) == true
+                || element.label?.utf8.elementsEqual(selector.utf8) == true
+            let positionedDisplay: Bool
+            if let displayLabel, let position {
+                positionedDisplay = element.label?.utf8.elementsEqual(displayLabel.utf8) == true
+                    && element.position == position
+            } else {
+                positionedDisplay = false
+            }
+            guard exactSelector || positionedDisplay else { return nil }
+            if element.type == "XCUIElementTypeButton" {
+                guard case .object(let point)? = element.position,
+                      case .integer(let y)? = point["y_norm"], y >= 650 else { return nil }
+            }
+            return element.label ?? (exactSelector ? selector : displayLabel)
+        }
+        return labels.contains { label in
+            switch label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "emoji", "shift": true
+            default: false
+            }
+        }
     }
 
     /// Observation suggests a target to validate, never permission to tap it.
@@ -151,6 +219,10 @@ struct VisionCaptureScreenFacts {
         }
         for (index, element) in elements.enumerated() {
             guard !excluded.contains(index), element.type != "XCUIElementTypeKey" else { continue }
+            if let selector = element.identifier ?? element.label,
+               isLowValueSoftwareKeyboardControl(selector: selector, role: element.role) {
+                continue
+            }
             let content = [element.label, element.value]
                 .compactMap { $0.flatMap(Self.displayText) }
                 .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
@@ -172,7 +244,7 @@ struct VisionCaptureScreenFacts {
                 if element.selected == true { line += " selected" }
                 if element.enabled == false { line += " disabled" }
             }
-            lines.append(line)
+            if !lines.contains(line) { lines.append(line) }
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }

@@ -86,6 +86,43 @@ enum MultimodalConversationKVRecovery {
         return Array(tokenIDs.prefix(target))
     }
 }
+
+enum MultimodalConversationCanonicalization {
+    static func userContent(_ parts: [MultimodalContinuationPart]) throws -> String {
+        var content = ""
+        for part in parts {
+            switch part {
+            case .text(let value):
+                guard !value.contains(MultimodalPromptRenderer.placeholder) else {
+                    throw MultimodalPromptRendererError.reservedImageMarker
+                }
+                content += value
+            case .image:
+                content += MultimodalPromptRenderer.placeholder
+            }
+        }
+        return content
+    }
+
+    static func longestReusablePrefix(
+        cached: [Int32],
+        canonical: [Int32],
+        imageTokenRanges: [Range<Int>]
+    ) -> Int {
+        var count = 0
+        for (old, new) in zip(cached, canonical) {
+            guard old == new else { break }
+            count += 1
+        }
+        for range in imageTokenRanges {
+            if count > range.lowerBound, count < range.upperBound {
+                return range.lowerBound
+            }
+        }
+        return count
+    }
+}
+
 public struct MultimodalTurnResult: Sendable {
     public let text: String
     public let promptTokens: Int
@@ -312,14 +349,18 @@ public actor MultimodalConversation {
         }
         let toolMessage = GFTokenizer.Message(role: .tool, content: result.content,
             toolCallID: result.callID, name: result.name, toolImageCount: result.images.count)
+        let continuationAssistant = Self.toolCallBoundaryMessage(assistant)
         let bridge: [Int32]
         if let assessed = assessedResultBridge, assessed.result == result,
            assessed.calls == assistant.toolCalls {
             bridge = assessed.tokens
         } else {
             bridge = try tokenizer.encodeToolResultContinuation(
-                cachedMessages: Array(state.messages.dropLast()), assistant: assistant,
-                incomingMessages: state.messages + [toolMessage], tools: state.tools)
+                cachedMessages: Array(state.messages.dropLast()),
+                assistant: continuationAssistant,
+                incomingMessages: Array(state.messages.dropLast())
+                    + [continuationAssistant, toolMessage],
+                tools: state.tools)
         }
         guard bridge.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == result.images.count else {
             throw MultimodalPromptRendererError.placeholderMismatch
@@ -331,10 +372,15 @@ public actor MultimodalConversation {
             try Gemma4ImagePreprocessor(device: context.device, config: visionRuntime!.config).plan(fileURL: url)
         }
         let oldFeatures = committedImageSpans.map(\.features)
-        let rowCounts = oldFeatures.map(\.tokenCount) + plans.map(\.geometry.softTokenCount)
-        guard imageProvenance.count == rowCounts.count else {
+        let allRowCounts = oldFeatures.map(\.tokenCount) + plans.map(\.geometry.softTokenCount)
+        guard imageProvenance.count == allRowCounts.count else {
             throw MultimodalPromptRendererError.placeholderMismatch
         }
+        // Retain only images from this pending result. Gemma has already seen
+        // older screenshots, while their compact text evidence survives in the
+        // checkpoint. This removes historical image tokens and feature buffers.
+        let retainedProvenance = Array(imageProvenance.suffix(plans.count))
+        let retainedRowCounts = plans.map(\.geometry.softTokenCount)
         let currentImageExpansion = plans.reduce(0) { $0 + $1.geometry.softTokenCount + 1 }
         let existingCount = kvTokenIDs.count + (boundaryNeedsReplay ? uncommittedBoundary.count : 0)
             + bridge.count + currentImageExpansion
@@ -356,26 +402,23 @@ public actor MultimodalConversation {
         var performanceCandidateAccepted = false
         var preparedReplacement: (messages: [GFTokenizer.Message], template: [Int32])?
         if commit || performanceRequested {
-            // Retain the same images in the same feature order, but place
-            // historical pixels before the current checkpoint record. Ending
-            // on an old screenshot can make it appear to be the current view.
             var openingText = ""
-            if !imageProvenance.isEmpty {
-                openingText = "Historical image evidence retained from earlier inputs. These images are not a new screenshot of the current screen. Their original provenance follows. Read the later checkpoint record for current state.\n"
-                for (index, source) in imageProvenance.enumerated() {
-                    openingText += "\nHistorical image \(index + 1). \(source)\n"
-                        + MultimodalPromptRenderer.placeholder + "\nEnd historical image \(index + 1).\n"
+            if !retainedProvenance.isEmpty {
+                openingText = "Screenshot evidence from the last completed action follows. It is not an executable target.\n"
+                for (index, source) in retainedProvenance.enumerated() {
+                    openingText += "\nImage \(index + 1). \(source)\n"
+                        + MultimodalPromptRenderer.placeholder + "\n"
                 }
-                openingText += "\nEnd of historical image evidence. A difference from the later current screen does not by itself invalidate that screen's observed facts. The current checkpoint record follows.\n\n"
+                openingText += "\nCurrent checkpoint follows.\n\n"
             }
             openingText += record
             var messages = state.messages.filter { $0.role == .system || $0.role == .developer }
             messages.append(GFTokenizer.Message(role: .user, content: openingText))
             let template = try tokenizer.encodeToolChat(messages: messages, tools: state.tools)
-            guard template.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == rowCounts.count else {
+            guard template.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == retainedRowCounts.count else {
                 throw MultimodalPromptRendererError.placeholderMismatch
             }
-            let count = template.count + rowCounts.reduce(0) { $0 + $1 + 1 }
+            let count = template.count + retainedRowCounts.reduce(0) { $0 + $1 + 1 }
             preparedReplacement = (messages, template)
             replacementCount = count
             if performanceRequested {
@@ -396,6 +439,7 @@ public actor MultimodalConversation {
                     maxContext: maxContext)
             }
             var features = oldFeatures
+            features.removeAll(keepingCapacity: true)
             for plan in plans {
                 try checkCancellation()
                 let encoded = try visionRuntime!.encodeImage(
@@ -442,10 +486,11 @@ public actor MultimodalConversation {
         }
         return ConversationCheckpointReceipt(needed: needed, existingPromptTokens: existingCount,
             replacementPromptTokens: replacementCount, reserveTokens: reserve,
-            resultAllowanceTokens: resultReserve, retainedImageCount: rowCounts.count,
-            retainedImageRows: rowCounts.reduce(0, +),
-            retainedFeatureBytes: oldFeatures.reduce(0) { $0 + $1.buffer.length }
-                + plans.reduce(0) { $0 + $1.geometry.softTokenCount * model.config.hiddenSize * MemoryLayout<Float16>.stride },
+            resultAllowanceTokens: resultReserve, retainedImageCount: retainedRowCounts.count,
+            retainedImageRows: retainedRowCounts.reduce(0, +),
+            retainedFeatureBytes: plans.reduce(0) {
+                $0 + $1.geometry.softTokenCount * model.config.hiddenSize * MemoryLayout<Float16>.stride
+            },
             performanceMinimumSavingsTokens: performanceMinimumSavingsTokens)
     }
 
@@ -643,8 +688,9 @@ public actor MultimodalConversation {
 
     /// Runs one tool-aware user turn on this conversation's existing model and
     /// KV. Tool mode starts only on an empty lineage so its definitions are
-    /// present in the first rendered prompt. Later user turns are ordinary KV
-    /// continuations and keep those definitions in their prefix.
+    /// present in the first rendered prompt. A later standard user turn renders
+    /// the settled logical history again, which applies Gemma's bundled thought
+    /// stripping while reusing the longest safe prefix of the existing KV.
     public func sendToolUser(
         parts: [MultimodalContinuationPart],
         images: [URL] = [],
@@ -678,20 +724,21 @@ public actor MultimodalConversation {
                 reason: visionRuntimeError.map(String.init(describing:)))
         }
 
-        let text = parts.reduce(into: "") {
-            if case .text(let value) = $1 { $0 += value }
-        }
+        let userContent = try MultimodalConversationCanonicalization.userContent(parts)
         var state: ToolState
         let turn: EncodedTurn
         if var existing = toolState {
             guard existing.tools == tools, !existing.awaitingResults else {
                 throw MultimodalConversationError.invalidToolContinuation
             }
-            existing.messages.append(GFTokenizer.Message(role: .user, content: text))
+            existing.messages.append(GFTokenizer.Message(role: .user, content: userContent))
             state = existing
-            turn = try await encodeTurn(
-                parts: parts, images: images,
-                checkCancellation: checkCancellation)
+            turn = try encodeCanonicalToolUserTurn(
+                messages: existing.messages,
+                tools: existing.tools,
+                images: images,
+                checkCancellation: checkCancellation,
+                shouldStop: shouldStop)
         } else {
             guard kvTokenIDs.isEmpty else {
                 throw MultimodalConversationError.toolModeRequiresNewConversation
@@ -699,9 +746,9 @@ public actor MultimodalConversation {
             var messages: [GFTokenizer.Message] = []
             if let developerPrompt {
                 messages.append(GFTokenizer.Message(
-                    role: .developer, content: developerPrompt))
+                    role: .system, content: developerPrompt))
             }
-            messages.append(GFTokenizer.Message(role: .user, content: text))
+            messages.append(GFTokenizer.Message(role: .user, content: userContent))
             state = ToolState(messages: messages, tools: tools, awaitingResults: false)
             turn = try await encodeOpeningToolTurn(
                 parts: parts, images: images,
@@ -773,14 +820,15 @@ public actor MultimodalConversation {
                 toolImageCount: $0.images.count)
         }
         let cached = Array(state.messages.dropLast())
-        let incoming = state.messages + toolMessages
+        let continuationAssistant = Self.toolCallBoundaryMessage(assistant)
+        let incoming = cached + [continuationAssistant] + toolMessages
         let bridge: [Int32]
         if let assessed = assessedResultBridge, results == [assessed.result],
            assessed.calls == assistant.toolCalls {
             bridge = assessed.tokens
         } else {
             bridge = try tokenizer.encodeToolResultContinuation(
-                cachedMessages: cached, assistant: assistant,
+                cachedMessages: cached, assistant: continuationAssistant,
                 incomingMessages: incoming, tools: state.tools)
         }
         assessedResultBridge = nil
@@ -856,16 +904,25 @@ public actor MultimodalConversation {
         return completion
     }
 
-    private static func assistantMessage(
+    static func assistantMessage(
         for completion: StructuredConversationTurnResult
     ) -> GFTokenizer.Message {
         GFTokenizer.Message(
             role: .assistant,
-            content: completion.toolCalls.isEmpty ? completion.turn.text : nil,
+            content: completion.turn.text,
             toolCalls: completion.toolCalls.map {
                 GFTokenizer.HistoricalToolCall(
                     id: $0.id, name: $0.name, arguments: $0.arguments)
             })
+    }
+
+    private static func toolCallBoundaryMessage(
+        _ assistant: GFTokenizer.Message
+    ) -> GFTokenizer.Message {
+        GFTokenizer.Message(
+            role: .assistant,
+            content: nil,
+            toolCalls: assistant.toolCalls)
     }
 
     private func completeEncodedTurn(
@@ -1260,6 +1317,115 @@ public actor MultimodalConversation {
         let prefillInput: MultimodalPrefillInput?
     }
 
+    private func encodeCanonicalToolUserTurn(
+        messages: [GFTokenizer.Message],
+        tools: [GFTokenizer.FunctionDefinition],
+        images: [URL],
+        checkCancellation: @Sendable () throws -> Void,
+        shouldStop: (@Sendable () -> Bool)?
+    ) throws -> EncodedTurn {
+        try checkCancellation()
+        if shouldStop?() == true { throw CancellationError() }
+
+        let template = try tokenizer.encodeToolChat(messages: messages, tools: tools)
+        let oldFeatures = committedImageSpans.map(\.features)
+        let placeholderCount = template.reduce(into: 0) {
+            if $1 == MultimodalPromptRenderer.imageTokenID { $0 += 1 }
+        }
+
+        var plans: [VisionImagePlan] = []
+        if !images.isEmpty {
+            guard let visionRuntime else {
+                throw MultimodalConversationError.imageUnavailable(
+                    reason: visionRuntimeError.map(String.init(describing:)))
+            }
+            let preprocessor = Gemma4ImagePreprocessor(
+                device: context.device, config: visionRuntime.config)
+            plans = try images.map { try preprocessor.plan(fileURL: $0) }
+        }
+        guard placeholderCount == oldFeatures.count + plans.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+
+        let historicalImageTokens = oldFeatures.reduce(0) {
+            $0 + $1.tokenCount + 1
+        }
+        let incomingImageTokens = plans.reduce(0) {
+            $0 + $1.geometry.softTokenCount + 1
+        }
+        let expandedCount = template.count + historicalImageTokens + incomingImageTokens
+        guard expandedCount + 1 <= maxContext else {
+            throw MultimodalConversationError.contextExhausted(
+                prompt: expandedCount, maxContext: maxContext)
+        }
+
+        var features = oldFeatures
+        if let visionRuntime {
+            for plan in plans {
+                try checkCancellation()
+                if shouldStop?() == true { throw CancellationError() }
+                let encoded = try visionRuntime.encodeImage(
+                    plan: plan,
+                    languageModel: model,
+                    residencyPolicy: visionResidency,
+                    checkCancellation: checkCancellation)
+                guard encoded.tokenCount == plan.geometry.softTokenCount else {
+                    throw MultimodalPromptRendererError.placeholderMismatch
+                }
+                features.append(encoded)
+            }
+        }
+        try checkCancellation()
+        if shouldStop?() == true { throw CancellationError() }
+
+        let fullInput = features.isEmpty
+            ? nil
+            : try MultimodalPromptRenderer.expandingImageTokens(template, features: features)
+        let canonicalIDs = fullInput?.effectiveTokenIDs ?? template
+        let imageRanges = fullInput?.imageSpans.map(\.tokenRange) ?? []
+        var cached = 0
+        if !kvNeedsRebuild, runner.continuationPosition == kvTokenIDs.count {
+            cached = MultimodalConversationCanonicalization.longestReusablePrefix(
+                cached: kvTokenIDs,
+                canonical: canonicalIDs,
+                imageTokenRanges: imageRanges)
+        }
+
+        func suffix(at cachedCount: Int) throws -> EncodedTurn {
+            let remainingImages = fullInput?.imageSpans.contains {
+                $0.tokenRange.upperBound > cachedCount
+            } == true
+            let input = remainingImages
+                ? try fullInput?.suffix(dropping: cachedCount)
+                : nil
+            return EncodedTurn(
+                effectiveTokenIDs: Array(canonicalIDs.dropFirst(cachedCount)),
+                prefillInput: input)
+        }
+
+        var turn = try suffix(at: cached)
+        if cached == 0 {
+            runner.reset()
+        } else if cached < kvTokenIDs.count {
+            do {
+                try runner.rewind(to: cached)
+            } catch {
+                runner.reset()
+                cached = 0
+                turn = try suffix(at: 0)
+            }
+        }
+
+        kvTokenIDs = Array(canonicalIDs.prefix(cached))
+        committedImageSpans = (fullInput?.imageSpans ?? []).filter {
+            $0.tokenRange.upperBound <= cached
+        }
+        kvNeedsRebuild = false
+        uncommittedBoundary.removeAll(keepingCapacity: true)
+        boundaryNeedsReplay = false
+        return turn
+    }
+
     private func encodeTurn(
         parts: [MultimodalContinuationPart],
         images: [URL],
@@ -1342,10 +1508,11 @@ public actor MultimodalConversation {
             }
         }
         var renderedMessages: [MultimodalMessage] = []
-        if let developer = messages.first, developer.role == .developer {
+        if let systemInstructions = messages.first,
+           systemInstructions.role == .system || systemInstructions.role == .developer {
             renderedMessages.append(MultimodalMessage(
-                role: .developer,
-                content: [.text(developer.content ?? "")]))
+                role: systemInstructions.role,
+                content: [.text(systemInstructions.content ?? "")]))
         }
         renderedMessages.append(MultimodalMessage(
             role: .user, content: userContent))

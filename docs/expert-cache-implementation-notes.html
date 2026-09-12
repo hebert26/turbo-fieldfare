@@ -1,0 +1,669 @@
+<!-- Styles adapted from "Know your unknowns" — Copyright 2026 Anthropic PBC. SPDX-License-Identifier: Apache-2.0. Source: https://thariqs.github.io/html-effectiveness/unknowns/09-implementation-notes.html -->
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Expert cache arrays — Implementation notes</title><style>
+  :root {
+    --ivory:  #FAF9F5;
+    --paper:  #FFFFFF;
+    --slate:  #141413;
+    --clay:   #D97757;
+    --clay-d: #B85C3E;
+    --oat:    #E3DACC;
+    --olive:  #788C5D;
+    --g100:   #F0EEE6;
+    --g200:   #E6E3DA;
+    --g300:   #D1CFC5;
+    --g500:   #87867F;
+    --g700:   #3D3D3A;
+    --serif: ui-serif, Georgia, "Times New Roman", Times, serif;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Monaco, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ivory);
+    color: var(--slate);
+    font-family: var(--sans);
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 24px 100px; }
+
+  
+  header.page { padding: 56px 0 8px; position: relative; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--g500);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .eyebrow::before { content: ""; width: 24px; height: 1.5px; background: var(--clay); flex: none; }
+  a.back {
+    position: absolute;
+    top: 60px; right: 0;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    text-decoration: none;
+  }
+  a.back:hover { color: var(--clay-d); }
+  h1 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: clamp(32px, 5vw, 46px);
+    line-height: 1.08;
+    letter-spacing: -0.015em;
+    margin: 0 0 10px;
+  }
+  .lede { font-size: 16.5px; color: var(--g700); max-width: 640px; margin: 0 0 30px; }
+
+  
+  .promptcard {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 22px 26px 24px;
+    position: relative;
+  }
+  .promptcard .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 12px;
+  }
+  .promptcard blockquote {
+    margin: 0;
+    font-family: var(--serif);
+    font-style: italic;
+    font-size: 17.5px;
+    line-height: 1.6;
+    color: var(--slate);
+    max-width: 62ch;
+  }
+  button.copybtn {
+    position: absolute;
+    top: 18px; right: 18px;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--g700);
+    background: var(--g100);
+    border: 1.5px solid var(--g300);
+    border-radius: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+  }
+  button.copybtn:hover { border-color: var(--g500); }
+  button.copybtn.done { color: var(--olive); border-color: var(--olive); background: var(--paper); }
+
+  
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin: 48px 0 30px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--g500);
+    white-space: nowrap;
+  }
+  .divider::before, .divider::after { content: ""; height: 1.5px; background: var(--g300); flex: 1; }
+
+  
+  .doc {
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+  .doc-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px 14px;
+    padding: 14px 22px;
+    border-bottom: 1.5px solid var(--g200);
+    background: var(--g100);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g700);
+  }
+  .doc-head .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--olive); flex: none; }
+  .doc-head .path { overflow-wrap: anywhere; }
+  .doc-head .meta { margin-left: auto; color: var(--g500); }
+
+  .doc-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 22px 22px 0;
+  }
+  .stat {
+    flex: 1 1 130px;
+    background: var(--ivory);
+    border: 1.5px solid var(--g200);
+    border-radius: 10px;
+    padding: 12px 16px 10px;
+  }
+  .stat .n { font-family: var(--serif); font-weight: 500; font-size: 30px; line-height: 1.1; letter-spacing: -0.02em; }
+  .stat .t { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--g500); margin-top: 3px; }
+  .stat.dev .n { color: var(--clay-d); }
+  .stat.you .n { color: var(--slate); }
+  .stat.you { border-color: var(--oat); background: #F6F0E4; }
+
+  
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 18px 22px 4px;
+  }
+  .chip {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    padding: 6px 14px;
+    border-radius: 999px;
+    border: 1.5px solid var(--g300);
+    background: var(--paper);
+    color: var(--g700);
+    cursor: pointer;
+  }
+  .chip:hover { border-color: var(--g500); }
+  .chip.on { background: var(--slate); border-color: var(--slate); color: var(--ivory); }
+  .chip .ct { color: var(--g500); }
+  .chip.on .ct { color: var(--g300); }
+
+  
+  .timeline { padding: 16px 22px 26px; }
+  .entry {
+    display: grid;
+    grid-template-columns: 52px 14px 1fr;
+    gap: 0 14px;
+    position: relative;
+  }
+  .entry .ts {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--g500);
+    padding-top: 4px;
+    text-align: right;
+  }
+  .entry .rail { position: relative; }
+  .entry .rail::before {
+    content: "";
+    position: absolute;
+    left: 50%; top: 0; bottom: 0;
+    width: 1.5px;
+    background: var(--g200);
+    transform: translateX(-50%);
+  }
+  .entry.rail-first .rail::before { top: 10px; }
+  .entry.rail-last .rail::before { bottom: auto; height: 10px; }
+  .entry.rail-first.rail-last .rail::before { display: none; }
+  .entry .node {
+    position: absolute;
+    left: 50%; top: 8px;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    transform: translateX(-50%);
+    background: var(--g300);
+    border: 2px solid var(--paper);
+    box-shadow: 0 0 0 1.5px var(--g300);
+  }
+  .entry.t-plan .node    { background: var(--olive); box-shadow: 0 0 0 1.5px var(--olive); }
+  .entry.t-dev .node     { background: var(--clay);  box-shadow: 0 0 0 1.5px var(--clay); }
+  .entry.t-disc .node    { background: var(--oat);   box-shadow: 0 0 0 1.5px var(--g500); }
+  .entry.t-human .node   { background: var(--slate); box-shadow: 0 0 0 1.5px var(--slate); }
+  .entry .body { padding: 0 0 22px; min-width: 0; }
+  .badge {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 2.5px 9px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+  }
+  .t-plan  .badge { color: var(--olive); background: #EEF1E8; border: 1px solid #C9D4B8; }
+  .t-dev   .badge { color: #fff; background: var(--clay); border: 1px solid var(--clay); }
+  .t-disc  .badge { color: var(--g700); background: var(--g100); border: 1px solid var(--g300); }
+  .t-human .badge { color: var(--ivory); background: var(--slate); border: 1px solid var(--slate); }
+  .entry h3 {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 15px;
+    margin: 0 0 4px;
+    letter-spacing: -0.005em;
+  }
+  .entry p { margin: 0; font-size: 14px; color: var(--g700); max-width: 68ch; }
+  .entry code, .devgrid code, .n2 code {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    background: var(--g100);
+    border: 1px solid var(--g200);
+    border-radius: 5px;
+    padding: 1px 5px;
+    overflow-wrap: anywhere;
+  }
+  .ts-mobile { display: none; }
+
+  
+  .devgrid {
+    margin-top: 10px;
+    border: 1.5px solid var(--oat);
+    border-left: 3px solid var(--clay);
+    border-radius: 10px;
+    background: #FBF6EC;
+    overflow: hidden;
+  }
+  .devgrid .row {
+    display: grid;
+    grid-template-columns: 158px 1fr;
+    gap: 12px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    color: var(--g700);
+  }
+  .devgrid .row + .row { border-top: 1px solid #EFE5D2; }
+  .devgrid .k {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--clay-d);
+    padding-top: 2px;
+  }
+  .devgrid .row.chosen .k { color: var(--olive); }
+  .devgrid .row.chosen .v { color: var(--slate); font-weight: 500; }
+  @media (max-width: 560px) {
+    .entry { grid-template-columns: 14px 1fr; }
+    .entry .ts { display: none; }
+    .ts-mobile { display: inline; font-family: var(--mono); font-size: 11px; color: var(--g500); margin-left: 8px; }
+  }
+  
+  @media (max-width: 860px) {
+    .devgrid .row { grid-template-columns: 1fr; gap: 6px; }
+  }
+
+  
+  .next {
+    margin-top: 26px;
+    background: var(--paper);
+    border: 1.5px solid var(--g300);
+    border-radius: 14px;
+    padding: 24px 26px 22px;
+    position: relative;
+  }
+  .next .label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--clay);
+    margin-bottom: 8px;
+  }
+  .next h2 {
+    font-family: var(--serif);
+    font-weight: 500;
+    font-size: 24px;
+    letter-spacing: -0.01em;
+    margin: 0 0 6px;
+  }
+  .next .sub { font-size: 14px; color: var(--g500); margin: 0 0 14px; max-width: 60ch; }
+  .next ol { margin: 0; padding-left: 22px; }
+  .next li { font-size: 14.5px; color: var(--g700); margin-bottom: 10px; max-width: 70ch; }
+  .next li strong { color: var(--slate); font-weight: 600; }
+
+  footer {
+    margin-top: 64px;
+    padding-top: 22px;
+    border-top: 1.5px solid var(--g300);
+    font-size: 13.5px;
+    color: var(--g500);
+  }
+  footer a { color: var(--clay-d); text-decoration-color: var(--oat); text-underline-offset: 3px; }
+
+
+  
+  
+  .waits { font-family: var(--mono); font-size: 11px; letter-spacing: 0.04em; color: var(--g500); margin: 0 0 8px; }
+  .tasklist, .acclist { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+  
+  .devgrid .row:has(.tasklist), .devgrid .row:has(.acclist) { padding-top: 16px; padding-bottom: 18px; }
+  .tasklist li, .acclist li {
+    display: grid; grid-template-columns: 18px auto 1fr; gap: 8px;
+    align-items: baseline; font-size: 13px; line-height: 1.45;
+  }
+  .acclist li { grid-template-columns: 18px 1fr; }
+  .tasklist .tx, .acclist li { min-width: 0; overflow-wrap: anywhere; }
+  .tasklist .d, .tasklist .nodate { margin-left: 6px; }
+  .tasklist .bx, .acclist .bx {
+    font-family: var(--mono); font-size: 10px; text-align: center;
+    border: 1.5px solid var(--g300); border-radius: 4px; background: var(--paper);
+    color: var(--g500); padding: 1px 0; line-height: 1.3;
+  }
+  .tasklist .id { font-family: var(--mono); font-size: 11px; color: var(--g500); font-variant-numeric: tabular-nums; }
+  .tasklist .tx { min-width: 0; }
+  .tasklist .d { font-family: var(--mono); font-size: 10.5px; color: var(--g500); white-space: nowrap; }
+  .tasklist .nodate {
+    font-family: var(--mono); font-size: 10px; font-style: normal; white-space: nowrap;
+    color: var(--clay-d); border: 1px dashed var(--clay); border-radius: 4px; padding: 0 5px;
+  }
+  .tasklist .m-ok .bx  { border-color: var(--olive); background: #EEF1E8; color: var(--olive); }
+  .tasklist .m-ok .tx  { color: var(--g500); }
+  .tasklist .m-doing .bx  { border-color: var(--clay); background: #FBEDE6; color: var(--clay-d); }
+  .tasklist .m-doing .tx  { color: var(--slate); font-weight: 600; }
+  .tasklist .m-skip .bx  { border-style: dashed; }
+  .tasklist .m-skip .tx, .tasklist .m-skip .d { color: var(--g500); text-decoration: line-through; text-decoration-color: var(--g300); }
+  .acclist .ok .bx { border-color: var(--olive); background: #EEF1E8; color: var(--olive); }
+  .acclist .ok { color: var(--g500); }
+
+  .pips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .pip {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em;
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 7px; border-radius: 5px;
+    border: 1.5px solid var(--g300); background: var(--paper); color: var(--g500);
+  }
+  .pip i { font-style: normal; font-size: 11px; line-height: 1; }
+  .pip.ok      { border-color: var(--olive);  background: #EEF1E8; color: var(--olive); }
+  .pip.bad     { border-color: var(--clay-d); background: #FBEDE6; color: var(--clay-d); }
+  .pip.unknown { border-style: dashed; }
+  .legend {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+    padding: 14px 22px 0; font-family: var(--mono); font-size: 10.5px;
+    letter-spacing: 0.06em; color: var(--g500);
+  }
+  .legend .lgt { text-transform: uppercase; letter-spacing: 0.12em; margin-right: 4px; }
+  .legend .lg { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .legend .pip { padding: 2px 5px; }
+  .why { font-size: 12.5px; color: var(--g700); }
+  .why.blk { margin-top: 4px; color: var(--clay-d); }
+
+  
+  .finalchip {
+    display: inline-block; font-family: var(--mono); font-size: 9.5px;
+    letter-spacing: 0.1em; text-transform: uppercase;
+    padding: 2.5px 8px; border-radius: 6px; margin-bottom: 6px;
+    color: var(--clay-d); background: #FBEDE6; border: 1px solid var(--clay);
+  }
+  .row.cleanup .k { color: var(--clay-d); }
+  .row.cleanup.calm { background: rgba(255,255,255,.45); }
+  .row.cleanup.calm .k, .row.cleanup.calm .v { color: var(--g500); }
+  .tasklist .tag {
+    font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.06em;
+    text-transform: uppercase; white-space: nowrap;
+    padding: 1px 6px; border-radius: 5px; margin-left: 4px;
+    color: var(--clay-d); background: #FBEDE6; border: 1px solid var(--oat);
+  }
+  .tasklist .tag.ghost { color: var(--g500); background: var(--g100); border-color: var(--g200); }
+  .tasklist .is-cleanup .bx { border-color: var(--clay); color: var(--clay-d); }
+  .tasklist .is-cleanup .tx { color: var(--slate); }
+  .tasklist .is-pointer .tx { text-decoration: none; color: var(--g500); }
+  .tasklist .is-pointer .bx { border-style: dotted; }
+
+  
+  details.fold > summary {
+    list-style: none; cursor: pointer; display: block;
+    padding: 8px 34px 8px 0; margin: -8px 0 0; position: relative;
+    border-radius: 8px;
+  }
+  details.fold > summary::-webkit-details-marker { display: none; }
+  details.fold > summary:hover { background: rgba(0,0,0,.02); }
+  details.fold > summary:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; }
+  details.fold > summary h3 { margin: 2px 0 3px; }
+  details.fold > summary .waits { display: block; }
+  .chev {
+    position: absolute; right: 6px; top: 12px;
+    width: 9px; height: 9px; border-right: 1.8px solid var(--g500); border-bottom: 1.8px solid var(--g500);
+    transform: rotate(45deg); transition: transform .15s ease;
+  }
+  details[open] > summary .chev { transform: rotate(-135deg); }
+  .mini { display: none; align-items: center; gap: 8px; margin-top: 5px; }
+  details:not([open]) > summary .mini { display: flex; }
+  .mini-pips { gap: 3px; }
+  .dot { width: 7px; height: 7px; border-radius: 2px; border: 1.5px solid var(--g300); background: var(--paper); }
+  .dot.ok  { border-color: var(--olive);  background: var(--olive); }
+  .dot.bad { border-color: var(--clay-d); background: var(--clay); }
+  .dot.unknown { border-style: dotted; }
+  .minitask { font-family: var(--mono); font-size: 10.5px; color: var(--g500); }
+  .foldbody { padding-top: 2px; }
+
+  
+  .jump {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 40;
+    display: flex; justify-content: center;
+    padding: 8px 10px calc(8px + env(safe-area-inset-bottom));
+    background: linear-gradient(to top, var(--ivory) 62%, rgba(250,249,245,0));
+    pointer-events: none;
+  }
+  .jump .bar {
+    pointer-events: auto;
+    display: flex; align-items: center; gap: 4px;
+    padding: 5px; border-radius: 999px;
+    background: var(--paper); border: 1.5px solid var(--g300);
+    box-shadow: 0 4px 16px rgba(20,20,19,.10);
+    max-width: 100%; overflow-x: auto; scrollbar-width: none;
+  }
+  .jump .bar::-webkit-scrollbar { display: none; }
+  .jump a, .jump button {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    min-width: 38px; height: 38px; padding: 0 10px;
+    border-radius: 999px; border: 1.5px solid transparent; background: transparent;
+    font-family: var(--mono); font-size: 13px; color: var(--g700);
+    text-decoration: none; cursor: pointer; position: relative;
+  }
+  .jump a::after {
+    content: ""; position: absolute; bottom: 5px; left: 50%; transform: translateX(-50%);
+    width: 5px; height: 5px; border-radius: 50%; background: var(--g300);
+  }
+  .jump a[data-state="done"]::after  { background: var(--olive); }
+  .jump a[data-state="doing"]::after { background: var(--clay); }
+  .jump a.here { background: var(--slate); color: var(--ivory); }
+  .jump a.here::after { background: var(--ivory); }
+  .jump a.flag { color: var(--clay-d); font-size: 15px; }
+  .jump a.run { color: var(--olive); font-size: 12px; }
+  .jump a.flag::after { display: none; }
+  .jump .sep { width: 1.5px; height: 20px; background: var(--g200); margin: 0 2px; flex: none; }
+  .jump button:focus-visible, .jump a:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; }
+  .wrap { padding-bottom: 120px; }
+  @media (min-width: 900px) { .wrap { padding-bottom: 140px; } }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .chev { transition: none; } }
+  html { scroll-behavior: smooth; scroll-padding-top: 16px; }
+
+  
+  .pbody { padding: 20px 22px 24px; }
+  .pbody .sub { font-size: 13.5px; color: var(--g500); margin: 0 0 16px; max-width: 68ch; }
+  .pbody .sub.foot { margin: 18px 0 0; padding-top: 14px; border-top: 1.5px solid var(--g200); }
+  .pgroup { margin-bottom: 18px; }
+  .pgroup h3 {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--g500); margin: 0 0 8px; font-weight: 400;
+  }
+  .pcard { border: 1.5px solid var(--g200); border-radius: 10px; background: var(--paper); margin-bottom: 6px; }
+  .pcard.whole { border-color: var(--oat); background: #FBF6EC; }
+  .pcard > summary {
+    list-style: none; cursor: pointer; position: relative;
+    display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+    padding: 11px 34px 11px 12px; min-height: 44px; border-radius: 9px;
+  }
+  .pcard > summary::-webkit-details-marker { display: none; }
+  .pcard > summary:focus-visible { outline: 2px solid var(--clay); outline-offset: 2px; }
+  .ptag {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 5px; flex: none;
+    color: var(--clay-d); background: #FBEDE6; border: 1px solid var(--oat);
+  }
+  .ptag.t { color: var(--g700); background: var(--g100); border-color: var(--g300); text-transform: none; letter-spacing: 0.04em; }
+  .pname { font-size: 13.5px; color: var(--slate); min-width: 0; flex: 1 1 auto; }
+  .pstate { font-family: var(--mono); font-size: 10px; color: var(--g500); flex: none; }
+  .pcard .chev { top: 18px; }
+  .pwrap { position: relative; padding: 0 12px 12px; }
+  .pwrap pre {
+    margin: 0; padding: 12px 14px; border-radius: 8px;
+    border: 1.5px solid var(--g200); background: var(--g100); color: var(--g700);
+    font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
+    white-space: pre; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  }
+  button.copyp {
+    position: absolute; top: -38px; right: 12px; z-index: 2;
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em;
+    color: var(--g700); background: var(--paper); border: 1.5px solid var(--g300);
+    border-radius: 8px; padding: 7px 12px; min-height: 32px; cursor: pointer;
+  }
+  button.copyp:hover { border-color: var(--g500); }
+  button.copyp.ok { color: var(--olive); border-color: var(--olive); }
+
+  @media (max-width: 560px) {
+    
+    .pwrap pre { font-size: 10.5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    button.copyp { top: -36px; right: 12px; padding: 6px 10px; }
+    .pcard > summary { padding-right: 30px; }
+    
+    .jump { padding-left: 6px; padding-right: 6px; }
+    .jump .bar { gap: 1px; padding: 4px; }
+    .jump a, .jump button { min-width: 31px; height: 36px; padding: 0 3px; font-size: 12.5px; }
+    .jump .sep { display: none; }
+    .jump a.flag { font-size: 14px; }
+    .tasklist .tag { display: inline-block; margin: 2px 0 0; white-space: normal; }
+  }
+
+  .hidden { display: none; }
+
+  button:focus-visible, a:focus-visible { outline: 2px solid var(--clay); outline-offset: 3px; }
+</style></head>
+<body><div class="wrap"><header class="page"><div class="eyebrow">TurboFieldfare · implementation brief</div><a class="back" href="expert-cache-current-vs-proposed.md">Design evidence</a><h1>Find cached experts directly</h1><p class="lede">Reduce CPU work between Metal operations by looking up expert locations in an array and skipping replacement sorting when nothing is missing.</p><div class="promptcard"><div class="label">Requested scope</div><button class="copybtn" id="copyScope" type="button">copy scope</button><blockquote id="scopeText">Document the current cache, the proposed expert-ID array, the sorting bypass, and the evidence needed to judge speed. This brief does not implement the proposed changes.</blockquote></div></header>
+<div class="divider">Current design and proposed work</div><div class="doc"><div class="doc-head"><span class="dot"></span><span class="path">Evidence: 10 September 2026 · working-tree source inspection</span><span class="meta">Proposal · runtime verification pending</span></div><div class="doc-summary"><div class="stat"><div class="n">3</div><div class="t">Phases</div></div><div class="stat"><div class="n">0/4</div><div class="t">Proposed tasks done</div></div></div>
+<div class="pbody"><p>We already cache requested experts in Metal buffers. <code>slotExpert[3] = 19</code> means slot 3 contains expert 19. Finding expert 19 currently requires scanning slots. The proposed <code>expertToSlot[19] = 3</code> supplies the location directly. A value of −1 means no ready copy is indexed.</p><p>Both arrays are needed: one finds weights, the other identifies what is replaced. Sorting orders replacement candidates by cache policy. It is unrelated to database queries.</p><p>Experts are loaded on demand. Unrequested experts are not read into slots. A 128-slot setting is capacity per layer, not a command to preload every expert. The router can select different experts on later tokens.</p><p><a href="assets/expert-cache-current-vs-proposed.png">Open the current-versus-proposed diagram</a> · <a href="expert-cache-current-vs-proposed.md">Read the detailed design and image prompts</a></p></div>
+<div class="chips" aria-label="Filter entries"><button class="chip on" data-f="all" type="button" aria-pressed="true">All <span class="ct">5</span></button><button class="chip" data-f="plan" type="button" aria-pressed="false">Phases <span class="ct">3</span></button><button class="chip" data-f="dev" type="button" aria-pressed="false">Implemented <span class="ct">1</span></button><button class="chip" data-f="disc" type="button" aria-pressed="false">Findings <span class="ct">1</span></button></div><div class="timeline" id="timeline">
+<div class="entry t-disc" data-t="disc" id="finding"><div class="ts">Found</div><div class="rail"><span class="node"></span></div><div class="body"><span class="badge">Source finding</span><h3>The planner sorts even when nothing is missing</h3><p><a href="../Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift">PreadExpertStreamer.makeExpertCachePlan</a> scans slots for each expert and constructs sorted replacement candidates before handling an all-hit result. Metal selects eight experts per layer across 30 layers. Up to 30,720 slot checks per token at 128 slots is a loop upper bound, not a timing measurement.</p></div></div>
+<div class="entry t-dev" data-t="dev" id="existing"><div class="ts">Built</div><div class="rail"><span class="node"></span></div><div class="body"><span class="badge">Implemented · benefit unverified</span><h3>The planned fetch already skips one queue hop</h3><p><a href="../Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift">ModelExpertIO.fetchRoutedExperts(plan:)</a> directly returns cached buffers when all requested experts are present and measurement capture is disabled. This change was built earlier. Its throughput benefit is not verified. The unplanned overload and measurement-enabled fetch retain their queue paths.</p></div></div>
+<div class="entry t-plan" data-t="plan" id="p1" data-state="todo"><div class="ts">P1</div><div class="rail"><span class="node"></span></div><div class="body"><details class="fold" open><summary><span class="badge">Phase 1 · open · 1 task</span><h3>Establish a comparable baseline</h3><span class="waits">Depends on: none</span><span class="mini"><span class="minitask">0/1 complete</span></span><span class="chev" aria-hidden="true"></span></summary><div class="foldbody"><p>Measure the code already built before adding new changes.</p><div class="devgrid"><div class="row"><div class="k">Tasks</div><div class="v"><ul class="tasklist"><li><span class="bx" aria-label="Not complete">·</span><span class="id">1.1</span><a class="tx" href="#task-1.1">Record the 128-slot baseline — Separate the existing queue shortcut from later gains.</a></li></ul></div></div><div class="row"><div class="k">Acceptance</div><div class="v">Same workload and settings; complete timing evidence; no inference from a single short HUD sample.</div></div><div class="row"><div class="k">Done when</div><div class="v">Baseline and current-shortcut results are recorded with their source states.</div></div></div><div class="divider">Detailed tasks</div><details class="pcard" id="task-1.1" data-task="1.1" data-status="proposed"><summary><span class="ptag t">1.1</span><span class="pname">Record the 128-slot baseline</span><span class="pstate">Open</span><span class="chev" aria-hidden="true"></span></summary><div class="pwrap"><div class="devgrid"><div class="row"><div class="k">Why</div><div class="v">Separate the existing queue shortcut from later gains.</div></div><div class="row"><div class="k">Files</div><div class="v"><a href="../Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift">ModelExpertIO.swift</a> · fetchRoutedExperts(plan:); <a href="expert-cache-current-vs-proposed.md">docs/expert-cache-current-vs-proposed.md</a> · measurement evidence.</div></div><div class="row"><div class="k">Implement</div><div class="v">Before changing the planner, record matched baseline and existing-shortcut runs using the <a href="COMMUNITY_BENCHMARKS.md">community benchmark protocol</a>. Record exact source state, hardware, commands, settings, complete timing output and deviations. Use the same prompts, seed, context and 128 slots. Run one model process at a time.</div></div><div class="row"><div class="k">Preserve</div><div class="v">Existing user changes and model installation. Measurement-enabled fetching follows a different queue path, so diagnostic timings alone cannot establish production speed.</div></div><div class="row"><div class="k">Visible result</div><div class="v">A baseline result beside the current design, including tokens per second, first-response time and memory.</div></div><div class="row"><div class="k">Done when</div><div class="v">Raw evidence supports the baseline comparison. If measurements are noisy or unavailable, mark the result inconclusive. Pending.</div></div></div></div></details></div></details></div></div>
+<div class="entry t-plan" data-t="plan" id="p2" data-state="todo"><div class="ts">P2</div><div class="rail"><span class="node"></span></div><div class="body"><details class="fold"><summary><span class="badge">Phase 2 · open · 2 tasks</span><h3>Remove unnecessary cache-planning work</h3><span class="waits">Depends on: phase 1; task 2.2 follows the separate task 2.1 measurement</span><span class="mini"><span class="minitask">0/2 complete</span></span><span class="chev" aria-hidden="true"></span></summary><div class="foldbody"><p>Implement two separable changes while keeping the same selected experts and buffers.</p><div class="devgrid"><div class="row"><div class="k">Tasks</div><div class="v"><ul class="tasklist"><li><span class="bx" aria-label="Not complete">·</span><span class="id">2.1</span><a class="tx" href="#task-2.1">Skip sorting when every expert is cached — Avoid choosing replacement slots when nothing needs replacing.</a></li><li><span class="bx" aria-label="Not complete">·</span><span class="id">2.2</span><a class="tx" href="#task-2.2">Add an array indexed by expert ID — Locate ordinary cached experts without scanning every slot.</a></li></ul></div></div><div class="row"><div class="k">Acceptance</div><div class="v">All-hit plans avoid sorting. Ordinary distinct hits use direct array access. Misses, duplicates and pending reads retain correct behavior.</div></div><div class="row"><div class="k">Done when</div><div class="v">Both changes have equivalent cache plans and separately recorded measurements.</div></div></div><div class="divider">Detailed tasks</div><details class="pcard" id="task-2.1" data-task="2.1" data-status="proposed"><summary><span class="ptag t">2.1</span><span class="pname">Skip sorting when every expert is cached</span><span class="pstate">Open</span><span class="chev" aria-hidden="true"></span></summary><div class="pwrap"><div class="devgrid"><div class="row"><div class="k">Why</div><div class="v">Avoid choosing replacement slots when nothing needs replacing.</div></div><div class="row"><div class="k">Files</div><div class="v"><a href="../Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift">PreadExpertStreamer.swift</a> · makeExpertCachePlan.</div></div><div class="row"><div class="k">Implement</div><div class="v">After resolving hits and misses, return an all-hit plan before constructing and sorting evictable candidates. Update useClock, expert-use counts and slot recency exactly as before under cacheLock. Keep the miss path unchanged. Measure this version before task 2.2.</div></div><div class="row"><div class="k">Preserve</div><div class="v">The same assigned slots, counters, cache policy, locks and protected-slot behavior. Empty requests must retain their established behavior.</div></div><div class="row"><div class="k">Visible result</div><div class="v">Gemma produces the same output with less cache-planning work. A token-speed increase remains a hypothesis.</div></div><div class="row"><div class="k">Done when</div><div class="v">Focused plan comparisons establish equivalent results and bookkeeping. A separately recorded run establishes the speed effect. Pending.</div></div></div></div></details><details class="pcard" id="task-2.2" data-task="2.2" data-status="proposed"><summary><span class="ptag t">2.2</span><span class="pname">Add an array indexed by expert ID</span><span class="pstate">Open</span><span class="chev" aria-hidden="true"></span></summary><div class="pwrap"><div class="devgrid"><div class="row"><div class="k">Why</div><div class="v">Locate ordinary cached experts without scanning every slot.</div></div><div class="row"><div class="k">Files</div><div class="v"><a href="../Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift">PreadExpertStreamer.swift</a> · stored arrays, initializer, makeExpertCachePlan and executeExpertCachePlan.</div></div><div class="row"><div class="k">Implement</div><div class="v">Add expertToSlot as Int32 entries sized from layout.expertsPerLayer, initialized to -1. Keep slotExpert and slotBuffers. Resolve each expert by direct indexing and validate current ownership and reservations. Map to the lowest matching ready slot. Fall back to the existing scan when that copy is reserved. Invalidate or repoint the old expert when reserving a victim. Publish both directions together under cacheLock only after the read batch succeeds. Reinitialize with streamer lifetime.</div></div><div class="row"><div class="k">Preserve</div><div class="v">Duplicate requested IDs, duplicate resident copies, failed-batch publication, LFU/LRU ordering and pending prefill buffers. Existing ready hits may be shared; protected buffers may not be overwritten. Keep updates atomic under the current lock. Do not publish unfinished reads.</div></div><div class="row"><div class="k">Visible result</div><div class="v">The usual eight-expert request uses eight table lookups. Extra element storage is about 15 KiB over 30 layers, excluding allocation overhead.</div></div><div class="row"><div class="k">Done when</div><div class="v">Focused comparisons cover ordinary hits, misses, replacement, duplicates, failed reads and protected prefill slots. Assignments and generated output match. Pending.</div></div></div></div></details></div></details></div></div>
+<div class="entry t-plan" data-t="plan" id="p3" data-state="todo"><div class="ts">P3</div><div class="rail"><span class="node"></span></div><div class="body"><details class="fold"><summary><span class="badge">Phase 3 · open · 1 task</span><h3>Decide from measured results</h3><span class="waits">Depends on: phase 2</span><span class="mini"><span class="minitask">0/1 complete</span></span><span class="chev" aria-hidden="true"></span></summary><div class="foldbody"><p>Determine whether less CPU preparation produces a useful speed improvement.</p><div class="devgrid"><div class="row"><div class="k">Tasks</div><div class="v"><ul class="tasklist"><li><span class="bx" aria-label="Not complete">·</span><span class="id">3.1</span><a class="tx" href="#task-3.1">Record speed and memory for each version — Keep only changes with a measured benefit and correct output.</a></li></ul></div></div><div class="row"><div class="k">Acceptance</div><div class="v">Correct output and repeatable throughput evidence for each stage; memory costs stated.</div></div><div class="row"><div class="k">Done when</div><div class="v">Each change has a supported retain-or-exclude conclusion.</div></div></div><div class="divider">Detailed tasks</div><details class="pcard" id="task-3.1" data-task="3.1" data-status="proposed"><summary><span class="ptag t">3.1</span><span class="pname">Record speed and memory for each version</span><span class="pstate">Open</span><span class="chev" aria-hidden="true"></span></summary><div class="pwrap"><div class="devgrid"><div class="row"><div class="k">Why</div><div class="v">Keep only changes with a measured benefit and correct output.</div></div><div class="row"><div class="k">Files</div><div class="v"><a href="expert-cache-current-vs-proposed.md">docs/expert-cache-current-vs-proposed.md</a> · results; <a href="COMMUNITY_BENCHMARKS.md">docs/COMMUNITY_BENCHMARKS.md</a> · protocol.</div></div><div class="row"><div class="k">Implement</div><div class="v">Compare baseline, queue shortcut, sorting bypass and reverse lookup as separate source states. Use matched warmed workloads and aggregate generated tokens divided by aggregate decode seconds. Record memory pressure, memory use and first-response delay separately. State every protocol deviation. If results do not establish an improvement, recommend excluding that change rather than claiming success.</div></div><div class="row"><div class="k">Preserve</div><div class="v">Identical workload, output checks and release settings. No profiling-induced path substitution in the production speed claim. Raw evidence remains available.</div></div><div class="row"><div class="k">Visible result</div><div class="v">A concise before/after result showing which change helps and by how much, or an explicit inconclusive result.</div></div><div class="row"><div class="k">Done when</div><div class="v">Each stage has traceable correctness and performance evidence, with a supported retain-or-exclude conclusion. No promised 30 tokens/second result. Pending.</div></div></div></div></details></div></details></div></div>
+</div></div><div class="next" id="decisions"><div class="label">Owner decisions</div><h2>No unresolved choice</h2><p class="sub">The requested ideas are documented. Implementation and performance acceptance remain pending evidence; no further owner choice is needed to describe this design.</p></div><footer><a href="expert-cache-current-vs-proposed.md">Source design</a> · <a href="../Sources/TurboFieldfare/Runtime/Inference/RealForwardRunner.swift">RealForwardRunner.swift: router handoff and prefill protection</a><br>Source code and linked evidence remain authoritative. This standalone brief is a view of that evidence, not a second work tracker. Saved under this project's docs directory per the project document-location rule.</footer></div><nav class="jump" aria-label="Jump to a phase"><div class="bar"><button id="jTop" type="button" aria-label="Back to top">↑</button><span class="sep"></span><a href="#p1" data-state="todo" aria-label="Phase 1">1</a><a href="#p2" data-state="todo" aria-label="Phase 2">2</a><a href="#p3" data-state="todo" aria-label="Phase 3">3</a><span class="sep"></span><button id="jAll" type="button" aria-label="Expand or collapse all phases" aria-pressed="false">↕</button></div></nav><script>
+(function () {
+  function wireCopy(btnId, getText) {
+    var btn = document.getElementById(btnId);
+    if (!btn) return;
+    var original = btn.textContent;
+    btn.addEventListener('click', function () {
+      var text = getText();
+      function done() {
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.classList.remove('done');
+        }, 1600);
+      }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text); done(); });
+      } else {
+        fallback(text); done();
+      }
+    });
+  }
+  function fallback(text) {
+    var ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(ta);
+  }
+
+  wireCopy('copyScope', function () {
+    var el = document.getElementById('scopeText');
+    return el ? el.textContent.replace(/\s+/g, ' ').trim() : '';
+  });
+
+  wireCopy('copyNext', function () {
+    var items = document.querySelectorAll('#nextList li');
+    var out = [];
+    items.forEach(function (li, i) { out.push((i + 1) + '. ' + li.textContent.replace(/\s+/g, ' ').trim()); });
+    return out.join('\n');
+  });
+
+  var chips = document.querySelectorAll('.chip');
+  var entries = document.querySelectorAll('.entry');
+  function markRailEnds() {
+    var visible = Array.prototype.filter.call(entries, function (e) {
+      return !e.classList.contains('hidden');
+    });
+    entries.forEach(function (e) {
+      e.classList.remove('rail-first', 'rail-last');
+    });
+    if (visible.length) {
+      visible[0].classList.add('rail-first');
+      visible[visible.length - 1].classList.add('rail-last');
+    }
+  }
+  chips.forEach(function (chip) {
+    chip.addEventListener('click', function () {
+      chips.forEach(function (c) { c.classList.remove('on'); });
+      chips.forEach(function (c) { c.setAttribute('aria-pressed', 'false'); });
+      chip.classList.add('on');
+      chip.setAttribute('aria-pressed', 'true');
+      var f = chip.getAttribute('data-f');
+      entries.forEach(function (e) {
+        var t = e.getAttribute('data-t');
+        var show = (f === 'all') || (f === t);
+        e.classList.toggle('hidden', !show);
+      });
+      markRailEnds();
+    });
+  });
+  markRailEnds();
+})();
+
+(function () {
+  function reveal(hash) {
+    if (!hash || hash === '#') return;
+    var target = document.getElementById(hash.slice(1));
+    if (!target) return;
+    var all = document.querySelector('.chip[data-f="all"]');
+    if (all && !all.classList.contains('on')) all.click();
+    for (var el = target; el; el = el.parentElement) {
+      if (el.tagName === 'DETAILS') el.open = true;
+    }
+    var fold = target.querySelector('details.fold');
+    if (fold) fold.open = true;
+  }
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest('a[href^="#"]');
+    if (a) reveal(a.getAttribute('href'));
+  });
+  window.addEventListener('hashchange', function () { reveal(location.hash); });
+  reveal(location.hash);
+  var top = document.getElementById('jTop'), toggle = document.getElementById('jAll');
+  if (top) top.addEventListener('click', function () { window.scrollTo({ top: 0 }); });
+  if (toggle) {
+    function sync() {
+      var folds = Array.from(document.querySelectorAll('details.fold'));
+      toggle.setAttribute('aria-pressed', String(folds.every(function (d) { return d.open; })));
+    }
+    toggle.addEventListener('click', function () {
+      var folds = Array.from(document.querySelectorAll('details.fold'));
+      var open = !folds.every(function (d) { return d.open; });
+      folds.forEach(function (d) { d.open = open; });
+      sync();
+    });
+    document.querySelectorAll('details.fold').forEach(function (d) { d.addEventListener('toggle', sync); });
+    sync();
+  }
+})();
+</script></body></html>
+

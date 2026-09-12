@@ -8,10 +8,37 @@ struct GenerateControl: View {
 
     var body: some View {
         if model.isRunning {
-            runningPill
+            HStack(spacing: 8) {
+                if model.agentModeEnabled {
+                    sendInstructionButton
+                }
+                runningPill
+            }
         } else {
             generateButton
         }
+    }
+
+    private var sendInstructionButton: some View {
+        Button {
+            model.sendAgentInstruction()
+        } label: {
+            Label("Send instruction", systemImage: "arrow.up")
+                .font(.callout.weight(.semibold))
+                .padding(.horizontal, 14)
+                .frame(minHeight: controlHeight)
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(model.canSendAgentInstruction ? Color.white : Color.secondary)
+        .background(
+            model.canSendAgentInstruction
+                ? TurboFieldfareMacTheme.accentColor
+                : Color.secondary.opacity(0.12),
+            in: .capsule)
+        .keyboardShortcut(.return, modifiers: .command)
+        .disabled(!model.canSendAgentInstruction)
+        .help("Apply this instruction before the next app action")
     }
 
     private var generateButton: some View {

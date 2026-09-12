@@ -95,8 +95,18 @@ public struct AppConversation: Equatable, Sendable {
     /// A replaced segment cannot be restored to the composer as unexecuted
     /// work. Preserve the visible user turn and its explicit interruption.
     public mutating func interruptAfterCheckpoint(text: String) {
+        interruptUncommittedTurn(text: text, stopReason: .failed)
+    }
+
+    /// Keeps an in-flight user turn visible when its model segment cannot be
+    /// committed safely. The caller must open a new lineage before sending
+    /// another turn.
+    public mutating func interruptUncommittedTurn(
+        text: String,
+        stopReason: AppStopReason
+    ) {
         guard pendingUserTurnID != nil else { return }
-        turns.append(AppChatTurn(role: .assistant, text: text, stopReason: .failed))
+        turns.append(AppChatTurn(role: .assistant, text: text, stopReason: stopReason))
         pendingUserTurnID = nil
         isLineageLost = true
         kvTokens = nil

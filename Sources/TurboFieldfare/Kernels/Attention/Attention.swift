@@ -96,10 +96,10 @@ final class Attention {
                                                                    numChunks: 16)
         self.psoPartialFullQueryRegisters = try Self.specializedPipeline(context,
             "attention_decode_partial", headDim: 512, numQHeads: 16, numKVHeads: 2,
-            retainFullQuery: true)
+            retainFullQuery: true, prefetchFullValue: true)
         self.psoPartialFullChunks16QueryRegisters = try Self.specializedPipeline(context,
             "attention_decode_partial", headDim: 512, numQHeads: 16, numKVHeads: 2,
-            numChunks: 16, retainFullQuery: true)
+            numChunks: 16, retainFullQuery: true, prefetchFullValue: true)
         self.psoCombineSWA = try Self.specializedPipeline(context,
                                                           "attention_decode_combine",
                                                           headDim: 256,
@@ -346,7 +346,8 @@ final class Attention {
                                             numKVHeads: UInt32,
                                             numChunks: UInt32? = nil,
                                             ringCapacity: UInt32? = nil,
-                                            retainFullQuery: Bool = false) throws -> MTLComputePipelineState {
+                                            retainFullQuery: Bool = false,
+                                            prefetchFullValue: Bool = false) throws -> MTLComputePipelineState {
         var constants = [
             MetalFunctionConstant(index: 60, value: .uint32(headDim)),
             MetalFunctionConstant(index: 61, value: .uint32(numQHeads)),
@@ -358,6 +359,9 @@ final class Attention {
         }
         if retainFullQuery {
             constants.append(MetalFunctionConstant(index: 66, value: .bool(true)))
+        }
+        if prefetchFullValue {
+            constants.append(MetalFunctionConstant(index: 67, value: .bool(true)))
         }
         if let ringCapacity {
             constants.append(MetalFunctionConstant(index: 69, value: .uint32(ringCapacity)))

@@ -96,7 +96,8 @@ public enum MultimodalPromptRenderer {
         }
 
         let usesToolTemplate = !tools.isEmpty || tokenizerMessages.contains {
-            $0.role == .developer || $0.role == .tool || !$0.toolCalls.isEmpty
+            $0.role == .system || $0.role == .developer || $0.role == .tool
+                || !$0.toolCalls.isEmpty
         }
         let templateTokens: [Int32]
         if usesToolTemplate {

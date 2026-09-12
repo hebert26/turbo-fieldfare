@@ -438,13 +438,16 @@ public struct GFTokenizer: @unchecked Sendable {
             tools: upstreamTools,
             additionalContext: ["enable_thinking": enableToolThinking]
         ).map(Int32.init)
-        // Backport only Google's 4d7ae498 post-tool generation cue. Keep the
-        // installed template, ordinary user framing and OFF suffix unchanged.
-        // A newer template may already supply it. Apply once after the final
-        // response (and its images), never to an unfinished tool call.
-        if enableToolThinking, messages.last?.role == .tool,
-           tokenIDs.contains(toolResponseEndID), !promptEndsInThoughtChannel(tokenIDs) {
+        // Stabilize the next response after a completed tool result. Thinking
+        // mode opens the thought channel. In OFF mode, larger Gemma 4 models
+        // expect the same empty thought channel used after an ordinary user
+        // prompt. A newer template may already supply either cue.
+        if messages.last?.role == .tool, tokenIDs.contains(toolResponseEndID),
+           !promptEndsInThoughtChannel(tokenIDs) {
             tokenIDs.append(contentsOf: thoughtOpeningTokenIDs)
+            if !enableToolThinking {
+                tokenIDs.append(channelEndID)
+            }
         }
         return tokenIDs
     }

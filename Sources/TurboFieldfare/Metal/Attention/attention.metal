@@ -45,6 +45,7 @@ constant bool FC_ATTN_USE_FC [[function_constant(63)]];
 constant float FC_ATTN_SCALE [[function_constant(64)]];
 constant uint FC_ATTN_NUM_CHUNKS [[function_constant(65)]];
 constant bool FC_ATTN_RETAIN_FULL_QUERY [[function_constant(66)]];
+constant bool FC_ATTN_PREFETCH_FULL_VALUE [[function_constant(67)]];
 constant uint FC_ATTN_RING_CAP [[function_constant(69)]];
 
 static inline uint attn_fc_head_dim(constant uint& head_dim) {
@@ -181,6 +182,9 @@ void attention_decode_partial(
     // Other shapes and widths keep the original strided query reads below.
     const bool retain_query = is_function_constant_defined(FC_ATTN_RETAIN_FULL_QUERY) &&
         FC_ATTN_RETAIN_FULL_QUERY && HD == 512u && lsize == kAttnThreads;
+    const bool prefetch_value =
+        is_function_constant_defined(FC_ATTN_PREFETCH_FULL_VALUE) &&
+        FC_ATTN_PREFETCH_FULL_VALUE && retain_query;
     const float q_first = retain_query ? q_smem[lid] : 0.0f;
     const float q_second = retain_query ? q_smem[lid + kAttnThreads] : 0.0f;
 
@@ -199,6 +203,10 @@ void attention_decode_partial(
         device const half* K_row = K + (phys_p * NKV + kv_head) * HD;
         device const half* V_row = V + (phys_p * NKV + kv_head) * HD;
 
+        // These independent device reads can overlap the dot-product reduction
+        // barriers. Keep the subsequent scalar and output arithmetic unchanged.
+        const float v_first = prefetch_value ? float(V_row[lid]) : 0.0f;
+        const float v_second = prefetch_value ? float(V_row[lid + kAttnThreads]) : 0.0f;
         float partial = 0.0f;
         if (retain_query) {
             partial = fma(q_first, float(K_row[lid]), partial);
@@ -218,10 +226,15 @@ void attention_decode_partial(
         const float p_exp = attn_softmax_exp(s     - m_new);
         d_run = d_run * alpha + p_exp;
 
-        uint slot = 0;
-        for (uint i = lid; i < HD; i += lsize) {
-            o_local[slot] = o_local[slot] * alpha + p_exp * float(V_row[i]);
-            slot += 1;
+        if (prefetch_value) {
+            o_local[0] = o_local[0] * alpha + p_exp * v_first;
+            o_local[1] = o_local[1] * alpha + p_exp * v_second;
+        } else {
+            uint slot = 0;
+            for (uint i = lid; i < HD; i += lsize) {
+                o_local[slot] = o_local[slot] * alpha + p_exp * float(V_row[i]);
+                slot += 1;
+            }
         }
         m_run = m_new;
     }

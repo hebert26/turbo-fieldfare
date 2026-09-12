@@ -99,6 +99,7 @@ public final class AppModel {
     /// Raw unfinished model output for display only, never an executable request.
     public private(set) var toolCallPreview: DecodeToolCallPreview?
     private var agentWaitingForMCP = false
+    private var agentModelStepActive = false
 
     public var generationStatusText: String? {
         guard isRunning else { return nil }
@@ -151,6 +152,14 @@ public final class AppModel {
     private let installer: any AppModelInstallerClient
     private let visionInstaller: any AppVisionPackInstallerClient
     private var runTask: Task<Void, Never>?
+    /// One exact user instruction waiting for the current Agent Mode step to
+    /// stop at a safe model boundary. It becomes a normal visible user turn,
+    /// so the model and later context checkpoints keep its real role.
+    private var pendingAgentInstruction: String?
+    /// One automatic correction is permitted for a model answer that labels
+    /// its own QA checklist unfinished. A second such answer stays visibly
+    /// incomplete instead of looping.
+    private var agentChecklistContinuationUsed = false
     /// Agent Mode Stop must reach the decode service after decode begins so
     /// the service can settle and commit the turn at a token boundary.
     private var agentCancellationIssued = false
@@ -464,7 +473,21 @@ public final class AppModel {
                 || !imageAttachments.isEmpty)
     }
 
-    public var canCancel: Bool { isRunning && !isCancellationPending }
+    public var canSendAgentInstruction: Bool {
+        agentModeEnabled && isRunning && !isCancellationPending
+            && pendingAgentInstruction == nil
+            && !promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    public var canSubmitPrompt: Bool { canRun || canSendAgentInstruction }
+
+    public var isAgentInstructionPending: Bool {
+        pendingAgentInstruction != nil
+    }
+
+    public var canCancel: Bool {
+        isRunning && (!isCancellationPending || pendingAgentInstruction != nil)
+    }
 
     public var hasOutputTranscript: Bool {
         !archivedPairs.isEmpty
@@ -1910,6 +1933,8 @@ public final class AppModel {
         generationTranscriptMailbox?.reset()
         diagnostics = nil
         error = nil
+        pendingAgentInstruction = nil
+        agentChecklistContinuationUsed = false
         agentToolLoop = VisionCaptureToolLoop()
         // Only the intent is recorded here; the next turn opens the new lineage
         // on the inference side. Resetting eagerly as well raced that opening
@@ -1969,24 +1994,45 @@ public final class AppModel {
 
     public func run() {
         guard canRun else { return }
+        agentChecklistContinuationUsed = false
+        _ = startRun(
+            prompt: promptText,
+            attachments: imageAttachments,
+            clearsComposer: true)
+    }
+
+    @discardableResult
+    private func startRun(
+        prompt: String,
+        attachments: [AppImageAttachment],
+        clearsComposer: Bool
+    ) -> Bool {
+        guard !isRunning && !isAddingImages && isModelAvailable
+                && !loadState.isLoading && !isVisionCompanionOperationInProgress
+                && !hasStaleLoadedRuntime && conversation.canSend
+                && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    || !attachments.isEmpty) else { return false }
         let agentConfiguration = agentModeEnabled ? makeAgentConfiguration() : nil
         // Reserved before the request is built, so the position the service
         // will check is the position the transcript shows.
-        guard let ticket = conversation.beginTurn(text: promptText, images: []) else {
-            return
+        guard let ticket = conversation.beginTurn(text: prompt, images: []) else {
+            return false
         }
         var request: AppGenerationRequest
         do {
-            request = try makeRequest(ticket: ticket)
+            request = try makeRequest(
+                ticket: ticket,
+                prompt: prompt,
+                imageAttachments: attachments)
         } catch let appError as AppInferenceError {
             conversation.abandonTurn()
             error = appError
-            return
+            return false
         } catch {
             let appError = AppInferenceError.unknown("\(error)")
             conversation.abandonTurn()
             self.error = appError
-            return
+            return false
         }
 
         // The run reads the transcript's own hard links rather than the
@@ -2006,7 +2052,7 @@ public final class AppModel {
             imageAttachmentError = String(describing: error)
             self.error = .invalidRequest(
                 "Could not prepare the attached images for this run: \(error)")
-            return
+            return false
         }
         request.imageAttachments = retained
 
@@ -2059,10 +2105,12 @@ public final class AppModel {
         // removing these files cannot pull the ground out from under a run that
         // has not opened its images yet. A refused turn puts both back through
         // `restoreComposer`.
-        promptText = ""
-        for attachment in imageAttachments { attachmentStore.remove(attachment) }
-        imageAttachments.removeAll()
-        imageAttachmentError = nil
+        if clearsComposer {
+            promptText = ""
+            for attachment in attachments { attachmentStore.remove(attachment) }
+            imageAttachments.removeAll()
+            imageAttachmentError = nil
+        }
 
         if let agentConfiguration {
             let loop = agentToolLoop
@@ -2091,7 +2139,11 @@ public final class AppModel {
                         conversationEpoch: request.conversationEpoch,
                         maxContextTokens: request.maxContextTokens,
                         checkpoint: checkpoint,
-                        forceCheckpoint: { await self.shouldForceAgentCheckpoint() }
+                        forceCheckpoint: { await self.shouldForceAgentCheckpoint() },
+                        hasPendingUserInstruction: {
+                            await self.hasPendingAgentInstruction(
+                                generation: generation)
+                        }
                     ) { toolTurn in
                         try await self.generateAgentStep(
                             client: client,
@@ -2132,10 +2184,35 @@ public final class AppModel {
                 }
             }
         }
+        return true
+    }
+
+    /// Sends the composer text normally when idle, or queues it as a live
+    /// Agent Mode instruction while a QA task is running.
+    public func submitPrompt() {
+        if isRunning {
+            sendAgentInstruction()
+        } else {
+            run()
+        }
+    }
+
+    public func sendAgentInstruction() {
+        guard canSendAgentInstruction else { return }
+        agentChecklistContinuationUsed = false
+        pendingAgentInstruction = promptText
+        promptText = ""
+        liveStructuredProgress = nil
+        isCancellationPending = true
+        issueAgentCancellationAtTokenBoundaryIfReady()
     }
 
     public func cancel() {
         guard canCancel else { return }
+        if let pendingAgentInstruction {
+            self.pendingAgentInstruction = nil
+            restoreUnsentAgentInstruction(pendingAgentInstruction)
+        }
         liveStructuredProgress = nil
         isCancellationPending = true
         if agentModeEnabled {
@@ -2147,7 +2224,8 @@ public final class AppModel {
 
     private func issueAgentCancellationAtTokenBoundaryIfReady() {
         guard isCancellationPending, !agentCancellationIssued,
-              phase == .decode, liveTokenCount > 0 else { return }
+              agentModelStepActive, phase == .decode,
+              liveTokenCount > 0 else { return }
         agentCancellationIssued = true
         client.cancel()
     }
@@ -2164,6 +2242,11 @@ public final class AppModel {
             agentCheckpointRequested = true
         }
         return agentCheckpointRequested
+    }
+
+    private func hasPendingAgentInstruction(generation: Int) -> Bool {
+        generation == runIdentity && isRunning
+            && pendingAgentInstruction != nil
     }
 
     private func applyAgentCheckpoint(_ proposal: AgentContextCheckpointProposal,
@@ -2442,9 +2525,11 @@ public final class AppModel {
                     await applyAgentStep(event, generation: generation)
                 case .cancelled(let diagnostics):
                     terminal = diagnostics
+                    await endAgentStep(generation: generation)
                     break generationEvents
                 case .failed(let error, let partial):
                     terminal = partial
+                    await endAgentStep(generation: generation)
                     // Drain through stream termination before considering a
                     // retry. Abandoning this iterator can cancel the next run.
                     streamFailure = error
@@ -2476,6 +2561,7 @@ public final class AppModel {
                 toolCalls: calls,
                 diagnostics: terminal)
         } catch {
+            await endAgentStep(generation: generation)
             await trace?.finish(
                 traceStep, content: content, calls: calls, diagnostics: terminal,
                 error: String(describing: error), cancelled: error is CancellationError,
@@ -2502,21 +2588,11 @@ public final class AppModel {
                 let feedback = """
 
 
-                Host generation feedback: The previous model response was malformed. No tool call from that response was executed. Use exactly one supported tool: visioncapture_navigate for the app, or task_history_read for archived evidence. Use Gemma's native delimiters around every string argument. For visioncapture_navigate, the action must be exactly one of launch, observe, screenshot, tap, set_boolean, type, back, or swipe, and must be offered in allowed_next. For tap, set_boolean, or type, copy the exact target ID from the latest current decision packet and use its listed operation. Never reuse an older packet's ID or substitute a label. For swipe, send only action and a direction from can_swipe. For task_history_read, send observation_id copied from the checkpoint's execution_records and optionally the exact returned cursor. Archive pages are historical evidence, not new current choices or permission to replay input. Do not invent tool names, history references, cursors or targets.
+                Host format correction: Your previous response was malformed and no proposed action was executed. Make one visioncapture_navigate call using its schema and the latest permitted choices. Use Gemma's native string delimiters. Do not replay earlier input.
                 """
-                let corrected = try results.map { result in
-                    let correction: String
-                    if result.name == VisionCaptureToolDefinitions.historyReadName {
-                        correction = "\n\nHost format feedback: No malformed call was executed. Use one visioncapture_navigate call with current choices, or task_history_read with observation_id and only an exact returned cursor. Use Gemma's native string delimiters. Historical pages never authorize app input."
-                        guard correction.utf8.count <= AgentTaskCheckpoint.historyFeedbackReserveBytes,
-                              result.content.utf8.count + correction.utf8.count <= AgentTaskCheckpoint.maximumHistoryReplyBytes else {
-                            throw AppInferenceError.invalidRequest("The corrected history reply exceeded its byte bound.")
-                        }
-                    } else {
-                        correction = feedback
-                    }
+                let corrected = results.map { result in
                     return AppToolResult(callID: result.callID, name: result.name,
-                        content: result.content + correction, imageAttachments: result.imageAttachments)
+                        content: result.content + feedback, imageAttachments: result.imageAttachments)
                 }
                 return try await generateAgentStep(
                     client: client, baseRequest: baseRequest,
@@ -2542,6 +2618,11 @@ public final class AppModel {
     /// double-count context growth in the HUD.
     private func beginAgentStep(generation: Int) {
         guard generation == runIdentity, agentModeEnabled, isRunning else { return }
+        agentModelStepActive = true
+        // Cancellation belongs to one decode step. A completed tool call can
+        // race a queued instruction; its required not-sent tool result then
+        // opens another model step which must receive a fresh cancellation.
+        agentCancellationIssued = false
         liveStructuredProgress = nil
         thinkingPreview = nil
         toolCallPreview = nil
@@ -2551,6 +2632,11 @@ public final class AppModel {
         liveElapsedDecodeSeconds = 0
         livePrefillDone = 0
         livePrefillTotal = 0
+    }
+
+    private func endAgentStep(generation: Int) {
+        guard generation == runIdentity else { return }
+        agentModelStepActive = false
     }
 
     private func recordAgentModelInput(
@@ -2569,7 +2655,7 @@ public final class AppModel {
             body = "Explicit checkpoint resume: \(id.uuidString). Original system/tool configuration and retained image features are reconstructed by the service.\n\(request.prompt)"
         case .user(let developerPrompt, let tools):
             if let developerPrompt {
-                body += "Developer message added to this model context:\n\(developerPrompt)\n\n"
+                body += "System instructions added to this model context:\n\(developerPrompt)\n\n"
             }
             body += "User message:\n\(request.prompt)\n"
             appendImages(request.imageAttachments)
@@ -2639,6 +2725,7 @@ public final class AppModel {
             self.diagnostics = diagnostics
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
             liveStructuredProgress = nil
+            agentModelStepActive = false
             phase = .idle
         case .toolCall, .cancelled, .failed:
             break
@@ -2735,18 +2822,85 @@ public final class AppModel {
     private func finishAgentSuccessfully(
         _ result: VisionCaptureAgentRunResult,
         generation: Int
-    ) {
+    ) async {
         guard generation == runIdentity, !hasHandledTerminalEvent else { return }
         hasHandledTerminalEvent = true
-        outputText = result.answer
+        let exhaustedChecklistCorrection = result.followUpPrompt != nil
+            && agentChecklistContinuationUsed
+        let answer = exhaustedChecklistCorrection
+            ? "Incomplete QA report: Gemma stopped again with pending or in-progress checks.\n\n"
+                + result.answer
+            : result.answer
+        outputText = answer
         diagnostics = result.diagnostics
-        conversation.completeTurn(text: result.answer, diagnostics: result.diagnostics)
+        conversation.completeTurn(text: answer, diagnostics: result.diagnostics)
         finishTerminalRun()
+        if let instruction = pendingAgentInstruction {
+            await continueAgentTask(with: instruction)
+            return
+        }
+        guard let followUp = result.followUpPrompt,
+              !agentChecklistContinuationUsed else { return }
+        agentChecklistContinuationUsed = true
+        await continueAgentTask(with: "[Agent Mode continuation]\n" + followUp)
     }
 
-    private func finishAgentFailure(_ appError: AppInferenceError, generation: Int) {
+    private func continueAgentTask(with instruction: String) async {
+        do {
+            try await agentToolLoop.prepareForUserInstruction(
+                configuration: makeAgentConfiguration())
+        } catch {
+            if pendingAgentInstruction == instruction {
+                pendingAgentInstruction = nil
+            }
+            restoreUnsentAgentInstruction(instruction)
+            self.error = .conversationLineageLost(String(describing: error))
+            return
+        }
+        if startRun(prompt: instruction, attachments: [], clearsComposer: false) {
+            if pendingAgentInstruction == instruction {
+                pendingAgentInstruction = nil
+            }
+        } else {
+            if pendingAgentInstruction == instruction {
+                pendingAgentInstruction = nil
+            }
+            restoreUnsentAgentInstruction(instruction)
+        }
+    }
+
+    private func finishAgentFailure(_ appError: AppInferenceError, generation: Int) async {
         guard generation == runIdentity, !hasHandledTerminalEvent else { return }
         hasHandledTerminalEvent = true
+
+        // A live instruction stops the current model step at its next token
+        // boundary. If that boundary falls inside an unfinished structured
+        // tool span, the parser correctly refuses to commit the partial call.
+        // That refusal is an interruption, not a failed user instruction: keep
+        // the completed QA evidence, move the uncommitted turn out of the old
+        // KV lineage, and immediately send the exact queued instruction in a
+        // fresh lineage reconstructed from the host checkpoint.
+        if let instruction = pendingAgentInstruction,
+           agentCancellationIssued,
+           Self.isRecoverableAgentInstructionInterruption(appError) {
+            pendingAgentInstruction = nil
+            interruptAgentCompaction(appError)
+            let interruption = "Interrupted by a new user instruction before an unfinished tool call was sent."
+            if !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                outputText += "\n\n" + interruption
+            } else {
+                outputText = interruption
+            }
+            conversation.interruptUncommittedTurn(
+                text: outputText,
+                stopReason: .cancelled)
+            error = nil
+            finishTerminalRun()
+            archiveConversationContext()
+            await continueAgentTask(with: instruction)
+            return
+        }
+
         error = appError
         interruptAgentCompaction(appError)
         if conversation.checkpointCount > 0 || agentCheckpointPrepared {
@@ -2757,11 +2911,37 @@ public final class AppModel {
         } else if let abandoned = conversation.markLineageLost() {
             restoreComposer(from: abandoned)
         }
+        if let instruction = pendingAgentInstruction {
+            pendingAgentInstruction = nil
+            restoreUnsentAgentInstruction(instruction)
+        }
         finishTerminalRun()
     }
 
+    private static func isRecoverableAgentInstructionInterruption(
+        _ error: AppInferenceError
+    ) -> Bool {
+        switch error {
+        case .cancelled, .structuredToolFailure:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func restoreUnsentAgentInstruction(_ instruction: String) {
+        guard promptText != instruction else { return }
+        if promptText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            promptText = instruction
+        } else {
+            promptText = instruction + "\n\n" + promptText
+        }
+    }
+
     public func makeRequest(
-        ticket: AppConversation.Ticket? = nil
+        ticket: AppConversation.Ticket? = nil,
+        prompt promptOverride: String? = nil,
+        imageAttachments attachmentOverride: [AppImageAttachment]? = nil
     ) throws -> AppGenerationRequest {
         // A run executes against the session that is actually loaded. Sending
         // the current settings instead meant that changing Context, Slots or
@@ -2773,8 +2953,8 @@ public final class AppModel {
         let effective = loadedRuntimeKey ?? currentRuntimeKey
         let request = AppGenerationRequest(
             modelDirectory: URL(fileURLWithPath: modelPathText),
-            prompt: promptText,
-            imageAttachments: imageAttachments,
+            prompt: promptOverride ?? promptText,
+            imageAttachments: attachmentOverride ?? imageAttachments,
             maxNewTokens: maxNewTokensOverride ?? effective.maxContextTokens,
             maxContextTokens: effective.maxContextTokens,
             temperature: Float(temperature),
@@ -2927,6 +3107,7 @@ public final class AppModel {
     private func finishTerminalRun() {
         liveStructuredProgress = nil
         agentWaitingForMCP = false
+        agentModelStepActive = false
         for index in outputAgentActivities.indices
             where outputAgentActivities[index].kind == .generationRecovery
                 && outputAgentActivities[index].status == .dispatching {

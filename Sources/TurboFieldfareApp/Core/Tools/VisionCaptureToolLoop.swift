@@ -102,6 +102,258 @@ struct VisionCaptureModelCompletion: Sendable {
 struct VisionCaptureAgentRunResult: Sendable {
     let answer: String
     let diagnostics: AppDiagnostics
+    let followUpPrompt: String?
+
+    init(
+        answer: String,
+        diagnostics: AppDiagnostics,
+        followUpPrompt: String? = nil
+    ) {
+        self.answer = answer
+        self.diagnostics = diagnostics
+        self.followUpPrompt = followUpPrompt
+    }
+}
+
+/// Small, deterministic enforcement for explicit target restrictions in user
+/// instructions. The model still receives the full instruction. This layer
+/// prevents an exact prohibited control from being dispatched if a later tool
+/// result distracts the model from that instruction.
+struct AgentUserRestrictions: Equatable, Sendable {
+    private struct ContextualAction: Hashable, Sendable {
+        let verb: String
+        let object: String
+
+        var displayName: String { "\(verb) \(object)" }
+    }
+
+    private(set) var prohibitedTargets: Set<String> = []
+    private var prohibitedContextualActions: Set<ContextualAction> = []
+
+    mutating func apply(_ instruction: String) {
+        let separators = CharacterSet(charactersIn: ".!?;\n")
+        for fragment in instruction.components(separatedBy: separators) {
+            let sentence = Self.normalizedWords(fragment)
+            guard !sentence.isEmpty else { continue }
+            if let action = Self.contextualProhibition(in: sentence) {
+                prohibitedContextualActions.insert(action)
+                continue
+            }
+            if let action = Self.contextualPermission(in: sentence) {
+                prohibitedContextualActions.remove(action)
+                continue
+            }
+            if let target = Self.coordinatedProhibitionTarget(in: sentence) {
+                if Self.isMeaningfulTarget(target) {
+                    prohibitedTargets.insert(target)
+                }
+                continue
+            }
+            let prohibited = Self.targets(
+                afterAny: Self.prohibitionPrefixes, in: sentence)
+            if !prohibited.isEmpty {
+                prohibitedTargets.formUnion(prohibited)
+                continue
+            }
+            for target in Self.targets(
+                afterAny: Self.permissionPrefixes, in: sentence) {
+                prohibitedTargets.remove(target)
+            }
+        }
+    }
+
+    func prohibits(
+        label: String?,
+        selector: String?,
+        screenContext: String? = nil
+    ) -> Bool {
+        let candidates = [label, selector].compactMap { $0 }
+        if candidates.contains(where: { candidate in
+            let normalized = Self.normalizedTarget(candidate)
+            if prohibitedTargets.contains(normalized) { return true }
+            let candidateWords = normalized.split { !$0.isLetter && !$0.isNumber }
+            return prohibitedTargets.contains { target in
+                let targetWords = target.split { !$0.isLetter && !$0.isNumber }
+                guard targetWords.count == 1, let targetWord = targetWords.first else {
+                    return false
+                }
+                return candidateWords.contains { word in
+                    word == targetWord
+                        || String(word) == String(targetWord) + "s"
+                        || String(targetWord) == String(word) + "s"
+                }
+            }
+        }) { return true }
+
+        let normalizedCandidates = candidates.map(Self.normalizedTarget)
+        let normalizedContext = Self.normalizedTarget(screenContext ?? "")
+        return prohibitedContextualActions.contains { restriction in
+            guard restriction.verb == "add" else { return false }
+            let isAddControl = normalizedCandidates.contains { candidate in
+                let words = candidate.split { !$0.isLetter && !$0.isNumber }
+                return words.contains("add") || words.contains("plus")
+            }
+            guard isAddControl else { return false }
+            let objectWords = restriction.object.split { !$0.isLetter && !$0.isNumber }
+            let candidateAndContext = normalizedCandidates.joined(separator: " ")
+                + " " + normalizedContext
+            return objectWords.allSatisfy {
+                Self.containsEquivalentWord(String($0), in: candidateAndContext)
+            }
+        }
+    }
+
+    var displayTargets: [String] {
+        (prohibitedTargets.union(prohibitedContextualActions.map(\.displayName))).sorted()
+    }
+
+    private static let prohibitionPrefixes = [
+        "do not interact with ", "don't interact with ", "never interact with ",
+        "do not test ", "don't test ", "never test ",
+        "do not tap ", "don't tap ", "never tap ",
+        "do not press ", "don't press ", "never press ",
+        "do not use ", "don't use ", "never use ",
+        "do not open ", "don't open ", "never open ",
+        "do not select ", "don't select ", "never select ",
+        "avoid ", "skip ",
+    ]
+
+    private static let permissionPrefixes = [
+        "you may interact with ", "you can interact with ", "interact with ",
+        "you may test ", "you can test ", "now test ", "test ",
+        "you may tap ", "you can tap ", "now tap ", "tap ",
+        "you may press ", "you can press ", "now press ", "press ",
+        "you may use ", "you can use ", "now use ", "use ",
+        "you may open ", "you can open ", "now open ", "open ",
+        "you may select ", "you can select ", "now select ", "select ",
+    ]
+
+    private static let coordinatedVerbs: Set<String> = [
+        "interact", "test", "tap", "press", "use", "open", "select",
+        "manage", "create",
+    ]
+
+    private static func contextualProhibition(in sentence: String) -> ContextualAction? {
+        contextualAction(
+            in: sentence,
+            prefixes: ["do not add ", "don't add ", "never add "])
+    }
+
+    private static func contextualPermission(in sentence: String) -> ContextualAction? {
+        contextualAction(
+            in: sentence,
+            prefixes: ["you may add ", "you can add ", "now add ", "add "])
+    }
+
+    private static func contextualAction(
+        in sentence: String,
+        prefixes: [String]
+    ) -> ContextualAction? {
+        var candidate = sentence
+        if candidate.hasPrefix("please ") { candidate.removeFirst("please ".count) }
+        guard let prefix = prefixes.first(where: candidate.hasPrefix) else { return nil }
+        candidate.removeFirst(prefix.count)
+        if candidate.hasPrefix("more ") { candidate.removeFirst("more ".count) }
+        for separator in [" because ", " since "] {
+            if let range = candidate.range(of: separator) {
+                candidate = String(candidate[..<range.lowerBound])
+            }
+        }
+        let object = normalizedTarget(candidate)
+        guard isMeaningfulTarget(object) else { return nil }
+        return ContextualAction(verb: "add", object: object)
+    }
+
+    private static func containsEquivalentWord(_ target: String, in value: String) -> Bool {
+        value.split { !$0.isLetter && !$0.isNumber }.contains { word in
+            word == target
+                || String(word) == target + "s"
+                || target == String(word) + "s"
+        }
+    }
+
+    /// Handles instructions such as "do not test or use Speak" and
+    /// "do not open, manage, or create profiles again". The shared object
+    /// follows the final coordinated verb.
+    private static func coordinatedProhibitionTarget(in sentence: String) -> String? {
+        let negativePrefixes = ["do not ", "don't ", "never "]
+        guard let prefix = negativePrefixes.first(where: sentence.hasPrefix) else {
+            return nil
+        }
+        let remainder = sentence.dropFirst(prefix.count)
+        let words = remainder.split { !$0.isLetter && !$0.isNumber }
+        let verbIndices = words.indices.filter {
+            coordinatedVerbs.contains(String(words[$0]))
+        }
+        guard verbIndices.count > 1, let verbIndex = verbIndices.last else {
+            return nil
+        }
+        var targetWords = Array(words[words.index(after: verbIndex)...])
+        if words[verbIndex] == "interact", targetWords.first == "with" {
+            targetWords.removeFirst()
+        }
+        let target = normalizedTarget(targetWords.joined(separator: " "))
+        return target.isEmpty ? nil : target
+    }
+
+    private static func targets(afterAny prefixes: [String], in sentence: String) -> [String] {
+        var candidate = sentence
+        if candidate.hasPrefix("please ") { candidate.removeFirst("please ".count) }
+        guard let prefix = prefixes.first(where: candidate.hasPrefix) else { return [] }
+        candidate.removeFirst(prefix.count)
+        if candidate.hasPrefix("or ") {
+            candidate.removeFirst("or ".count)
+            for verb in ["interact with ", "test ", "tap ", "press ", "use ", "open ", "select "]
+                where candidate.hasPrefix(verb) {
+                candidate.removeFirst(verb.count)
+                break
+            }
+        }
+        if let range = candidate.range(of: " because ") {
+            candidate = String(candidate[..<range.lowerBound])
+        }
+        if let range = candidate.range(of: " since ") {
+            candidate = String(candidate[..<range.lowerBound])
+        }
+        let pieces: [String]
+        if candidate.contains(",") {
+            pieces = candidate
+                .replacingOccurrences(of: " and ", with: ",")
+                .replacingOccurrences(of: " or ", with: ",")
+                .split(separator: ",")
+                .map(String.init)
+        } else {
+            pieces = [candidate]
+        }
+        return pieces
+            .map(normalizedTarget)
+            .filter(isMeaningfulTarget)
+    }
+
+    private static func isMeaningfulTarget(_ target: String) -> Bool {
+        !target.isEmpty
+            && !["anything", "something", "it", "them", "this", "that"].contains(target)
+            && !target.hasPrefix("repeating ")
+    }
+
+    private static func normalizedWords(_ value: String) -> String {
+        value.lowercased().split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    private static func normalizedTarget(_ value: String) -> String {
+        var target = normalizedWords(value).trimmingCharacters(
+            in: .punctuationCharacters.union(.whitespacesAndNewlines))
+        if target.hasPrefix("the ") { target.removeFirst("the ".count) }
+        if target.hasSuffix(" now") { target.removeLast(" now".count) }
+        if target.hasSuffix(" again") { target.removeLast(" again".count) }
+        for suffix in [" button", " control", " tab", " field", " switch", " feature"] {
+            if target.hasSuffix(suffix) {
+                target.removeLast(suffix.count)
+                break
+            }
+        }
+        return target.trimmingCharacters(in: .punctuationCharacters.union(.whitespacesAndNewlines))
+    }
 }
 
 actor VisionCaptureToolLoop {
@@ -110,6 +362,28 @@ actor VisionCaptureToolLoop {
     typealias Activity = @Sendable (VisionCaptureActivityEvent) async -> Void
     typealias Checkpoint = @Sendable (AgentContextCheckpointProposal) async throws
         -> DecodeContextCheckpointReceipt
+    typealias HasPendingUserInstruction = @Sendable () async -> Bool
+
+    private struct UserInstructionPendingBeforeDispatch: Error {}
+    private var activePendingUserInstructionCheck: HasPendingUserInstruction?
+
+    /// Starts a later user instruction inside the same QA task. Completed
+    /// evidence and replay protection stay intact, while every executable
+    /// choice from the old screen is expired before the model sees the turn.
+    func prepareForUserInstruction(
+        configuration: VisionCaptureAgentConfiguration
+    ) throws {
+        try retirePendingConfirmation()
+        currentManifest = AuthorityManifest()
+        currentSystemAlert = nil
+        invalidateScreenObservation()
+        permittedNextOperations = [.observe]
+        if AppVisionPackInstallationProbe.status(
+            at: configuration.modelDirectory
+        ) == .complete {
+            permittedNextOperations?.insert(.screenshot)
+        }
+    }
 
     private enum NavigationOperation: String, Hashable {
         case launch
@@ -169,6 +443,30 @@ actor VisionCaptureToolLoop {
         }
     }
 
+    /// Identifies text insertion that VisionCapture has already proved. Keep
+    /// only a digest of the inserted text so duplicate prevention does not add
+    /// another copy of user content to retained host memory.
+    private struct VerifiedTypingAction: Hashable {
+        let selector: String
+        let selectorKind: String
+        let role: String
+        let textDigest: String
+
+        init?(_ intent: NavigationIntent) {
+            guard intent.operation == .type,
+                  let selector = intent.selector,
+                  let selectorKind = intent.selectorKind,
+                  let role = intent.role,
+                  let text = intent.text else { return nil }
+            self.selector = selector
+            self.selectorKind = selectorKind
+            self.role = role
+            textDigest = SHA256.hash(data: Data(text.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
+        }
+    }
+
     /// A stable, compact identity for no-progress checks. The coarse signature
     /// captures structural selection while the digest captures the exact
     /// canonical sanitized facts Gemma can use for navigation.
@@ -184,25 +482,27 @@ actor VisionCaptureToolLoop {
 
     private struct RejectedNavigationAction: Hashable {
         let operation: NavigationOperation
-        let selector: String?
+        let selectorDigest: String?
         let selectorKind: String?
-        let role: String?
+        let roleDigest: String?
         let desiredState: Bool?
         let textDigest: String?
         let direction: SwipeDirection?
 
         init(_ intent: NavigationIntent) {
             operation = intent.operation
-            selector = intent.selector.map { String($0.prefix(160)) }
+            selectorDigest = intent.selector.map(Self.digest)
             selectorKind = intent.selectorKind
-            role = intent.role.map { String($0.prefix(80)) }
+            roleDigest = intent.role.map(Self.digest)
             desiredState = intent.desiredState
             direction = intent.direction
-            textDigest = intent.text.map { text in
-                SHA256.hash(data: Data(text.utf8))
-                    .map { String(format: "%02x", $0) }
-                    .joined()
-            }
+            textDigest = intent.text.map(Self.digest)
+        }
+
+        private static func digest(_ value: String) -> String {
+            SHA256.hash(data: Data(value.utf8))
+                .map { String(format: "%02x", $0) }
+                .joined()
         }
     }
 
@@ -251,6 +551,7 @@ actor VisionCaptureToolLoop {
         private var repeatCount = 0
         private var screen: ScreenContentIdentity?
         private var screenRejections: [ScreenRejection] = []
+        private var rejectionCount = 0
         private var preservingVisualRecoveryScope = false
 
         mutating func record(
@@ -265,14 +566,17 @@ actor VisionCaptureToolLoop {
                 if screen != currentScreen {
                     screen = currentScreen
                     screenRejections.removeAll(keepingCapacity: true)
+                    rejectionCount = 0
                     preservingVisualRecoveryScope = false
                 }
+                rejectionCount += 1
                 if let index = screenRejections.firstIndex(where: {
                     $0.signature == signature
                 }) {
                     screenRejections[index].count += 1
                     let count = screenRejections[index].count
-                    return (count, count >= Self.repeatLimit)
+                    return (count, count >= Self.repeatLimit
+                        || rejectionCount >= Self.repeatLimit)
                 }
                 screenRejections.append(ScreenRejection(
                     signature: signature,
@@ -281,18 +585,20 @@ actor VisionCaptureToolLoop {
                     screenRejections.removeFirst(
                         screenRejections.count - Self.trackedSignatureLimit)
                 }
-                return (1, false)
+                return (1, rejectionCount >= Self.repeatLimit)
             }
 
             screen = nil
             screenRejections.removeAll(keepingCapacity: true)
+            rejectionCount += 1
             if signature == previous {
                 repeatCount += 1
             } else {
                 previous = signature
                 repeatCount = 1
             }
-            return (repeatCount, repeatCount >= Self.repeatLimit)
+            return (repeatCount, repeatCount >= Self.repeatLimit
+                || rejectionCount >= Self.repeatLimit)
         }
 
         mutating func preserveRejections(afterHostObservation currentScreen: ScreenContentIdentity?) {
@@ -308,6 +614,7 @@ actor VisionCaptureToolLoop {
             repeatCount = 0
             screen = nil
             screenRejections.removeAll(keepingCapacity: true)
+            rejectionCount = 0
             preservingVisualRecoveryScope = false
         }
     }
@@ -333,12 +640,17 @@ actor VisionCaptureToolLoop {
     /// One exact, public accessibility selector for a currently visible and
     /// enabled editable element. The selector kind stays explicit so the host
     /// never relabels an identifier as a label, or the reverse.
-    private struct PublishedEditableField: Equatable {
+    struct PublishedEditableField: Equatable {
         let selector: String
         let selectorKind: String
         let role: String
         /// Observation correlation only. Never sent as an execution selector.
         let elementID: String?
+    }
+
+    private struct EditableElementIdentity: Hashable {
+        let elementID: String
+        let role: String
     }
 
     private enum ChoiceRoute {
@@ -624,6 +936,9 @@ actor VisionCaptureToolLoop {
     private var staleActionConfirmation: StaleActionConfirmation?
     private var blockedStaleActions: Set<StaleActionConfirmation> = []
     private var journeyEvents: [JourneyEvent] = []
+    private var verifiedTypingActions: Set<VerifiedTypingAction> = []
+    private var currentUserPrompt = ""
+    private var userRestrictions = AgentUserRestrictions()
     private var currentJourneyHint: String?
     // Conversation-owned: AppModel replaces this actor when starting a new
     // conversation. A new run, launch, or observation does not erase emission history.
@@ -672,9 +987,11 @@ actor VisionCaptureToolLoop {
         maxContextTokens: Int? = nil,
         checkpoint: Checkpoint? = nil,
         forceCheckpoint: @escaping @Sendable () async -> Bool = { false },
+        hasPendingUserInstruction: @escaping HasPendingUserInstruction = { false },
         inference: @escaping Inference
     ) async throws -> VisionCaptureAgentRunResult {
         try Task.checkCancellation()
+        activePendingUserInstructionCheck = hasPendingUserInstruction
         let resumesRetainedTask = modelConversationEpoch.map {
             $0 != conversationEpoch
         } ?? false
@@ -698,8 +1015,11 @@ actor VisionCaptureToolLoop {
                 safety: checkpointSafety(configuration),
                 currentPacketWasRefreshed: false)
             : nil
+        currentUserPrompt = userPrompt
+        userRestrictions.apply(userPrompt)
         taskCheckpoint.appendUser(userPrompt, images: userImages)
         defer {
+            activePendingUserInstructionCheck = nil
             screenshotStore.removeAll()
             currentImageObservation = nil
         }
@@ -720,7 +1040,6 @@ actor VisionCaptureToolLoop {
             developerPrompt: developerPrompt,
             tools: VisionCaptureToolDefinitions.all)
         var nextReadyOffer: ReadyActionOffer?
-        var awaitingCheckpointNote = false
         var retryBoundary: GenerationRetryBoundary?
         var activeThoughtRecovery: UUID?
 
@@ -814,17 +1133,38 @@ actor VisionCaptureToolLoop {
                     throw VisionCaptureAgentError.malformedCall(reason)
                 }
             }
-            let assessmentSource = completion.toolCalls.first.map {
-                "visible model text before call \($0.id)"
-            } ?? "visible model reply without a tool call"
-            let noteCapture = taskCheckpoint.appendAssessment(
-                completion.content, source: assessmentSource)
-            if awaitingCheckpointNote || noteCapture == .oversized {
-                await activity(.modelResult(callID: completion.toolCalls.first?.id ?? "progress-note",
-                    toolName: "context_progress_note", excerpt: noteCapture.description, imageCount: 0))
+            if completion.diagnostics.stopReason == .cancelled {
+                let partial = completion.content.trimmingCharacters(
+                    in: .whitespacesAndNewlines)
+                return VisionCaptureAgentRunResult(
+                    answer: partial.isEmpty ? "Generation stopped." : partial,
+                    diagnostics: completion.diagnostics)
             }
-            awaitingCheckpointNote = false
-
+            if !completion.toolCalls.isEmpty,
+               completion.diagnostics.stopReason == .toolCalls,
+               await hasPendingUserInstruction() {
+                try prepareForUserInstruction(configuration: configuration)
+                let reason = "A new user instruction arrived before this proposed action was sent."
+                let content = try JSONValue.object([
+                    "outcome": .string("not_sent"),
+                    "dispatch_attempted": .bool(false),
+                    "reason": .string("user_instruction_pending"),
+                    "instruction": .string(
+                        "Do not execute this proposal. The user's new instruction will arrive as the next user turn."),
+                ]).encoded()
+                var results: [AppToolResult] = []
+                for call in completion.toolCalls {
+                    Self.logLocalRejection(call, reason: reason)
+                    await activity(.localRejection(
+                        id: UUID(), call: call, reason: reason))
+                    results.append(AppToolResult(
+                        callID: call.id, name: call.name, content: content))
+                }
+                nextReadyOffer = nil
+                retryBoundary = nil
+                next = .results(results)
+                continue
+            }
             if completion.toolCalls.isEmpty {
                 guard completion.diagnostics.stopReason != .toolCalls else {
                     throw VisionCaptureAgentError.malformedCall(
@@ -840,6 +1180,13 @@ actor VisionCaptureToolLoop {
                 }
                 guard !answer.isEmpty else {
                     throw VisionCaptureAgentError.incompleteAnswer
+                }
+                if completion.diagnostics.stopReason == .endOfTurn,
+                   Self.hasUnfinishedChecklist(answer) {
+                    return VisionCaptureAgentRunResult(
+                        answer: answer,
+                        diagnostics: completion.diagnostics,
+                        followUpPrompt: "Continue the current QA task. Your checklist still has pending or in-progress checks. Continue independent remaining checks using permitted current controls. If a check cannot proceed, report its factual blocker. Preserve completed checks and all refusal restrictions.")
                 }
                 return VisionCaptureAgentRunResult(
                     answer: answer,
@@ -1000,6 +1347,23 @@ actor VisionCaptureToolLoop {
                             manifest: currentManifest, screenSignature: signature,
                             targetKey: configuration.targetKey, session: committedSessionIdentity)
                     }
+                } catch is UserInstructionPendingBeforeDispatch {
+                    checkingLocalProposal = false
+                    try prepareForUserInstruction(configuration: configuration)
+                    let reason = "A new user instruction arrived before this proposed action was sent."
+                    Self.logLocalRejection(call, reason: reason)
+                    await activity(.localRejection(
+                        id: UUID(), call: call, reason: reason))
+                    content = try JSONValue.object([
+                        "outcome": .string("not_sent"),
+                        "dispatch_attempted": .bool(false),
+                        "reason": .string("user_instruction_pending"),
+                        "instruction": .string(
+                            "Do not execute this proposal. The user's new instruction will arrive as the next user turn."),
+                    ]).encoded()
+                    executionOutcome = content
+                    executionOrigin = "user_instruction_before_dispatch"
+                    nextReadyOffer = nil
                 } catch let error as VisionCaptureAgentError
                     where checkingLocalProposal && Self.isRecoverableProposalError(error) {
                     checkingLocalProposal = false
@@ -1030,7 +1394,7 @@ actor VisionCaptureToolLoop {
                     executionOutcome = failure
                     let repairPacket = try decisionPacket(
                         from: failure, call: call, configuration: configuration, images: [],
-                        excludingTargetID: rejectedTarget)
+                        excludingTargetID: rejectedTarget, preservingChoiceIDs: true)
                     content = repairPacket.content
                     if !requiresReadOnlyRecovery, uncertainAlertPress == nil,
                        let repetitionCount = readOnlyNoProgress.activeCorrection(
@@ -1198,7 +1562,6 @@ actor VisionCaptureToolLoop {
                     modelConversationEpoch = commitProposal.replacementEpoch
                     next = .checkpoint(commitProposal.id)
                     retryBoundary = nil
-                    awaitingCheckpointNote = true
                 }
             }
         }
@@ -1314,6 +1677,7 @@ actor VisionCaptureToolLoop {
             let result = try await executeHostRequest(
                 arguments,
                 configuration: configuration,
+                interruptibleByUserInstruction: true,
                 activity: activity)
             if let timeout = Self.isolatedLaunchTimeout(
                 result, arguments: arguments, configuration: configuration) {
@@ -1405,6 +1769,13 @@ actor VisionCaptureToolLoop {
                 // The cached-action endpoint validates this unused handle live.
                 // Save only the redundant client inspection, not any safety gate.
                 manifest = reusable
+            } else if candidateSignature == nil, staleConfirmation == nil,
+                      let reusable = reusableObservedManifest(
+                        for: intent, configuration: configuration) {
+                // A cold grant permits one bound read and then the exact action
+                // published by that read. An intervening cache inspection
+                // retires the grant, so use this current binding directly.
+                manifest = reusable
             } else {
                 let prepared = try await refreshNavigation(
                     configuration: configuration,
@@ -1460,12 +1831,22 @@ actor VisionCaptureToolLoop {
                 configuration: configuration)
             let isStaleConfirmation = staleConfirmation != nil
             let staleBaselineScreen = currentScreenSignature
+            let attemptedScreenScope = currentNavigationScreenScope
             currentManifest = AuthorityManifest()
             invalidateScreenObservation()
             let result = try await executeHostRequest(
                 actionArguments,
                 configuration: configuration,
+                interruptibleByUserInstruction: true,
                 activity: activity)
+            if isRecoverableObservedTapTargetUnavailable(
+                result, arguments: actionArguments, configuration: configuration) {
+                rememberRejectedBeforeSubmissionProposal(
+                    intent, screen: attemptedScreenScope)
+                return try await observeAfterObservedTapTargetUnavailable(
+                    intent, failure: result.serverOutcome,
+                    configuration: configuration, activity: activity)
+            }
             if isRecoverableActionAuthorizationExpiry(
                 result, arguments: actionArguments, configuration: configuration) {
                 return try await observeAfterActionAuthorizationExpiry(
@@ -1523,6 +1904,14 @@ actor VisionCaptureToolLoop {
                 progressed: !result.isError)
 
         case .type:
+            if let completed = VerifiedTypingAction(intent),
+               verifiedTypingActions.contains(completed),
+               !Self.explicitlyRequestsRepeatedTyping(
+                   userPrompt: currentUserPrompt,
+                   text: intent.text ?? "") {
+                throw VisionCaptureAgentError.navigationUnavailable(
+                    "This exact text was already typed into this field and VisionCapture verified it earlier in this task. It was not sent again. Use the retained result and continue with any remaining QA checks.")
+            }
             let prepared = try await refreshNavigation(
                 configuration: configuration,
                 activity: activity)
@@ -1558,6 +1947,7 @@ actor VisionCaptureToolLoop {
             let result = try await executeHostRequest(
                 arguments,
                 configuration: configuration,
+                interruptibleByUserInstruction: true,
                 activity: activity)
             if result.isGuardedTargetRejectedBeforeSubmission {
                 rememberRejectedBeforeSubmissionProposal(intent)
@@ -1656,6 +2046,7 @@ actor VisionCaptureToolLoop {
             let result = try await executeHostRequest(
                 arguments,
                 configuration: configuration,
+                interruptibleByUserInstruction: true,
                 activity: activity)
             if result.isGuardedTargetRejectedBeforeSubmission {
                 rememberRejectedBeforeSubmissionProposal(intent)
@@ -2540,6 +2931,31 @@ actor VisionCaptureToolLoop {
             observationRefreshed: prepared.observationRefreshed)
     }
 
+    /// The observed target disappeared after Gemma chose it but before
+    /// VisionCapture dispatched the tap. Keep the refusal and return only
+    /// freshly read choices.
+    private func observeAfterObservedTapTargetUnavailable(
+        _ intent: NavigationIntent,
+        failure: VisionCaptureServerOutcome,
+        configuration: VisionCaptureAgentConfiguration,
+        activity: @escaping Activity
+    ) async throws -> NavigationOutcome {
+        let observed = try await describeScreenAfterCacheValidationFailure(
+            configuration: configuration, activity: activity)
+        guard !observed.result.isError, currentScreenSignature != nil else {
+            throw VisionCaptureAgentError.noProgress(
+                "VisionCapture rejected the changed target before dispatch, and the following plain read could not establish current screen facts. No action was sent or replayed.")
+        }
+        let prepared = try await refreshNavigation(
+            configuration: configuration, activity: activity)
+        return try outcome(
+            for: intent, result: prepared.result, arguments: prepared.arguments,
+            manifest: prepared.manifest, systemAlert: prepared.systemAlert,
+            progressed: false, observedScreenFacts: prepared.screenFacts,
+            refusedObservedTapBeforeDispatch: failure,
+            observationRefreshed: prepared.observationRefreshed)
+    }
+
     /// The submitted action keeps its failed proof. Refresh once for a new
     /// model choice without retaining the failed response's terminal handles.
     private func observeAfterDeliveredTransition(
@@ -2736,6 +3152,7 @@ actor VisionCaptureToolLoop {
             arguments,
             configuration: configuration,
             usesFlowSession: false,
+            interruptibleByUserInstruction: true,
             activity: activity)
         let deliveryUnknown = result.isSystemAlertDeliveryUnknown
         if deliveryUnknown {
@@ -2769,6 +3186,25 @@ actor VisionCaptureToolLoop {
         guard let action = try? Self.uniquePublishedAction(for: intent, in: offered),
               action.actionCapability != nil, action.revalidationCapability == nil else { return nil }
         return offer.manifest
+    }
+
+    private func reusableObservedManifest(
+        for intent: NavigationIntent,
+        configuration: VisionCaptureAgentConfiguration
+    ) -> AuthorityManifest? {
+        guard currentManifest.state == "cold" || currentManifest.state == "observed",
+              currentManifest.observationGrant != nil,
+              committedTargetKey == configuration.targetKey,
+              committedSessionIdentity?.kind == "flow",
+              currentScreenSignature != nil,
+              currentSystemAlert == nil,
+              isEligibleOfferedAction(intent) else { return nil }
+        var offered = currentManifest
+        offered.actions = eligibleOfferedActions(offered.actions)
+        guard let action = try? Self.uniquePublishedAction(for: intent, in: offered),
+              action.actionCapability == nil,
+              action.revalidationCapability == nil else { return nil }
+        return currentManifest
     }
 
     private func makeActionArguments(
@@ -2853,6 +3289,7 @@ actor VisionCaptureToolLoop {
         _ arguments: JSONValue,
         configuration: VisionCaptureAgentConfiguration,
         usesFlowSession: Bool = true,
+        interruptibleByUserInstruction: Bool = false,
         activityID: UUID = UUID(),
         activity: @escaping Activity
     ) async throws -> VisionCaptureMCPResult {
@@ -2895,7 +3332,20 @@ actor VisionCaptureToolLoop {
 
         let result: VisionCaptureMCPResult
         do {
-            result = try await client.execute(arguments: arguments)
+            let pendingCheck = activePendingUserInstructionCheck
+            result = try await client.execute(
+                arguments: arguments,
+                beforeDispatch: {
+                    guard interruptibleByUserInstruction,
+                          await pendingCheck?() == true else { return }
+                    throw UserInstructionPendingBeforeDispatch()
+                })
+        } catch is UserInstructionPendingBeforeDispatch {
+            await activity(.requestStatus(
+                id: activityID,
+                status: .notSent(reason: "A new user instruction arrived before dispatch."),
+                elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
+            throw UserInstructionPendingBeforeDispatch()
         } catch is CancellationError {
             await activity(.requestStatus(
                 id: activityID,
@@ -2974,6 +3424,7 @@ actor VisionCaptureToolLoop {
                 result,
                 arguments: arguments)
             || result.isGuardedTargetRejectedBeforeSubmission
+            || result.isObservedTapTargetUnavailableBeforeDispatch
             || isRecoverableRevalidationLayoutChange(
                 result, arguments: arguments, configuration: configuration)
             || isRecoverableActionAuthorizationExpiry(
@@ -3068,6 +3519,15 @@ actor VisionCaptureToolLoop {
             && matchesCommittedWarmTapRequest(arguments, configuration: configuration)
     }
 
+    private func isRecoverableObservedTapTargetUnavailable(
+        _ result: VisionCaptureMCPResult,
+        arguments: JSONValue,
+        configuration: VisionCaptureAgentConfiguration
+    ) -> Bool {
+        result.isObservedTapTargetUnavailableBeforeDispatch
+            && matchesCommittedObservedTapRequest(arguments, configuration: configuration)
+    }
+
     private func isPermittedDeliveredTransition(
         _ result: VisionCaptureMCPResult,
         arguments: JSONValue,
@@ -3094,6 +3554,27 @@ actor VisionCaptureToolLoop {
               case .string(let capability)? = parameters["action_capability"],
               !capability.isEmpty,
               Set(parameters.keys) == ["udid", "action_capability"] else { return false }
+        return true
+    }
+
+    private func matchesCommittedObservedTapRequest(
+        _ arguments: JSONValue,
+        configuration: VisionCaptureAgentConfiguration
+    ) -> Bool {
+        guard committedTargetKey == configuration.targetKey,
+              currentSystemAlert == nil, uncertainAlertPress == nil,
+              let session = committedSessionIdentity, session.kind == "flow",
+              let request = arguments.objectValue,
+              case .string(let rawRequest)? = request["request"],
+              rawRequest.hasPrefix("tap "), !rawRequest.dropFirst(4).isEmpty,
+              request["bundle_id"] == .string(configuration.bundleIdentifier),
+              request["session_id"] == .string(session.id),
+              request["session_kind"] == .string(session.kind),
+              let parameters = request["parameters"]?.objectValue,
+              Set(parameters.keys) == ["udid", "observation_grant"],
+              parameters["udid"] == .string(configuration.simulatorUDID),
+              case .string(let grant)? = parameters["observation_grant"], !grant.isEmpty
+        else { return false }
         return true
     }
 
@@ -3155,29 +3636,77 @@ actor VisionCaptureToolLoop {
         configuration _: VisionCaptureAgentConfiguration
     ) -> String {
         return """
-        You are the iOS QA tester for the configured simulator app. Turn the user's test goal into
-        observable checks. Within the requested scope, exercise the relevant app flows as a user,
-        compare actual behavior with the expected outcome, gather evidence, and report defects or
-        blocked coverage clearly. Never guess a result or claim behavior you did not verify.
+        You are the iOS QA agent for the configured simulator app. Turn the user's current goal into observable
+        checks. Test requested flows as a user, compare actual behavior with expected behavior, gather evidence,
+        and report defects or factual blockers. Never claim unverified work.
 
-        Make at most one tool call per reply. Continue until every requested check is complete or a
-        factual blocker is verified.
+        A new user instruction updates the current goal. Apply it before the next app action. Keep completed
+        evidence. The newest user instruction wins when user instructions conflict. A user prohibition is a
+        hard restriction: never propose its action or target, even if offered. Continue other checks.
 
-        After each app step, last_action describes what happened to the previous action. Observation,
-        facts, and choices describe the screen now. Earlier observations remain historical. Preserve
-        refused, failed, inconclusive, and delivery-unknown outcomes. Do not replay that input. A
-        current confirmation offer is a new permitted decision.
+        Each reply makes one permitted tool call or gives a concise final answer. Copy exact current choices.
+        Never substitute a missing control. Take only steps that test or verify the current goal. Continue
+        independent checks if one is blocked. If a current choice clearly advances an unfinished check, act on
+        it before another screen read.
 
-        An action result does not prove the user's goal. Verify it from current evidence. If evidence
-        does not support a claim, inspect safely or say it is unknown. Report results as verified,
-        failed, inconclusive, or unknown.
+        When current_image_evidence is true, match an unlabeled choice's position to the visible control in the
+        screenshot and use that choice ID. Do not observe again only because that current choice has no label.
+        If an unfinished check needs an unlabeled control and facts say requires_screenshot, take a screenshot.
+        That is a recoverable evidence step, not a blocker.
+
+        After an app step, last_action is the previous step. observation, facts, and choices describe the current
+        screen; older observations are historical. Use current screen content before opening a named section; if
+        its content is already current, continue with its controls. An accepted request is not proof. A
+        VisionCapture verified action is done. When it proves a requested workflow's result, that workflow is complete; move to a
+        different unfinished check unless the user asked to repeat it. An already selected button is state
+        evidence, not a new action. A VisionCapture failed action is terminal evidence; record it and continue
+        other checks. Preserve refused, inconclusive, and delivery-unknown input and never replay it. A new
+        confirmation offer permits a new decision. A target label proves only that the target was visible.
+        Seeing a control is not testing it when the user asked to test or interact with it.
+
+        Resolve inconclusive results with a permitted current screen read or screenshot when possible. A missing
+        screen fact is not a blocker while current controls can reach evidence. If a form is open but its editable
+        fields are absent, inspect pixels or expand an offered sheet before canceling the form.
+
+        Continue while any check can proceed. As soon as every requested check is verified or failed, give the
+        final answer without another tool call. Finish with an inconclusive, unknown, or blocked result only when
+        a factual blocker prevents more evidence.
         """
+    }
+
+    private static func hasUnfinishedChecklist(_ answer: String) -> Bool {
+        var insideCodeFence = false
+        var insideChecklist = false
+        for rawLine in answer.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.hasPrefix("```") {
+                insideCodeFence.toggle()
+                continue
+            }
+            guard !insideCodeFence, !line.hasPrefix(">") else { continue }
+            let lower = line.lowercased()
+            if lower.contains("checklist") &&
+               (lower.contains("result") || lower.contains("status")) {
+                insideChecklist = true
+                continue
+            }
+            guard insideChecklist else { continue }
+            if line.hasPrefix("#") { insideChecklist = false; continue }
+            guard let colon = line.lastIndex(of: ":") else { continue }
+            let status = line[line.index(after: colon)...]
+                .replacingOccurrences(of: "*", with: "")
+                .replacingOccurrences(of: "_", with: "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if status == "pending" || status == "in progress" { return true }
+        }
+        return false
     }
 
     private static func preflight(_ calls: [AppToolCall]) throws -> AppToolCall {
         guard calls.count == 1 else {
             throw VisionCaptureAgentError.malformedCall(
-                "only one visioncapture_navigate or task_history_read call is allowed per assistant turn")
+                "only one visioncapture_navigate call is allowed per assistant turn")
         }
         // A complete native call already awaits its matching result in the
         // runtime. Reject an unknown name inside the bounded local correction
@@ -3193,7 +3722,7 @@ actor VisionCaptureToolLoop {
         resolvedJourneyLabel = nil
         guard call.name == VisionCaptureToolDefinitions.navigateName else {
             throw VisionCaptureAgentError.malformedCall(
-                "Use only visioncapture_navigate for the app or task_history_read for archived evidence. The unknown tool was not executed.")
+                "Use only visioncapture_navigate for the app. The unknown tool was not executed.")
         }
         guard case .object(let object) = call.arguments,
               case .string(let name)? = object["action"],
@@ -3339,7 +3868,8 @@ actor VisionCaptureToolLoop {
         isField: Bool,
         isConfirmation: Bool,
         configuration: VisionCaptureAgentConfiguration,
-        excludingTargetID: String?
+        excludingTargetID: String?,
+        reusableChoiceBindings: [String: ChoiceBinding] = [:]
     ) throws -> (choice: JSONValue, semantic: JSONValue)? {
         guard case .string(let selector)? = object["selector"],
               case .string(let role)? = object["role"],
@@ -3406,16 +3936,34 @@ actor VisionCaptureToolLoop {
             isEligibleOfferedAction(NavigationIntent(operation: operation, selector: selector,
                 selectorKind: kind, role: role, desiredState: state, text: nil))
         }) else { return nil }
-        var id: String
-        repeat {
-            guard nextChoiceNumber < UInt64.max else {
-                throw VisionCaptureAgentError.noProgress("The conversation exhausted its choice IDs. Start a new chat.")
-            }
-            nextChoiceNumber += 1
-            id = "c\(nextChoiceNumber)"
-            // An unavailable ID may have been guessed before it was issued.
-            // Never allocate that rejected ID while publishing its repair.
-        } while id == excludingTargetID
+        let reusedID = reusableChoiceBindings.first { id, previous in
+            id != excludingTargetID
+                && previous.targetKey == binding.targetKey
+                && previous.session == binding.session
+                && previous.screenSignature == binding.screenSignature
+                && previous.operation == binding.operation
+                && previous.selector == binding.selector
+                && previous.selectorKind == binding.selectorKind
+                && previous.role == binding.role
+                && previous.displayLabel == binding.displayLabel
+                && previous.allowedStates == binding.allowedStates
+        }?.key
+        let id: String
+        if let reusedID {
+            id = reusedID
+        } else {
+            var allocated: String
+            repeat {
+                guard nextChoiceNumber < UInt64.max else {
+                    throw VisionCaptureAgentError.noProgress("The conversation exhausted its choice IDs. Start a new chat.")
+                }
+                nextChoiceNumber += 1
+                allocated = "c\(nextChoiceNumber)"
+                // An unavailable ID may have been guessed before it was issued.
+                // Never allocate that rejected ID while publishing its repair.
+            } while allocated == excludingTargetID
+            id = allocated
+        }
         choice["id"] = .string(id)
         choice["operations"] = .array([.string(operation.rawValue)])
         if displayLabel == nil {
@@ -3492,18 +4040,28 @@ actor VisionCaptureToolLoop {
         call: AppToolCall,
         configuration: VisionCaptureAgentConfiguration,
         images: [AppImageAttachment],
-        excludingTargetID: String? = nil
+        excludingTargetID: String? = nil,
+        preservingChoiceIDs: Bool = false
     ) throws -> DecisionPacket {
         guard case .object(let body) = try JSONDecoder().decode(
             JSONValue.self, from: Data(content.utf8)) else {
             throw VisionCaptureAgentError.malformedCall("The host could not encode the current decision facts.")
         }
+        let reusableChoiceBindings = preservingChoiceIDs ? currentChoiceBindings : [:]
+        let preservesCurrentImage = preservingChoiceIDs
+            && currentImageObservation == observationGeneration
         currentImageObservation = nil
         currentChoiceBindings.removeAll(keepingCapacity: true)
         guard observationGeneration < UInt64.max else {
             throw VisionCaptureAgentError.noProgress("The conversation exhausted its observation IDs. Start a new chat.")
         }
         observationGeneration += 1
+        // A locally rejected proposal sent no app input and performed no new
+        // screen read. Keep the immediately preceding screenshot usable when
+        // republishing the same current choices with their existing IDs.
+        if preservesCurrentImage {
+            currentImageObservation = observationGeneration
+        }
         let proposedOperation = body["operation"] ?? call.arguments.objectValue?["action"]
         let operation: JSONValue
         if case .string(let name)? = proposedOperation, NavigationOperation(rawValue: name) != nil {
@@ -3539,13 +4097,54 @@ actor VisionCaptureToolLoop {
         var choices: [JSONValue] = []
         var semanticChoices: [JSONValue] = []
         var unavailableChoices: [JSONValue] = []
+        var requiresVisualDisambiguation = false
+        let restrictionScreenContext = ["screen_summary", "navigation_fact"]
+            .compactMap { key -> String? in
+                guard case .string(let value)? = body[key] else { return nil }
+                return value
+            }
+            .joined(separator: " ")
         for (values, isField) in [(Self.array(body["available_actions"]), false),
                                  (Self.array(body["available_text_fields"]), true)] {
             for value in values {
                 guard case .object(let object) = value else { continue }
+                let label: String?
+                if case .string(let value)? = object["label"] { label = value }
+                else { label = nil }
+                let selector: String?
+                if case .string(let value)? = object["selector"] { selector = value }
+                else { selector = nil }
+                if userRestrictions.prohibits(
+                    label: label,
+                    selector: selector,
+                    screenContext: restrictionScreenContext
+                ) {
+                    var restricted: [String: JSONValue] = [
+                        "availability": .string("prohibited_by_user"),
+                    ]
+                    if let label { restricted["label"] = .string(label) }
+                    if let role = object["role"] { restricted["role"] = role }
+                    unavailableChoices.append(.object(restricted))
+                    continue
+                }
+                if !isField, !userRestrictions.displayTargets.isEmpty,
+                   currentImageObservation != observationGeneration,
+                   readableChoiceFacts(object, isField: false)["label"] == nil {
+                    requiresVisualDisambiguation = true
+                }
+                if Self.isAlreadySelectedTap(object, isField: isField) {
+                    var selected: [String: JSONValue] = [
+                        "availability": .string("already_selected"),
+                    ]
+                    if let label { selected["label"] = .string(label) }
+                    if let role = object["role"] { selected["role"] = role }
+                    unavailableChoices.append(.object(selected))
+                    continue
+                }
                 if !readOnlyRequired, !unavailable, recovery == nil,
                    let bound = try bindChoice(object, isField: isField, isConfirmation: false,
-                       configuration: configuration, excludingTargetID: excludingTargetID) {
+                       configuration: configuration, excludingTargetID: excludingTargetID,
+                       reusableChoiceBindings: reusableChoiceBindings) {
                     choices.append(bound.choice)
                     semanticChoices.append(bound.semantic)
                 } else {
@@ -3556,7 +4155,8 @@ actor VisionCaptureToolLoop {
         if !readOnlyRequired, !unavailable {
             if confirmationAllowed, let object = recovery?["confirming_action"]?.objectValue {
                 if let bound = try bindChoice(object, isField: false, isConfirmation: true,
-                    configuration: configuration, excludingTargetID: excludingTargetID) {
+                    configuration: configuration, excludingTargetID: excludingTargetID,
+                    reusableChoiceBindings: reusableChoiceBindings) {
                     choices.append(bound.choice)
                     semanticChoices.append(bound.semantic)
                 } else {
@@ -3564,14 +4164,31 @@ actor VisionCaptureToolLoop {
                 }
             }
         }
-        var allowed: Set<NavigationOperation> = [.observe]
+        // A screenshot packet already includes a fresh accessibility read.
+        // Offering another read immediately discards the pixels and can trap
+        // the model in an observe/screenshot loop around unnamed controls.
+        let visionAvailable = AppVisionPackInstallationProbe.status(
+            at: configuration.modelDirectory
+        ) == .complete
+        var allowed: Set<NavigationOperation> = currentImageObservation == observationGeneration
+            ? []
+            : [.observe]
         var swipeDirections: [SwipeDirection] = []
-        if AppVisionPackInstallationProbe.status(at: configuration.modelDirectory) == .complete {
+        if currentImageObservation != observationGeneration,
+           visionAvailable {
             allowed.insert(.screenshot)
         }
         for binding in currentChoiceBindings.values { allowed.insert(binding.operation) }
+        let hasExplicitBackChoice = choices.contains { choice in
+            guard case .string(let label)? = choice.objectValue?["label"] else { return false }
+            return switch label.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "back", "close": true
+            default: false
+            }
+        }
         if !readOnlyRequired, !unavailable, recovery == nil, currentSystemAlert == nil,
            currentScreenSignature != nil, committedSessionIdentity?.kind == "flow",
+           !hasExplicitBackChoice,
            isEligibleOfferedAction(NavigationIntent(operation: .back, selector: nil,
                selectorKind: nil, role: nil, desiredState: nil, text: nil)) {
             allowed.insert(.back)
@@ -3589,6 +4206,13 @@ actor VisionCaptureToolLoop {
         if !readOnlyRequired, currentScreenSignature == nil, currentSystemAlert == nil,
            images.isEmpty, recovery == nil, body["outcome"] == .string("not_sent") {
             allowed.insert(.launch)
+        }
+        if requiresVisualDisambiguation, visionAvailable, !readOnlyRequired, !unavailable {
+            choices = []
+            semanticChoices = []
+            currentChoiceBindings.removeAll(keepingCapacity: true)
+            swipeDirections = []
+            allowed = [.screenshot]
         }
         if (try? configuration.validate()) == nil || (
             committedTargetKey != nil && committedTargetKey != configuration.targetKey) {
@@ -3652,6 +4276,14 @@ actor VisionCaptureToolLoop {
             "facts": .array(facts),
             "choices": .array(Self.choicesForDisplay(choices, includesImage: !images.isEmpty)),
         ]
+        if !userRestrictions.displayTargets.isEmpty {
+            packet["user_restrictions"] = .object([
+                "prohibited_targets": .array(
+                    userRestrictions.displayTargets.map(JSONValue.string)),
+                "instruction": .string(
+                    "Do not propose or execute these targets. Continue other requested checks."),
+            ])
+        }
         if let instruction = body["instruction"], instruction != .string("Observation is complete.") {
             packet["guidance"] = instruction
         }
@@ -3695,6 +4327,46 @@ actor VisionCaptureToolLoop {
             object.removeValue(forKey: "position")
             return .object(object)
         }
+    }
+
+    static func isAlreadySelectedTap(
+        _ object: [String: JSONValue],
+        isField: Bool
+    ) -> Bool {
+        !isField
+            && object["action"] == .string("tap")
+            && object["role"] == .string("button")
+            && object["selected"] == .bool(true)
+    }
+
+    static func matchesCompletedCycleEntry(
+        _ object: [String: JSONValue],
+        isField: Bool,
+        operation: String,
+        selector: String?,
+        selectorKind: String?,
+        role: String?,
+        desiredState: Bool?
+    ) -> Bool {
+        guard !isField,
+              operation == NavigationOperation.tap.rawValue,
+              object["action"] == .string(operation),
+              object["selector"] == selector.map(JSONValue.string),
+              object["role"] == role.map(JSONValue.string) else { return false }
+        let offeredSelectorKind: String?
+        if case .string(let value)? = object["selector_kind"] {
+            offeredSelectorKind = value
+        } else {
+            offeredSelectorKind = nil
+        }
+        let offeredDesiredState: Bool?
+        if case .bool(let value)? = object["desired_state"] {
+            offeredDesiredState = value
+        } else {
+            offeredDesiredState = nil
+        }
+        return offeredSelectorKind == selectorKind
+            && offeredDesiredState == desiredState
     }
 
     private static func array(_ value: JSONValue?) -> [JSONValue] {
@@ -4028,6 +4700,7 @@ actor VisionCaptureToolLoop {
         observedScreenFacts: VisionCaptureScreenFacts? = nil,
         reobservedBeforeDispatch: Bool = false,
         expiredBeforeDispatch: VisionCaptureServerOutcome? = nil,
+        refusedObservedTapBeforeDispatch: VisionCaptureServerOutcome? = nil,
         deliveredFailure: VisionCaptureServerOutcome? = nil,
         verifiedTypingProof: [String: JSONValue]? = nil,
         typingDispatchAttempted: Bool? = nil,
@@ -4041,6 +4714,10 @@ actor VisionCaptureToolLoop {
            let signature = currentScreenSignature, let facts {
             candidates = facts.tapCandidates(excluding: manifest.actions.map { ($0.selector, $0.role) })
                 .filter { candidate in
+                    guard !facts.isLowValueSoftwareKeyboardControl(
+                        selector: candidate.selector, role: candidate.role) else {
+                        return false
+                    }
                     let proposal = NavigationIntent(
                         operation: .tap, selector: candidate.selector, selectorKind: nil,
                         role: candidate.role, desiredState: nil, text: nil)
@@ -4050,7 +4727,16 @@ actor VisionCaptureToolLoop {
         } else {
             candidates = []
         }
-        let availableActions = Self.sanitizedActions(eligibleOfferedActions(manifest.actions), facts: facts)
+        let publishedActions = eligibleOfferedActions(manifest.actions).filter { action in
+            guard let facts else { return true }
+            return !facts.isLowValueSoftwareKeyboardControl(
+                selector: action.selector,
+                role: action.role,
+                displayLabel: action.displayLabel,
+                position: action.displayPosition)
+        }
+        let availableActions = Self.deduplicatedDecisionActions(
+            Self.sanitizedActions(publishedActions, facts: facts)
             + Self.sanitizedSystemAlertActions(systemAlert)
             + candidates.map { candidate in
                 var object = facts?.properties(selector: candidate.selector, role: candidate.role) ?? [:]
@@ -4059,7 +4745,7 @@ actor VisionCaptureToolLoop {
                 object["role"] = .string(candidate.role)
                 object["requires_validation"] = .bool(true)
                 return .object(object)
-            }
+            }, facts: facts)
         var body: [String: JSONValue] = [
             "operation": .string(intent.operation.rawValue),
             "outcome": .string(result.isRecoverableColdMiss
@@ -4091,6 +4777,7 @@ actor VisionCaptureToolLoop {
         if !result.isRecoverableColdMiss,
            !result.isGuardedTargetRejectedBeforeSubmission,
            !reobservedBeforeDispatch, expiredBeforeDispatch == nil,
+           refusedObservedTapBeforeDispatch == nil,
            deliveredFailure == nil, verifiedTypingProof == nil, !observationRefreshed {
             switch intent.operation {
             case .tap, .setBoolean, .type, .back, .swipe:
@@ -4168,6 +4855,27 @@ actor VisionCaptureToolLoop {
                 ? "The action was not sent. The follow-up read could not provide current choices. Choose observe before choosing another action."
                 : "The action was not sent. The follow-up read provided these current choices. Choose again without retrying a refused target.")
         }
+        if let refusedObservedTapBeforeDispatch {
+            body["outcome"] = .string("not_dispatched_reobserved")
+            body["is_error"] = .bool(true)
+            body["dispatch_attempted"] = .bool(false)
+            body["observation_outcome"] = .string(result.isError ? "unavailable" : "succeeded")
+            body["refusal"] = .object([
+                "code": .string(refusedObservedTapBeforeDispatch.reasonCode
+                    ?? "CACHE_ACTION_CAPABILITY_INVALID"),
+                "reason": .string("live_target_not_actionable"),
+            ])
+            var originalProof: [String: JSONValue] = [
+                "verdict": .string("failed"), "action": .string("tap"),
+            ]
+            if let reason = refusedObservedTapBeforeDispatch.reason {
+                originalProof["reason"] = .string(reason)
+            }
+            body["proof"] = .object(originalProof)
+            body["instruction"] = .string(result.isError
+                ? "The chosen target changed before dispatch, so the tap was not sent. Current choices are unavailable. Choose observe and make a new decision."
+                : "The chosen target changed before dispatch, so the tap was not sent. That exact action is withheld while this screen remains unchanged. Continue other requested checks using the freshly read choices.")
+        }
         if let deliveredFailure {
             body["outcome"] = .string("failed_reobserved")
             body["is_error"] = .bool(true)
@@ -4242,6 +4950,7 @@ actor VisionCaptureToolLoop {
             progressed: progressed && verifiedProgress && body["delivery_unknown"] != .bool(true),
             successfulReadOnlyObservation:
                 (intent.operation == .observe || reobservedBeforeDispatch || expiredBeforeDispatch != nil
+                    || refusedObservedTapBeforeDispatch != nil
                     || deliveredFailure != nil || observationRefreshed
                     || verifiedTypingProof != nil) && !result.isError)
     }
@@ -4417,6 +5126,49 @@ actor VisionCaptureToolLoop {
         }
         return values.sorted { lhs, rhs in
             ((try? lhs.encoded()) ?? "") < ((try? rhs.encoded()) ?? "")
+        }
+    }
+
+    /// Removes aliases for the same observed control before public choice IDs
+    /// are allocated. Public facts remain part of the identity, so controls at
+    /// different positions or with different selection state stay distinct.
+    static func deduplicatedDecisionActions(
+        _ actions: [JSONValue],
+        facts: VisionCaptureScreenFacts?
+    ) -> [JSONValue] {
+        var seen: Set<String> = []
+        return actions.enumerated().compactMap { offset, value in
+            guard case .object(let object) = value,
+                  case .string(let selector)? = object["selector"],
+                  case .string(let role)? = object["role"] else {
+                return value
+            }
+            let selectorKind: String?
+            if case .string(let kind)? = object["selector_kind"] {
+                selectorKind = kind
+            } else {
+                selectorKind = nil
+            }
+            let displayLabel: String?
+            if case .string(let label)? = object["label"] {
+                displayLabel = label
+            } else {
+                displayLabel = nil
+            }
+            var identity = object
+            identity.removeValue(forKey: "requires_validation")
+            if let target = facts?.semanticTargetIdentity(
+                selector: selector,
+                role: role,
+                selectorKind: selectorKind,
+                displayLabel: displayLabel,
+                position: object["position"]) {
+                identity.removeValue(forKey: "selector")
+                identity.removeValue(forKey: "selector_kind")
+                identity["_private_observed_target"] = .integer(Int64(target))
+            }
+            let key = (try? JSONValue.object(identity).encoded()) ?? "unencodable:\(offset)"
+            return seen.insert(key).inserted ? value : nil
         }
     }
 
@@ -4647,7 +5399,7 @@ actor VisionCaptureToolLoop {
     /// Describe-screen publishes editable elements separately from the cache
     /// action manifest. Keep existing label/identifier choices and explicitly proven
     /// placeholder metadata, publishing only selectors that identify one element.
-    private static func returnedEditableFields(
+    static func returnedEditableFields(
         from root: JSONValue
     ) -> [PublishedEditableField] {
         var elements: [JSONValue] = []
@@ -4674,7 +5426,9 @@ actor VisionCaptureToolLoop {
                     in: .whitespacesAndNewlines)
                 guard !selector.isEmpty,
                       selector.utf8.count <= 512,
-                      selector != "[REDACTED]" else {
+                      selector != "[REDACTED]",
+                      !(selectorKind == "identifier"
+                        && selector.lowercased().hasSuffix(".root")) else {
                     continue
                 }
                 candidates.append(PublishedEditableField(
@@ -4730,9 +5484,23 @@ actor VisionCaptureToolLoop {
                     && $0.selectorKind == candidate.selectorKind
             }.count == 1
         }
-        return unambiguous.sorted { lhs, rhs in
+        let priority = ["identifier": 0, "label": 1, "placeholder": 2]
+        var seenElements: Set<EditableElementIdentity> = []
+        let oneSelectorPerElement = unambiguous.sorted { lhs, rhs in
+            let leftPriority = priority[lhs.selectorKind] ?? Int.max
+            let rightPriority = priority[rhs.selectorKind] ?? Int.max
+            if leftPriority != rightPriority { return leftPriority < rightPriority }
+            if lhs.selector != rhs.selector { return lhs.selector < rhs.selector }
+            return lhs.role < rhs.role
+        }.filter { field in
+            guard let elementID = field.elementID else { return true }
+            return seenElements.insert(EditableElementIdentity(
+                elementID: elementID, role: field.role)).inserted
+        }
+        return oneSelectorPerElement.sorted { lhs, rhs in
             if lhs.selectorKind != rhs.selectorKind {
-                return lhs.selectorKind < rhs.selectorKind
+                return (priority[lhs.selectorKind] ?? Int.max)
+                    < (priority[rhs.selectorKind] ?? Int.max)
             }
             if lhs.selector != rhs.selector {
                 return lhs.selector < rhs.selector
@@ -4891,12 +5659,32 @@ actor VisionCaptureToolLoop {
             proof["verdict"] == .string("verified") else {
             return
         }
+        if let completed = VerifiedTypingAction(intent) {
+            verifiedTypingActions.insert(completed)
+        }
         switch intent.operation {
         case .tap, .setBoolean, .type, .back, .swipe:
             appendJourneyEvent(.action(JourneyAction(intent, readableLabel: resolvedJourneyLabel)))
         case .launch, .observe, .screenshot:
             break
         }
+    }
+
+    private static func explicitlyRequestsRepeatedTyping(
+        userPrompt: String,
+        text: String
+    ) -> Bool {
+        let prompt = userPrompt.lowercased()
+        let typedText = text.lowercased()
+        guard !typedText.isEmpty, prompt.contains(typedText),
+              !prompt.contains("do not repeat"),
+              !prompt.contains("don't repeat"),
+              !prompt.contains("never repeat") else { return false }
+        let words = prompt.split { !$0.isLetter && !$0.isNumber }
+        if words.contains(where: { $0 == "repeat" || $0 == "twice" || $0 == "again" }) {
+            return true
+        }
+        return prompt.contains("two times") || prompt.contains("2 times")
     }
 
     private func recordScreenObservation(from root: JSONValue) throws {
@@ -4951,7 +5739,7 @@ actor VisionCaptureToolLoop {
                 .map(Self.journeyActionDescription)
                 .joined(separator: " -> ")
             currentJourneyHint =
-                "The same observed screen content returned after these recent verified actions: \(recent)."
+                "This screen returned after these verified actions: \(recent). Compare it with the unfinished user goal. Continue any missing save or verification step; otherwise move to the next requested check. Do not repeat an action whose result is already proven."
         } else if previousContentIdentity != contentIdentity {
             currentJourneyHint = nil
         }
@@ -5000,9 +5788,10 @@ actor VisionCaptureToolLoop {
     }
 
     private func rememberRejectedBeforeSubmissionProposal(
-        _ intent: NavigationIntent
+        _ intent: NavigationIntent,
+        screen suppliedScreen: NavigationScreenScope? = nil
     ) {
-        guard let screen = currentNavigationScreenScope else { return }
+        guard let screen = suppliedScreen ?? currentNavigationScreenScope else { return }
         let proposal = RejectedBeforeSubmissionProposal(
             screen: screen,
             action: RejectedNavigationAction(intent))
@@ -5298,12 +6087,13 @@ actor VisionCaptureToolLoop {
               outcome["scope"] == .string("dispatch"),
               outcome["reason_code"] == .string("DISPATCH_REJECTED_BEFORE_SUBMISSION"),
               let target = interactionEvidence["target"]?.objectValue,
-              target["actual_event_recipient_observed"] == .bool(false),
-              target["status"] == .string("unavailable"),
-              target["reason_code"] == .string("TARGET_UNAVAILABLE") else {
+              target["actual_event_recipient_observed"] == .bool(false) else {
             return false
         }
-        return true
+        return (target["status"] == .string("unavailable")
+                    && target["reason_code"] == .string("TARGET_UNAVAILABLE"))
+            || (target["status"] == .string("ambiguous")
+                    && target["reason_code"] == .string("TARGET_AMBIGUOUS"))
     }
 
     private static func validateReturnedIdentityFields(
@@ -5409,13 +6199,20 @@ actor VisionCaptureToolLoop {
               currentSystemAlert == nil, staleActionConfirmation == nil,
               let signature = currentScreenSignature,
               let facts = currentScreenFacts else { return nil }
-        var actions = Self.sanitizedActions(
-            eligibleOfferedActions(currentManifest.actions), facts: facts)
+        let publishedActions = eligibleOfferedActions(currentManifest.actions).filter { action in
+            !facts.isLowValueSoftwareKeyboardControl(
+                selector: action.selector,
+                role: action.role,
+                displayLabel: action.displayLabel,
+                position: action.displayPosition)
+        }
+        var actions = Self.sanitizedActions(publishedActions, facts: facts)
         if let offered = offeredTapCandidates, offered.signature == signature {
             for candidate in offered.candidates {
                 guard !currentManifest.actions.contains(where: {
                     $0.selector == candidate.selector && $0.role == candidate.role
-                }) else { continue }
+                }), !facts.isLowValueSoftwareKeyboardControl(
+                    selector: candidate.selector, role: candidate.role) else { continue }
                 let intent = NavigationIntent(
                     operation: .tap, selector: candidate.selector, selectorKind: nil,
                     role: candidate.role, desiredState: nil, text: nil)
@@ -5428,6 +6225,7 @@ actor VisionCaptureToolLoop {
                 actions.append(.object(object))
             }
         }
+        actions = Self.deduplicatedDecisionActions(actions, facts: facts)
         let fields = Self.sanitizedEditableFields(currentEditableFields, facts: facts)
         return (actions, fields, facts.summary(availableActions: actions, editableFields: fields))
     }

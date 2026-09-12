@@ -100,6 +100,22 @@ import Testing
         #expect(conversation.beginTurn(text: "two")?.index == 1)
     }
 
+    @Test func anInterruptedToolSpanStaysVisibleWithoutEnteringTheKV() {
+        var conversation = AppConversation()
+        _ = conversation.beginTurn(text: "original goal")
+
+        conversation.interruptUncommittedTurn(
+            text: "Interrupted before the proposed action was sent.",
+            stopReason: .cancelled)
+
+        #expect(conversation.turns.map(\.role) == [.user, .assistant])
+        #expect(conversation.turns[1].stopReason == .cancelled)
+        #expect(conversation.committedTurns == 0)
+        #expect(conversation.kvTokens == nil)
+        #expect(conversation.isLineageLost)
+        #expect(!conversation.canSend)
+    }
+
     @Test func alostLineageKeepsTheTranscriptAndRefusesEverySend() throws {
         var conversation = AppConversation()
         _ = conversation.beginTurn(text: "one")

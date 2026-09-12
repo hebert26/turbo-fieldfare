@@ -39,6 +39,30 @@ import Testing
     }
 
     @MainActor
+    @Test func runningAgentQueuesInstructionAndStopRestoresItsText() {
+        let model = AppModel()
+        model.setAgentModeEnabled(true)
+        model.runState = .running
+        model.promptText = "Do not test the speak button"
+
+        #expect(model.canSendAgentInstruction)
+        #expect(model.canSubmitPrompt)
+        model.submitPrompt()
+
+        #expect(model.promptText.isEmpty)
+        #expect(model.isAgentInstructionPending)
+        #expect(model.isCancellationPending)
+        #expect(model.canCancel)
+
+        model.promptText = "Later draft"
+        model.cancel()
+
+        #expect(!model.isAgentInstructionPending)
+        #expect(model.promptText
+            == "Do not test the speak button\n\nLater draft")
+    }
+
+    @MainActor
     @Test func disablingTopKNeutralizesBothTruncationControls() throws {
         let model = AppModel()
         model.modelPathText = FileManager.default.temporaryDirectory.path

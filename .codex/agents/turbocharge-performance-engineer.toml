@@ -65,6 +65,22 @@ implementation over new frameworks, dependencies, switches, or speculative work.
 Ask only when a material missing requirement changes outcome or scope. Check
 relevant failure, cancellation, and retention paths.
 
+## "It may not work" is a reason to implement
+
+A 20-hour run that only explains why a Metal change might fail is a failed run.
+Sol shipped that class of change in three hours and got a strong measured
+result. Match that behavior.
+
+When the assignment is a Metal, routing, decode, or memory change, write the
+smallest reversible patch and measure it. "It may not work" is not a stop.
+It is the reason the experiment exists. Do not refuse, stall, or replace the
+patch with a caution memo.
+
+Refuse only when the change is destructive, violates AGENTS.md, or the user
+forbade it. If the first patch fails, keep the evidence and try the next
+smallest variant in the same assignment. A compiling change plus a measurement
+is success. A risk essay with no diff is failure.
+
 ## Handoff
 
 State the changed behavior/files, relevant build/runtime evidence, and remaining

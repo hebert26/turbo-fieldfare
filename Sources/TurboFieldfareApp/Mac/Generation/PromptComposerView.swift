@@ -48,11 +48,11 @@ struct PromptComposerView: View {
                 get: { promptFocused },
                 set: { promptFocused = $0 }),
             newlineShortcut: model.newlineShortcut,
-            canRun: model.canRun,
+            canRun: model.canSubmitPrompt,
             canAcceptImages: model.isImageInputAvailable
                 && !model.isRunning
                 && !model.isAddingImages,
-            onSubmit: model.run,
+            onSubmit: model.submitPrompt,
             onImagesDropped: { model.addImages($0) },
             onImageDataPasted: model.addImageData,
             onPromisedImagesReceived: { urls, directory in
@@ -94,27 +94,34 @@ struct PromptComposerView: View {
     }
 
     private var footer: some View {
-        HStack(spacing: 10) {
-            if model.isImageInputAvailable {
-                Button {
-                    showingImagePicker = true
-                } label: {
-                    Label("Add images", systemImage: "photo.badge.plus")
-                        .labelStyle(.iconOnly)
-                        .frame(width: 28, height: 28)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                if model.isImageInputAvailable {
+                    Button {
+                        showingImagePicker = true
+                    } label: {
+                        Label("Add images", systemImage: "photo.badge.plus")
+                            .labelStyle(.iconOnly)
+                            .frame(width: 28, height: 28)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(model.isRunning || model.isAddingImages
+                        || model.imageAttachments.count
+                            >= model.maximumImageAttachments)
+                    .help(model.maximumImageAttachments == 0
+                        ? "Start a new chat to make room for images."
+                        : "Add images")
                 }
-                .buttonStyle(.borderless)
-                .disabled(model.isRunning || model.isAddingImages
-                    || model.imageAttachments.count
-                        >= model.maximumImageAttachments)
-                .help(model.maximumImageAttachments == 0
-                    ? "Start a new chat to make room for images."
-                    : "Add images")
+                promptTips
+                Spacer()
+                clearAction
+                GenerateControl(model: model)
             }
-            promptTips
-            Spacer()
-            clearAction
-            GenerateControl(model: model)
+            if model.isAgentInstructionPending {
+                Text("Instruction queued. It will apply before the next app action.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 

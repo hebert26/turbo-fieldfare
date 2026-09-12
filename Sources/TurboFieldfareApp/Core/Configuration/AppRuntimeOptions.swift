@@ -118,6 +118,8 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         case 32: "32, +1.61 GB"
         case 48: "48, +3.22 GB"
         case 64: "64, +4.84 GB"
+        case 96: "96, +8.06 GB"
+        case 128: "128, +11.29 GB"
         default: "\(slots)"
         }
     }

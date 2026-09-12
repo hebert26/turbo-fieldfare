@@ -1,9 +1,0 @@
-{
-  "name": "visionos-pi-extensions",
-  "private": true,
-  "type": "module",
-  "description": "Runtime npm dependencies for the project-local pi extensions in .pi/extensions/.",
-  "dependencies": {
-    "yaml": "^2.8.1"
-  }
-}

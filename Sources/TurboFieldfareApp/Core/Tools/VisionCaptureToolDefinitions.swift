@@ -59,40 +59,10 @@ enum VisionCaptureToolDefinitions {
                         "type": .string("string"),
                         "minLength": .integer(1),
                         "description": .string(
-                            "For type only. Inserts text without clearing the field; repeating it may duplicate text."),
+                            "For type only. Text is appended. To replace a nonempty value, tap an offered clear control first."),
                     ]),
                 ]),
                 "required": .array([.string("action")]),
-            ])),
-        AppToolDefinition(
-            name: historyReadName,
-            description: """
-            Read one page of archived QA evidence referenced by the task checkpoint. This does not
-            inspect or control the current screen, renew choices, or authorize an app action. Copy
-            observation_id from the checkpoint. For later pages, copy next_cursor unchanged. A
-            partial page does not prove a complete historical claim.
-            """,
-            parameters: .object([
-                "type": .string("object"), "additionalProperties": .bool(false),
-                "properties": .object([
-                    "observation_id": .object([
-                        "type": .string("string"), "minLength": .integer(1),
-                        "maxLength": .integer(64),
-                        "description": .string("An observation reference from the task checkpoint."),
-                    ]),
-                    "cursor": .object([
-                        "type": .string("object"), "additionalProperties": .bool(false),
-                        "description": .string("Copy the complete next_cursor from the previous page unchanged."),
-                        "properties": .object([
-                            "task_id": .object(["type": .string("string")]),
-                            "observation_id": .object(["type": .string("string")]),
-                            "sha256": .object(["type": .string("string")]),
-                            "offset_utf8": .object(["type": .string("integer"), "minimum": .integer(1)]),
-                        ]),
-                        "required": .array(["task_id", "observation_id", "sha256", "offset_utf8"].map(JSONValue.string)),
-                    ]),
-                ]),
-                "required": .array([.string("observation_id")]),
             ])),
     ]
 }
