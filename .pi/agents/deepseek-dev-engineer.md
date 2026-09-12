@@ -1,9 +1,9 @@
 ---
-name: dev-engineer
+name: deepseek-dev-engineer
 description: General-purpose development agent for coding, debugging, testing
 tools: read,grep,find,ls,edit,write,bash
-model: openai-codex/gpt-5.6-luna
-thinking: max
+model: deepseek/deepseek-v4-pro
+thinking: xhigh
 auto-exit: true
 ---
 

@@ -1,9 +1,9 @@
 ---
 name: senior-dev-engineer
 description: Senior TurboFieldfare implementation worker. Makes bounded Swift and Metal changes in the owning module, preserves runtime and wire-contract boundaries, and reports focused validation. Use when a scoped implementation change is ready to be written.
-tools: read,grep,find,ls,edit,write,bash
-model: openai-codex/gpt-5.6-terra
-thinking: xhigh
+tools: read,grep,find,ls,edit,write,bash,team_join,team_propose_split,team_submit_plan,team_submit_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
+model: openai-codex/gpt-5.6-sol
+thinking: high
 auto-exit: true
 ---
 

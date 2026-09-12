@@ -1,9 +1,9 @@
 ---
-name: pi-engineer
+name: deepseek-pi-engineer
 description: Pi framework specialist for project-local agents
 tools: read,grep,find,ls,edit,write,bash,team_join,team_propose_split,team_submit_plan,team_submit_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
-model: openai-codex/gpt-5.6-terra
-thinking: medium
+model: deepseek/deepseek-v4-flash
+thinking: xhigh
 auto-exit: true
 ---
 

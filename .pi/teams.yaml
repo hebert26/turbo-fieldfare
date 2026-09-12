@@ -3,12 +3,19 @@ teams:
   turbo-high:
     mode: implementation
     members:
-      - agent: expert-cache-notes
-        duties: [implementation]
+      # Implement the assigned change against the agreed requirements.
+      # Keep changes focused and report what changed and how it was verified.
       - agent: senior-dev-engineer
         duties: [implementation]
-      - agent: worker
-        duties: [review]
+      # Implement a separate, explicitly assigned part of the work.
+      # Coordinate file ownership and preserve other agents' edits to avoid conflicts.
+      - agent: deepseek-dev-engineer
+        duties: [implementation]
+      # Independently review the delivered code for defects, regressions, and quality.
+      # Report evidence, severity, and recommended fixes; never modify the code.
+      # Configuration issue: "code reviews" is not supported by the current team parser.
+      - agent: deepseek-evaluator
+        duties: [verification]
   smoke-test:
     mode: smoke-test
     members:
