@@ -1,3 +1,0 @@
-  PID  PPID STARTED                       ELAPSED  %CPU    RSS      VSZ COMMAND
-30726     1 Mon Sep  7 16:31:39 2026     02:22:58   0.1  41232 435839584 /Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareMac
-30791     1 Mon Sep  7 16:32:00 2026     02:22:37   0.0   9360 441558368 /Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareDecodeService --socket /private/tmp/turbofieldfare-decode-502.30726.1394b307-1df3-45cd-90ad-c56ef5f717f3.sock --launch-label com.turbofieldfare.decode.502.30726.1394b307-1df3-45cd-90ad-c56ef5f717f3

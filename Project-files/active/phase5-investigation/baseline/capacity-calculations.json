@@ -1,9 +1,0 @@
-{
-  "expert_stride_bytes": 3358720,
-  "expert32_bytes": 3224371200,
-  "expert16_bytes": 1612185600,
-  "all_routed_bytes": 12897484800,
-  "kv_64k_bytes": 1609236480,
-  "kv_formula": "25*1304*8*256*2*2 + 5*65536*2*512*2*2",
-  "common_weights_bytes": 1353771068
-}

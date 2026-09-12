@@ -1,50 +1,42 @@
-# !IMPORTANT
-You should infer the user's intent and task scope from the instructions and prior conversation context. Your job is to bias towards action and carry the user's intended task to completion.
+# Working with Hebert
 
-Hebert as dislexia and find extrimily dificult to read, please take this into  consideration when working and creating summaries, Hebert also live complex concepts to be explained using image @image gen
+Hebert has dyslexia. Use short, clear paragraphs and everyday language. Explain technical terms when needed. Use images for complex explanations when helpful or requested.
 
-When the user expresses intent to perform new work or fix an existing issue, persist until the user's intended goal is complete. Progress autonomously towards the user's goal
+- State each fact once. Describe the outcome, why it matters, and the next step.
+- End each response with the most important conclusion or next action.
+- Use lists only when they make information easier to scan.
+- Avoid jargon, decorative headings, canned phrases, analogies, and contrastive slogans.
+- Write agent messages as clearly as user-facing responses.
 
-The user's instructions take precedence over guidelines provided in a skill. If explicit user instructions conflict with a skill's instructions, prioritize the user's instructions.
+## Scope and execution
 
-If a skill or documents, ADR causes you to ask for permission or confirmation, pause, leave requested work unfinished, or diverge from the user's intent, name and link to the exact SKILL.md file you read, quote the relevant instruction, and briefly explain how it applies. Distinguish explicit skill requirements from your interpretation of guidelines.
-
-Default to using clear, concise paragraphs, each developing one main idea. Use lists only when the information is genuinely parallel, sequential, or easier to compare, and avoid nested lists unless the hierarchy cannot be expressed clearly in prose. Use plain, simple language: familiar words, concrete examples, and precise verbs. Prefer active voice and direct statements.
-
-Make sure to state the main point clearly and early, then develop it with the explanation and detail the reader needs. Let each sentence build on what came before. Develop the points that matter and provide enough support to be useful.
-
-Avoid using slop words or phrases like "Bottom Line:" in conclusions, "delve," "foster," "leverage," "it's worth noting," "importantly," "Question? Answer." or "This isn't about X. It's about Y.", "genuinely" or hyphenated compound descriptions and adjectives. Do not use concluding summary statements such as "In short:..", "The simplest mental model is:...".
-
-State the intended action directly. Avoid adding what you won't do, what will remain unchanged, or how you'll separate or categorize results. Do not use contrastive framing such as "X, not Y" or "X—not Y" that introduces an unprompted alternative that the user didn't ask about. Avoid invented compound labels like "exact-head checks" and "editorial-row layouts", vague qualifiers, and canned transitions; use plain verbs and prepositions to state the actual relationship directly.
-
-avoid at all cost wasting tokens on un related work, such writing unitest or validation that no one asked.
-
-Messages that you send to other agents and your final answer may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.
-
-
-if you need to open a document, such .html please use safari
-
-Thanks so much,for helping to build this product.
+- Infer the task from the current request and relevant conversation. Complete authorized work without repeatedly asking for permission.
+- Keep changes within scope. Preserve others' edits and avoid unrelated cleanup or tests.
+- Follow explicit user instructions over skill guidelines. If a skill or project rule blocks requested work, link to it, quote the relevant instruction, and explain the blocker.
+- Use verification proportionate to the change. Do not claim completion without evidence.
+- Open HTML and other browser-viewed documents in Safari.
 
 ## Delegated work
 
-Use the main task as the coordinator and native Codex subagents for concrete, independent assignments whenever delegation can save time or improve quality. This is the default workflow for this project.
+- Coordinate concrete, independent assignments through native Codex subagents when useful. Create separate sidebar tasks only when explicitly requested.
+- Give each agent a bounded task, exact file ownership, relevant context, and an observable completion condition. Remind agents that the workspace is shared and others' edits must be preserved.
+- Reuse existing agents for related work. Review their changes and evidence before reporting completion. Do not leave required delegated work outstanding.
+- Coordinate model runs across the team so only one model process runs at a time.
+- Create persistent goals only on explicit request. Use a thread heartbeat for requested scheduled follow-ups, preserving deadlines and stop conditions. Notify only on meaningful progress, completion, failure, or required user action.
 
-- Start named subagents with `collaboration.spawn_agent` so their activity appears inside the main task and can be inspected in the app. Use clear names describing the assignment, such as `turbocharge_phase1_engineer`. Create a separate sidebar task only when the user explicitly requests one.
-- Give each subagent a bounded assignment, the relevant context, exact files or responsibilities it owns, and an observable completion condition. Tell agents they share the workspace, must preserve others' edits, and must coordinate overlapping changes.
-- The main agent owns the overall outcome, continues useful independent work, answers the user, reviews returned changes and evidence, and combines the results into one concise response. Delegate additional independent assignments when useful, including from a subagent.
-- Reuse existing subagents for related work through `collaboration.followup_task`. Use `collaboration.send_message` for updates during their work and `collaboration.wait_agent` to wait efficiently for results. Do not end with required delegated work still outstanding.
-- Follow the existing scope and model-process rules across the whole team. Coordinate model runs so only one agent runs a model process at a time. Keep verification proportionate to the requested change.
-- Create a persistent goal only when the user explicitly requests one. For requested scheduled follow-ups or continued work later, use a heartbeat automation attached to the main task. Preserve any requested deadline and stop conditions, reuse existing agents, and notify only on meaningful progress, completion, failure, or required user action. A screenshot of a previous goal or schedule does not authorize starting another one.
+## Project file location
 
-## Document location
+The destination for all new project-related files is:
 
-Always save project documents in the main project at `/Users/dev-machine/dev/turbo-fieldfare-personal`, including documents produced by subagents working in a worktree.
+`/Users/dev-machine/Documents/Idea Home/turboCharge/`
 
-- Save new plans, reports, trackers, briefs, diagrams, and other documents under `/Users/dev-machine/dev/turbo-fieldfare-personal/docs/`, using the existing folder structure. Keep supporting images and other document assets there too. Update existing documents at their established path inside the main project.
-- Do not create or switch to a worktree for document work. If already working in a worktree, use the absolute main-project path when reading, creating, or editing documents. Do not save document deliverables in `.codex/worktrees`, temporary folders, or outside the main project.
-- Include this rule and the exact absolute document destination in every delegated assignment that produces or edits documents. The main agent must check the saved location before reporting completion.
-- Link to the document in the main project when reporting results. If that location is unavailable, report the blocker instead of silently choosing another location.
+- Save every new project-related file here unless Hebert explicitly specifies another path. This includes Markdown, HTML, images, plans, reports, trackers, briefs, and diagrams. Reuse existing subject folders and documents.
+- The full `Project-files` folder belongs at `/Users/dev-machine/Documents/Idea Home/turboCharge/Project-files/`, preserving its internal structure.
+- Do not default new document deliverables to this repository's `docs/`, `Project-files/`, a worktree, or a temporary folder.
+- Existing source code, repository instructions/configuration, and app assets may be read and updated at their current paths. This rule does not request moving the existing source checkout.
+- Honor explicit user-specified paths. Do not create a worktree for document work.
+- Include the exact destination in delegated assignments that create files. Verify the saved location and link to that file when reporting completion.
+- If library access is blocked, report the actual error rather than silently saving elsewhere.
 
 # TurboFieldfare
 
@@ -61,7 +53,7 @@ contract. `Sources/TurboFieldfare/` is the runtime; `Sources/TurboFieldfareRepac
 `Sources/TurboFieldfareCLI/`, `Sources/TurboFieldfareServer/`, and
 `Sources/TurboFieldfareApp/` contain the installer, CLI, loopback server, and
 Mac app.
-`Tests/` contains focused public tests; `docs/` contains design, benchmark, and experiment notes.
+`Tests/` contains focused public tests. Existing `docs/` files provide repository references; new user-facing documents belong in the library above.
 
 ```bash
 swift run -c release TurboFieldfareRepack --output scratch/gemma4.gturbo

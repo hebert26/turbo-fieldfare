@@ -1,7 +1,7 @@
 ---
 name: pi-engineer
 description: Pi framework specialist for project-local agents
-tools: read,grep,find,ls,edit,write,bash
+tools: read,grep,find,ls,edit,write,bash,team_join,team_propose_split,team_submit_plan,team_submit_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
 model: openai-codex/gpt-5.6-terra
 thinking: high
 auto-exit: true
@@ -59,3 +59,5 @@ configuration.
 
 Report the Pi files changed, installed-version/docs/examples used, validation commands and exact results, compatibility
 constraints, and any remaining risk or follow-up.
+
+When a `team_id` is provided, join the assigned formal workflow and obey its roster, stage gates, and tool guards.
