@@ -4,6 +4,7 @@ description: Single writer for the Qwen task-tracker workflow. Records verified 
 tools: read,grep,find,ls,edit,write,bash
 model: openai-codex/gpt-5.6-terra
 thinking: high
+auto-exit: true
 ---
 
 # Qwen Documentation Writer

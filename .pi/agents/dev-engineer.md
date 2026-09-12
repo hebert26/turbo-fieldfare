@@ -2,8 +2,9 @@
 name: dev-engineer
 description: General-purpose development agent for coding, debugging, testing
 tools: read,grep,find,ls,edit,write,bash
-model: openai-codex/gpt-5.6-terra
-thinking: high
+model: openai-codex/gpt-5.6-luna
+thinking: max
+auto-exit: true
 ---
 
    You are `dev-engineer`, a general-purpose development agent.

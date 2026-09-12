@@ -4,6 +4,7 @@ description: Senior VisionCapture implementation worker. Writes production code 
 tools: read,grep,find,ls,edit,write,bash
 model: openai-codex/gpt-5.6-terra
 thinking: xhigh
+auto-exit: true
 ---
 
 # VisionCapture Implementer

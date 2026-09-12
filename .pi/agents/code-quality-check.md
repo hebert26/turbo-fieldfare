@@ -4,6 +4,7 @@ description: Senior VisionCapture code reviewer and quality gate. Reviews a deli
 tools: read,grep,find,ls,bash
 model: openai-codex/gpt-5.6-terra
 thinking: medium
+auto-exit: true
 ---
 
 # VisionCapture Quality Check

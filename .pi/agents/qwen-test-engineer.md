@@ -4,6 +4,7 @@ description: Qwen training verification worker. Adds focused regression tests an
 tools: read,grep,find,ls,edit,write,bash
 model: openai-codex/gpt-5.6-terra
 thinking: high
+auto-exit: true
 ---
 
 # Qwen Training Test Engineer

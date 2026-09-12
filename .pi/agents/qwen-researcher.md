@@ -4,6 +4,7 @@ description: Read-only Qwen training investigator. Traces the requested behavior
 tools: read,grep,find,ls,bash
 model: openai-codex/gpt-5.6-luna
 thinking: high
+auto-exit: true
 ---
 
 # Qwen Training Researcher

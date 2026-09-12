@@ -4,6 +4,7 @@ description: Qwen training implementation worker. Makes the smallest approved so
 tools: read,grep,find,ls,edit,write,bash
 model: openai-codex/gpt-5.6-terra
 thinking: high
+auto-exit: true
 ---
 
 # Qwen Training Implementation Engineer

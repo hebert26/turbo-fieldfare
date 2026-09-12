@@ -4,6 +4,7 @@ description: Pi framework specialist for project-local agents
 tools: read,grep,find,ls,edit,write,bash
 model: openai-codex/gpt-5.6-terra
 thinking: high
+auto-exit: true
 ---
 
 # Pi Framework Engineer

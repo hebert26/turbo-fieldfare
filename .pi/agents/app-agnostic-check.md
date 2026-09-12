@@ -4,6 +4,7 @@ description: Enforces VisionCapture's app-agnostic rule. Scans a bounded change 
 tools: read,grep,find,ls,bash
 model: openai-codex/gpt-5.6-terra
 thinking: medium
+auto-exit: true
 ---
 
 # VisionCapture App-Agnostic Check

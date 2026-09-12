@@ -4,6 +4,7 @@ description: VisionCapture technical lead. Owns decisions, task decomposition, b
 tools: read,grep,find,ls,bash
 model: openai-codex/gpt-5.6-sol
 thinking: xhigh
+auto-exit: true
 ---
 
 # VisionCapture Team Lead

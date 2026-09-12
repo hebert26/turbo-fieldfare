@@ -1,0 +1,24 @@
+version: 1
+teams:
+  turbo-high:
+    mode: implementation
+    members:
+      - agent: pair-driver
+        duties: [implementation]
+      - agent: pair-navigator
+        duties: [plan_review]
+      - agent: pair-navigator
+        duties: [initial_review_luna]
+      - agent: pair-initial-terra
+        duties: [initial_review_terra]
+      - agent: pair-initial-terra
+        duties: [verification]
+  smoke-test:
+    mode: smoke-test
+    members:
+      - agent: smoke-luna
+        duties: [implementation]
+      - agent: smoke-luna
+        duties: [plan_review, initial_review_luna]
+      - agent: smoke-luna
+        duties: [initial_review_terra, verification]

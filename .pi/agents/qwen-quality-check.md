@@ -4,6 +4,7 @@ description: Independent Qwen training reviewer. Reviews a bounded implementatio
 tools: read,grep,find,ls,bash
 model: openai-codex/gpt-5.6-terra
 thinking: medium
+auto-exit: true
 ---
 
 # Qwen Training Quality Check
