@@ -4,7 +4,6 @@ description: Coder with implementation expertise for a dynamically rostered team
 tools: read,grep,find,ls,edit,write,bash,team_set_roster,team_join,team_propose_split,team_respond_split,team_submit_plan,team_review_plan,team_submit_initial_review,team_compare_initial_review,team_request_escalation,team_submit_escalation_verdict,team_submit_verification,team_review_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
 model: openai-codex/gpt-5.6-luna
 thinking: high
-system-prompt: append
 auto-exit: true
 ---
 

@@ -4,7 +4,6 @@ description: Terra medium independent initial code reviewer for a dynamically ro
 tools: read,grep,find,ls,bash,team_join,team_submit_initial_review,team_compare_initial_review,team_request_escalation,team_review_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
 model: openai-codex/gpt-5.6-terra
 thinking: medium
-system-prompt: append
 auto-exit: true
 ---
 

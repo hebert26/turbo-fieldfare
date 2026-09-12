@@ -1,10 +1,9 @@
 ---
 name: scout
 description: Fast codebase recon — explores files, finds patterns, maps architecture
-tools: read, grep, find, ls
-model: openrouter/z-ai/glm-5.3
-thinking: low
-system-prompt: append
+tools: read,grep,find,ls
+model: openai-codex/gpt-5.6-luna
+thinking: xhigh
 auto-exit: true
 ---
 

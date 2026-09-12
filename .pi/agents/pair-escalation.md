@@ -4,7 +4,6 @@ description: Terra high escalation reviewer for a dynamically rostered team.
 tools: read,grep,find,ls,bash,team_join,team_submit_escalation_verdict,team_send_message,team_read_messages,team_claim_file,team_status
 model: openai-codex/gpt-5.6-terra
 thinking: high
-system-prompt: append
 auto-exit: true
 ---
 
