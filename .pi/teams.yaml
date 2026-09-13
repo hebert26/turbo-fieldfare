@@ -3,25 +3,41 @@ teams:
   turbo-high:
     mode: implementation
     members:
-      # Implement the assigned change against the agreed requirements.
-      # Keep changes focused and report what changed and how it was verified.
+      # implementation owns the production change; lead owns coordination and task accountability.
+      # The lead duty is optional, never an approval duty, and never mandatory in a preset.
       - agent: senior-dev-engineer
-        duties: [implementation]
-      # Implement a separate, explicitly assigned part of the work.
-      # Coordinate file ownership and preserve other agents' edits to avoid conflicts.
-      - agent: deepseek-dev-engineer
-        duties: [implementation]
-      # Independently review the delivered code for defects, regressions, and quality.
-      # Report evidence, severity, and recommended fixes; never modify the code.
-      # Configuration issue: "code reviews" is not supported by the current team parser.
+        duties: [implementation, lead]
+      # Own the plan review and the Luna initial review.
+      # Can cover implementation (which cascades the review duties to terra-general) and verification.
+      - agent: deepseek-pair-navigator
+        duties: [plan_review, initial_review]
+        can_cover: [implementation, verification]
+      # Own the Terra initial review and the single verification.
+      # The implementation owner never holds an approval duty.
       - agent: deepseek-evaluator
-        duties: [verification]
+        duties: [initial_review, verification]
+        can_cover: [plan_review]
+      # Unit-test contributor. A contributor duty, not an approval duty: it takes test work from
+      # the owner's split and works during the implementation stage only.
+      - agent: luna-test-engineer
+        duties: [unit_test]
   smoke-test:
     mode: smoke-test
     members:
-      - agent: smoke-luna
+      - agent: deepseek-smoke
         duties: [implementation]
-      - agent: smoke-luna
-        duties: [plan_review, initial_review_luna]
-      - agent: smoke-luna
-        duties: [initial_review_terra, verification]
+      - agent: deepseek-smoke
+        duties: [plan_review, initial_review]
+  observability:
+    mode: implementation
+    members:
+      - agent: obs-lead
+        duties: [implementation, lead]
+      - agent: obs-explorer
+        duties: [plan_review, initial_review]
+        can_cover: [verification]
+      - agent: obs-verifier
+        duties: [initial_review, verification]
+        can_cover: [plan_review]
+      - agent: obs-tester
+        duties: [unit_test]

@@ -1,7 +1,7 @@
 ---
 name: deepseek-evaluator
 description: Read-only code reviewer and code-quality checker for TurboFieldfare; reports evidence-backed defects, regressions, and maintainability issues without making changes
-tools: read,grep,find,ls,bash,team_join,team_send_message,team_read_messages,team_finish,team_status
+tools: read,grep,find,ls,bash,team_join,team_respond_split,team_review_plan,team_submit_initial_review,team_compare_initial_review,team_review_verification,team_send_message,team_read_messages,team_finish,team_status
 model: deepseek/deepseek-v4-pro
 thinking: xhigh
 auto-exit: true
