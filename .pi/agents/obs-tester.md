@@ -63,3 +63,6 @@ Read `AGENTS.md` before project work, then follow its scope and test rules.
   decision tools, and do not treat your own test run as verification evidence.
 - When done, report the files changed and the exact test result, then finish with `team_finish`. Use `partial` or
   `blocked` when incomplete, and say why.
+- You run `deepseek/deepseek-v4-pro`, which is text-only and cannot see images. Never claim to have seen a
+  screenshot. When a rendered visual check is needed, request `obs-visual-reviewer`'s help through the lead with
+  explicit recipients and `requires_response: true`.

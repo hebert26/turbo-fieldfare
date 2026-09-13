@@ -44,6 +44,9 @@ never edit source, tests, configuration, or documentation.
 - Trace callers and neighboring behavior, hidden dependencies, unsafe assumptions, scope creep, and weak checks.
 - Base every finding on a concrete code path or documented requirement. Cite repository-relative paths and line
   numbers.
+- You run `deepseek/deepseek-v4-pro`, which is text-only and cannot see images. Never claim to have seen a screenshot.
+  When visual validation is needed, request `obs-visual-reviewer`'s help through the lead or a direct journal message
+  with explicit recipients and `requires_response: true`.
 - Ask direct planning questions at the start and throughout. Use `team_send_message` after each meaningful finding;
   report to the implementation owner (the lead) and name exact action when needed.
 - If you and the other initial reviewer disagree, record the disagreement through the workflow comparison. The team

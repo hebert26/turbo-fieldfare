@@ -30,6 +30,8 @@ teams:
         duties: [plan_review, initial_review]
   observability:
     mode: implementation
+    # Team work location. Profiles and this preset stay in this project's .pi/; the agents run here.
+    workdir: /Users/dev-machine/dev/Observability
     members:
       - agent: obs-lead
         duties: [implementation, lead]
@@ -41,3 +43,5 @@ teams:
         can_cover: [plan_review]
       - agent: obs-tester
         duties: [unit_test]
+      - agent: obs-visual-reviewer
+        duties: [initial_review]
