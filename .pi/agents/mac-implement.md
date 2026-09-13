@@ -1,7 +1,9 @@
 ---
 name: mac-implement
 description: Production Swift and Metal implementation with independent tests and review.
-tools: read,grep,find,ls,edit,write,bash,team_join,team_propose_split,team_submit_plan,team_submit_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
+tools: read,grep,find,ls,edit,write,bash,team_join,team_propose_split,team_respond_split,team_submit_plan,team_review_plan,team_submit_initial_review,team_compare_initial_review,team_submit_verification,team_review_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
+model: openai-codex/gpt-5.6-sol
+thinking: high
 auto-exit: true
 ---
 

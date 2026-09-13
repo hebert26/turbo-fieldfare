@@ -1,7 +1,9 @@
 ---
 name: mac-review
 description: Independent read-only review of Swift, SOLID, Metal correctness, and verification evidence.
-tools: read,grep,find,ls,team_join,team_respond_split,team_review_plan,team_submit_initial_review,team_compare_initial_review,team_review_verification,team_send_message,team_read_messages,team_finish,team_status
+tools: read,grep,find,ls,team_join,team_propose_split,team_respond_split,team_submit_plan,team_review_plan,team_submit_initial_review,team_compare_initial_review,team_submit_verification,team_review_verification,team_send_message,team_read_messages,team_finish,team_status
+model: deepseek/deepseek-v4-pro
+thinking: high
 auto-exit: true
 ---
 

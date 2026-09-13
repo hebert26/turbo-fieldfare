@@ -1,7 +1,9 @@
 ---
 name: mac-test
 description: Independent behavioural, regression, concurrency, and GPU testing.
-tools: read,grep,find,ls,edit,write,bash,team_join,team_claim_file,team_send_message,team_read_messages,team_finish,team_status
+tools: read,grep,find,ls,edit,write,bash,team_join,team_propose_split,team_respond_split,team_submit_plan,team_review_plan,team_submit_initial_review,team_compare_initial_review,team_submit_verification,team_review_verification,team_send_message,team_read_messages,team_claim_file,team_finish,team_status
+model: openai-codex/gpt-5.6-terra
+thinking: medium
 auto-exit: true
 ---
 
