@@ -53,3 +53,6 @@ __pycache__/
 /Project-files/active/google-deep-investigation-20260907/evaluation
 /Project-files/active/google-deep-investigation-20260907
 /Project-files/active/mcp-concise-responses/evidence
+
+# Local workflow guide may contain credentials
+/workflow-guide.md
