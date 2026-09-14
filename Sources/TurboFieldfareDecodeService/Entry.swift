@@ -83,10 +83,19 @@ enum DecodeServiceError: Error, CustomStringConvertible {
                         // out of the decode loop and the turn is rewound.
                         client.stop()
                     }
+                    if case .shutdown = command {
+                        // Shutdown is read on this dedicated thread while the
+                        // main loop may still be awaiting generation. Stop that
+                        // work now instead of queuing teardown behind it.
+                        client.stop()
+                    }
                     commands.append(command)
                     if case .shutdown = command { break }
                 }
             } catch {
+                // EOF is the normal app-close path. There may be no shutdown
+                // frame if the process exited between close and write.
+                client.stop()
                 commands.close()
             }
         }

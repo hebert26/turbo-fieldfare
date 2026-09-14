@@ -40,7 +40,8 @@ import Testing
 
     @MainActor
     @Test func runningAgentQueuesInstructionAndStopRestoresItsText() {
-        let model = AppModel()
+        let client = MockLifecycleInferenceClient()
+        let model = AppModel(client: client)
         model.setAgentModeEnabled(true)
         model.runState = .running
         model.promptText = "Do not test the speak button"
@@ -60,6 +61,8 @@ import Testing
         #expect(!model.isAgentInstructionPending)
         #expect(model.promptText
             == "Do not test the speak button\n\nLater draft")
+        #expect(client.terminationCounts().cancellations == 1,
+                "Stop must interrupt a prefill or tool wait immediately")
     }
 
     @MainActor
@@ -264,6 +267,43 @@ import Testing
         #expect(model.promptText == "next draft")
         #expect(model.outputConversationPlainText.hasPrefix(
             "You:\noriginal prompt\n\nAnswer:\n"))
+    }
+
+    @MainActor
+    @Test func existingChatCanBeClearedWithoutDiscardingANewDraft() {
+        let model = AppModel()
+        model.outputText = "finished answer"
+        model.promptText = "unsent follow-up"
+
+        #expect(model.canStartNewChat,
+                "a draft hid the only direct new-chat control")
+        model.newChat()
+
+        #expect(!model.hasOutputTranscript)
+        #expect(model.promptText == "unsent follow-up")
+    }
+
+    @MainActor
+    @Test func newChatIsUnavailableDuringGeneration() {
+        let model = AppModel()
+        model.outputText = "partial answer"
+        model.runState = .running
+
+        #expect(!model.canStartNewChat)
+    }
+
+    @MainActor
+    @Test func terminationStopsAndShutsDownLifecycleClientOnce() {
+        let client = MockLifecycleInferenceClient()
+        let model = AppModel(client: client)
+        model.runState = .running
+
+        model.shutdownForTermination()
+        model.shutdownForTermination()
+
+        let counts = client.terminationCounts()
+        #expect(counts.cancellations == 1)
+        #expect(counts.shutdowns == 1)
     }
 
     @MainActor

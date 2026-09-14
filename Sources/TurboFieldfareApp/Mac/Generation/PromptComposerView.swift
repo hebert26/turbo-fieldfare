@@ -114,7 +114,8 @@ struct PromptComposerView: View {
                 }
                 promptTips
                 Spacer()
-                clearAction
+                newChatAction
+                clearInputAction
                 GenerateControl(model: model)
             }
             if model.isAgentInstructionPending {
@@ -209,8 +210,25 @@ struct PromptComposerView: View {
         }
     }
 
+    private var newChatAction: some View {
+        Button {
+            model.newChat()
+        } label: {
+            Label("New Chat", systemImage: "trash")
+                .labelStyle(.iconOnly)
+                .frame(width: 28, height: 28)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.borderless)
+        .disabled(!model.canStartNewChat)
+        .accessibilityIdentifier("new-chat-button")
+        .accessibilityLabel("New Chat")
+        .accessibilityHint("Clears the current chat and starts a new one")
+        .help("Clear this chat and start a new one")
+    }
+
     @ViewBuilder
-    private var clearAction: some View {
+    private var clearInputAction: some View {
         if !model.isRunning
             && (!model.promptText.isEmpty || !model.imageAttachments.isEmpty) {
             Button {
@@ -226,17 +244,6 @@ struct PromptComposerView: View {
             }
             .buttonStyle(.borderless)
             .help("Clear text and images")
-        } else if !model.isRunning && model.hasOutputTranscript {
-            Button {
-                model.newChat()
-            } label: {
-                Label("New chat", systemImage: "trash")
-                    .labelStyle(.iconOnly)
-                    .frame(width: 28, height: 28)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.borderless)
-            .help("Start a new chat")
         }
     }
 }

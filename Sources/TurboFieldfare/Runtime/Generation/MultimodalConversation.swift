@@ -1165,12 +1165,8 @@ public actor MultimodalConversation {
                 }
             if captureToolFailureEvidence { originalStopReason = String(describing: result.reason) }
             if let structuredError { throw structuredError }
-            try decoder?.finish()
-            if decoder != nil,
-               (result.reason == .toolCalls) != !calls.isEmpty {
-                decoder?.captureFailure(phase: "stop_call_mismatch")
-                throw GemmaToolCallParserError.malformed
-            }
+            try Self.validateStructuredCompletion(
+                decoder, stopReason: result.reason, hasToolCalls: !calls.isEmpty)
         } catch let generationError {
             decoder?.refreshToolCallPreview()
             if let decoder { onStructuredProgress?(decoder.progress) }
@@ -1310,6 +1306,23 @@ public actor MultimodalConversation {
         return StructuredConversationTurnResult(
             turn: turnResult,
             toolCalls: calls)
+    }
+
+    /// A user stop can land inside a tool span that is valid so far but not
+    /// complete. Treating that intentional boundary as malformed replaced the
+    /// Stop result with a parser error. Natural model endings still require a
+    /// complete structure and matching tool-call stop.
+    static func validateStructuredCompletion(
+        _ decoder: StructuredAssistantDecoder?,
+        stopReason: StopReason,
+        hasToolCalls: Bool
+    ) throws {
+        guard let decoder, stopReason != .cancelled else { return }
+        try decoder.finish()
+        guard (stopReason == .toolCalls) == hasToolCalls else {
+            decoder.captureFailure(phase: "stop_call_mismatch")
+            throw GemmaToolCallParserError.malformed
+        }
     }
 
     private struct EncodedTurn {

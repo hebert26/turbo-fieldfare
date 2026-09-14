@@ -1,8 +1,8 @@
 ---
-name: scout
+name: scout-luna
 description: Fast codebase recon — explores files, finds patterns, maps architecture
 tools: read,grep,find,ls
-model: xai/grok-4.6
+model: openai-codex/gpt-5.6-luna
 thinking: xhigh
 auto-exit: true
 ---

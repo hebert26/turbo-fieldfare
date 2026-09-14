@@ -9,6 +9,8 @@ final class MockLifecycleInferenceClient: AppModelLifecycleClient, @unchecked Se
     private var unloadContinuations: [CheckedContinuation<Void, Never>] = []
     private var unloadStartedCount = 0
     private var loadStartedCount = 0
+    private var cancellationCount = 0
+    private var terminationShutdownCount = 0
     private var loadStateHandlers: [@Sendable (AppModelLoadState) -> Void] = []
     private var nextLoadFailure: AppInferenceError?
     private(set) var ensureLoadedCalls: [(URL, Int, AppRuntimeOptions, Bool)] = []
@@ -68,7 +70,23 @@ final class MockLifecycleInferenceClient: AppModelLifecycleClient, @unchecked Se
         }
     }
 
-    func cancel() {}
+    func cancel() {
+        lock.lock()
+        cancellationCount += 1
+        lock.unlock()
+    }
+
+    func shutdownForTermination() {
+        lock.lock()
+        terminationShutdownCount += 1
+        lock.unlock()
+    }
+
+    func terminationCounts() -> (cancellations: Int, shutdowns: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (cancellationCount, terminationShutdownCount)
+    }
 
     func releaseUnloads() {
         let continuations: [CheckedContinuation<Void, Never>]

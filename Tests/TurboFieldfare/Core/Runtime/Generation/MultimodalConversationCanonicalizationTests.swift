@@ -116,6 +116,45 @@ struct MultimodalConversationCanonicalizationTests {
         #expect(message.toolCalls[0].name == call.name)
     }
 
+    @Test("User stop accepts an unfinished tool span without a malformed error")
+    func cancelledStructuredCompletionMayBeIncomplete() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let decoder = StructuredAssistantDecoder(
+            tokenizer: tokenizer,
+            allowedTools: ["inspect"])
+        _ = try decoder.consume(tokenID: tokenizer.toolCallStartID, delta: "")
+
+        try MultimodalConversation.validateStructuredCompletion(
+            decoder, stopReason: .cancelled, hasToolCalls: false)
+    }
+
+    @Test("Natural structured endings still reject an unfinished tool span")
+    func nonCancelledStructuredCompletionMustBeComplete() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let decoder = StructuredAssistantDecoder(
+            tokenizer: tokenizer,
+            allowedTools: ["inspect"])
+        _ = try decoder.consume(tokenID: tokenizer.toolCallStartID, delta: "")
+
+        #expect(throws: GemmaToolCallParserError.self) {
+            try MultimodalConversation.validateStructuredCompletion(
+                decoder, stopReason: .endOfTurn, hasToolCalls: false)
+        }
+    }
+
+    @Test("Tool-call stops still require a parsed call")
+    func toolCallStopMustMatchParsedCalls() async throws {
+        let tokenizer = try await GFTokenizer.load()
+        let decoder = StructuredAssistantDecoder(
+            tokenizer: tokenizer,
+            allowedTools: ["inspect"])
+
+        #expect(throws: GemmaToolCallParserError.self) {
+            try MultimodalConversation.validateStructuredCompletion(
+                decoder, stopReason: .toolCalls, hasToolCalls: false)
+        }
+    }
+
     @Test("Full tool history keeps visible fields and strips historical thought text")
     func fullToolHistoryCanonicalizesVisibleContent() async throws {
         let tokenizer = try await GFTokenizer.load()

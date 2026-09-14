@@ -160,8 +160,9 @@ public final class AppModel {
     /// its own QA checklist unfinished. A second such answer stays visibly
     /// incomplete instead of looping.
     private var agentChecklistContinuationUsed = false
-    /// Agent Mode Stop must reach the decode service after decode begins so
-    /// the service can settle and commit the turn at a token boundary.
+    /// Once decode has produced output, Agent Mode can stop at a token boundary
+    /// and commit that partial turn. Before then, explicit Stop cancels the task
+    /// immediately so prefill or a tool wait cannot leave the UI stuck.
     private var agentCancellationIssued = false
     private var loadTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
@@ -200,6 +201,7 @@ public final class AppModel {
     private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
     private var activeRunRuntimeKey: AppLoadedRuntimeKey?
     private var hasHandledTerminalEvent = false
+    private var hasShutDownForTermination = false
     private let memorySampler: AppMemorySampler
     private let settingsPersistenceEnabled: Bool
     private let installETAClock: SuspendingClock
@@ -494,6 +496,12 @@ public final class AppModel {
             || !conversation.isEmpty
             || !outputPromptText.isEmpty || !outputImageAttachments.isEmpty
             || !outputText.isEmpty || !outputAgentActivities.isEmpty
+    }
+
+    /// The composer and Cmd+N share this gate, so a draft cannot hide the only
+    /// direct way to clear an existing chat.
+    public var canStartNewChat: Bool {
+        !isRunning && hasOutputTranscript
     }
 
     public var shouldShowPromptExamples: Bool {
@@ -1870,6 +1878,24 @@ public final class AppModel {
         attachmentStore.removeAll()
     }
 
+    /// Stops live work and drops the decode-service transport without awaiting
+    /// GPU or model teardown on the main actor. Safe to call more than once as
+    /// AppKit can reach termination through both window-close and Quit paths.
+    public func shutdownForTermination() {
+        guard !hasShutDownForTermination else { return }
+        hasShutDownForTermination = true
+        runTask?.cancel()
+        loadTask?.cancel()
+        installTask?.cancel()
+        visionInstallTask?.cancel()
+        unloadTask?.cancel()
+        installer.cancel()
+        visionInstaller.cancel()
+        client.cancel()
+        (client as? any AppModelLifecycleClient)?.shutdownForTermination()
+        releaseAllAttachments()
+    }
+
     /// Memory comes from the process doing the work: the decode service when
     /// there is one, this process otherwise.
     private func sampleLiveMemory() {
@@ -2217,6 +2243,14 @@ public final class AppModel {
         isCancellationPending = true
         if agentModeEnabled {
             issueAgentCancellationAtTokenBoundaryIfReady()
+            if !agentCancellationIssued {
+                // There is no safe output boundary during prefill or while an
+                // external tool is running. An explicit Stop values prompt UI
+                // response over committing an unfinished agent step.
+                agentCancellationIssued = true
+                runTask?.cancel()
+                client.cancel()
+            }
         } else {
             client.cancel()
         }

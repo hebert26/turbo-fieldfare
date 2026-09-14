@@ -28,12 +28,10 @@ enum AppModelLocation {
         if let executableURL,
            let root = packageRoot(startingAt: executableURL.deletingLastPathComponent(),
                                   fileExists: fileExists) {
-            return root.appendingPathComponent("scratch/gemma4.gturbo", isDirectory: true)
-                .standardizedFileURL
+            return checkoutModelURL(packageRoot: root)
         }
         if let root = packageRoot(startingAt: currentDirectoryURL, fileExists: fileExists) {
-            return root.appendingPathComponent("scratch/gemma4.gturbo", isDirectory: true)
-                .standardizedFileURL
+            return checkoutModelURL(packageRoot: root)
         }
         return applicationSupportURL
             .appendingPathComponent("TurboFieldfare", isDirectory: true)
@@ -46,6 +44,16 @@ enum AppModelLocation {
             return url.standardizedFileURL
         }
         return base.appendingPathComponent(url.path, isDirectory: true).standardizedFileURL
+    }
+
+    private static func checkoutModelURL(packageRoot: URL) -> URL {
+        // Development checkouts commonly link scratch to the canonical install
+        // in Application Support. Use the real text-model location so the
+        // adjacent vision companion is checked against its receipt-bound path,
+        // rather than checking that same directory through a symlink alias.
+        packageRoot.appendingPathComponent("scratch/gemma4.gturbo", isDirectory: true)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
     }
 
     private static func packageRoot(startingAt start: URL,

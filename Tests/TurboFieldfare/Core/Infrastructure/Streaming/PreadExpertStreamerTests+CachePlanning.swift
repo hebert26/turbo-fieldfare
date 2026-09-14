@@ -148,4 +148,83 @@ extension PreadExpertStreamerTests {
     #expect(plan == nil)
   }
 
+  @Test func duplicateResidentExpertsUseLowestDistinctSlots() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 4)
+
+    _ = try streamer.loadExpertsCached(experts: [2, 2])
+
+    let oneCopy = streamer.planExpertsCached(experts: [2])
+    #expect(oneCopy.assignedSlots == [0])
+    #expect(oneCopy.misses.isEmpty)
+
+    let bothCopies = streamer.planExpertsCached(experts: [2, 2])
+    #expect(bothCopies.assignedSlots == [0, 1])
+    #expect(bothCopies.hits == 2)
+    #expect(bothCopies.misses.isEmpty)
+  }
+
+  @Test func failedBatchDoesNotPublishSuccessfulSiblingAsCached() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
+
+    let failingPlan = streamer.planExpertsCached(experts: [0, Self.numExperts])
+    #expect(throws: Error.self) {
+      _ = try streamer.executeExpertCachePlan(failingPlan)
+    }
+
+    let replan = streamer.planExpertsCached(experts: [0])
+    #expect(replan.hits == 0)
+    #expect(replan.misses == [0])
+    let loaded = try streamer.executeExpertCachePlan(replan)
+    let got = Self.bytes(of: loaded[0].buffer, offset: 0, count: Self.expertStride)
+    #expect(got.allSatisfy { $0 == Self.tagByte(0) })
+  }
+
+  @Test(arguments: [ExpertCachePolicy.lfu, .lru])
+  func cachePoliciesPreserveRecentlyAndFrequentlyUsedExpert(
+    policy: ExpertCachePolicy
+  ) throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2, cachePolicy: policy)
+
+    _ = try streamer.loadExpertsCached(experts: [0, 1])
+    _ = try streamer.loadExpertsCached(experts: [0])
+
+    let replacement = streamer.planExpertsCached(experts: [2])
+    #expect(replacement.assignedSlots == [1])
+    #expect(replacement.misses == [0])
+    _ = try streamer.executeExpertCachePlan(replacement)
+
+    let resident = streamer.planExpertsCached(experts: [0, 2])
+    #expect(resident.hits == 2)
+    #expect(resident.misses.isEmpty)
+  }
+
+  @Test func emptyRequestAndFullyProtectedSmallCacheNeedNoReplacement() throws {
+    let url = try Self.writeSyntheticLayer()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let device = try MetalContext().device
+    let streamer = try PreadExpertStreamer(
+      layout: Self.makeLayout(path: url.path), device: device, slotCount: 2)
+
+    let empty = streamer.planExpertsCached(experts: [])
+    #expect(empty == ExpertCachePlan(experts: [], assignedSlots: [], misses: [], hits: 0))
+    #expect(try streamer.executeExpertCachePlan(empty).isEmpty)
+
+    _ = try streamer.loadExpertsCached(experts: [0, 1])
+    let unavailable = streamer.planExpertsCachedIfPossible(
+      experts: [2], avoidingSlots: [0, 1])
+    #expect(unavailable == nil)
+  }
+
 }

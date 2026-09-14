@@ -13,6 +13,10 @@ public protocol AppModelLifecycleClient: AnyObject, AppInferenceClient {
                       options: AppRuntimeOptions, forceLogitsHead: Bool,
                       onState: @escaping @Sendable (AppModelLoadState) -> Void) async throws
     func unload() async
+    /// Releases this client's transport and any private service it launched.
+    /// This must not wait for model teardown because app termination calls it
+    /// from the main actor.
+    func shutdownForTermination()
     /// Ends the current conversation and opens `epoch` as the only lineage the
     /// inference side will accept turns for. The model stays loaded.
     ///
@@ -20,6 +24,10 @@ public protocol AppModelLifecycleClient: AnyObject, AppInferenceClient {
     /// would keep appending a new chat's turns onto the previous chat's KV, and
     /// nothing downstream could detect it.
     func resetConversation(epoch: UUID) async throws
+}
+
+extension AppModelLifecycleClient {
+    public func shutdownForTermination() {}
 }
 
 public protocol AppInferenceMemoryReporting: AnyObject {

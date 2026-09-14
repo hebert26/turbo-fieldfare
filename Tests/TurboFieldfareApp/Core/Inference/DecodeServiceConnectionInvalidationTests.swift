@@ -1,8 +1,29 @@
 import Foundation
 import Testing
 @testable import TurboFieldfareAppCore
+import TurboFieldfareDecodeProtocol
 
 @Suite struct DecodeServiceConnectionInvalidationTests {
+    @Test func terminationSendsShutdownAndDropsConnectionImmediately() throws {
+        let commands = Pipe()
+        let responses = Pipe()
+        let client = DecodeServiceInferenceClient(
+            testInput: commands.fileHandleForWriting,
+            responseOutput: responses.fileHandleForReading)
+
+        client.shutdownForTermination()
+
+        #expect(!client.connectionIsInstalled)
+        let command = try DecodeFrameCodec.read(
+            DecodeServiceCommand.self,
+            from: commands.fileHandleForReading)
+        guard case .shutdown = command else {
+            Issue.record("termination did not send the shutdown command")
+            return
+        }
+        try? responses.fileHandleForWriting.close()
+    }
+
     @Test func lostResetAcknowledgementDiscardsTheDeadConnection() async throws {
         let commands = Pipe()
         let responses = Pipe()

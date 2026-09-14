@@ -11,7 +11,7 @@ private final class ForegroundAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor static var model: AppModel?
 
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { Self.model?.releaseAllAttachments() }
+        MainActor.assumeIsolated { Self.model?.shutdownForTermination() }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -71,6 +71,11 @@ struct TurboFieldfareMacApp: App {
         .defaultSize(width: 1040, height: 720)
         .windowResizability(.contentMinSize)
         .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("New Chat", action: model.newChat)
+                    .keyboardShortcut("n", modifiers: .command)
+                    .disabled(!model.canStartNewChat)
+            }
             CommandGroup(replacing: .appInfo) {
                 Button("About TurboFieldfare") {
                     NSApp.orderFrontStandardAboutPanel(

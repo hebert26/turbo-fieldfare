@@ -549,6 +549,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         try? write(.cancel, to: handles.input, expecting: handles.responses)
     }
 
+    /// Disconnects synchronously but only requests launchd cleanup. Waiting for
+    /// `bootout` here froze the main actor when the window closed during a run.
+    public func shutdownForTermination() {
+        invalidateConnection()
+    }
+
     deinit {
         let state = connection.withLock { value -> Connection in
             defer { value = Connection() }
@@ -819,8 +825,10 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         process.arguments = ["bootout", "gui/\(getuid())/\(label)"]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        // Do not wait here. This path is used by app termination and transport
+        // failure handling; launchd owns the process cleanup once the request
+        // has been accepted.
         try? process.run()
-        process.waitUntilExit()
     }
 
     private static func defaultServiceURL() -> URL {
