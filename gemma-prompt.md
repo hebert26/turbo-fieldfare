@@ -88,3 +88,8 @@ established by the current screenshot and screen read as unknown.
   unresolved outcomes, recent useful text, and the current screen instead.
 - Recovery details already supplied by the current decision packet.
 - Task-specific bans from the standing product prompt. Those remain in the exact user task and checkpoint.
+
+
+
+
+Okay, this mine is opened. I want you to go to Home and then go to Bookmarks. Then try to add a bookmark. For that, I need you to, I think there is already a tag called Swift Data. Select that one. If it is not there, please create. And also to add the bookmark, the only thing that you need to do is just type the URL, because the title and the note, they will be auto-generated. Once you do that, stop and create a report. By the way, you can use any, any URL, but it does need to exist.
