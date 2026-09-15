@@ -3,12 +3,49 @@ teams:
   mac-engineering:
     mode: implementation
     members:
-      - agent: mac-implement
+      - agent: mac-implementer
         duties: [implementation, lead]
-      - agent: mac-review
-        duties: [plan_review, initial_review, verification]
-      - agent: mac-test
+      - agent: mac-worker-luna
+        duties: []
+      - agent: mac-plan-review
+        duties: [plan_review]
+      - agent: mac-test-terra
         duties: [unit_test]
+      - agent: mac-review
+        duties: [initial_review, verification]
+  mac-engineering-light:
+    mode: implementation
+    members:
+      - agent: mac-worker-luna
+        duties: [implementation, lead]
+      - agent: mac-plan-review-flash
+        duties: [plan_review]
+      - agent: mac-test-flash
+        duties: [unit_test]
+      - agent: mac-review
+        duties: [initial_review, verification]
+  mac-engineering-standard:
+    mode: implementation
+    members:
+      - agent: mac-worker-terra
+        duties: [implementation, lead]
+      - agent: mac-plan-review-flash
+        duties: [plan_review]
+      - agent: mac-test-flash
+        duties: [unit_test]
+      - agent: mac-review
+        duties: [initial_review, verification]
+  mac-engineering-complex:
+    mode: implementation
+    members:
+      - agent: mac-implementer
+        duties: [implementation, lead]
+      - agent: mac-plan-review
+        duties: [plan_review, verification]
+      - agent: mac-test-terra
+        duties: [unit_test]
+      - agent: mac-review
+        duties: [initial_review, verification]
   turbo-high:
     mode: implementation
     members:
