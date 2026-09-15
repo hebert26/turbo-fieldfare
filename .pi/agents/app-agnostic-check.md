@@ -30,7 +30,6 @@ If the changed-file list is missing, stop and request it. Do not sweep the whole
 ## Required context
 
 - Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` before project work.
-- Read `/Users/dev-machine/Dev/VisionOS/VisionCapture/AGENTS.md` for source work under `VisionCapture/`.
 - Read the full diff and the surrounding code, not only the changed lines.
 
 ## What counts as a violation

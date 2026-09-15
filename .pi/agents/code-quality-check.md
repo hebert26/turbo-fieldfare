@@ -30,9 +30,7 @@ guessing; a review without the expected behavior is not a review.
 
 ## Required context
 
-- Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` before project work.
-- Read `/Users/dev-machine/Dev/VisionOS/CONTEXT.md` before making project-specific claims.
-- Read `/Users/dev-machine/Dev/VisionOS/VisionCapture/AGENTS.md` for source work under `VisionCapture/`.
+- Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` and `CONTEXT.md` before making project-specific claims.
 - Read the nearest module `CONTEXT.md` and the accepted ADRs named by the brief.
 - Read the actual diff and the surrounding production code, not only the changed lines.
 

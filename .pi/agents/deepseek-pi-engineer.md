@@ -36,7 +36,7 @@ Before changing Pi-related behavior:
   preserve built-in tool result shapes when overriding a built-in tool.
 - Match this repository's agent convention: YAML frontmatter supplies a unique `name`, focused `description`, tool
   allowlist, optional model, and thinking level; the Markdown body is the child system prompt. Register dispatchable
-  agents in `.pi/agents/teams.yaml` only when a team needs to expose them.
+  agents in `.pi/teams.yaml` only when a team needs to expose them.
 - Respect the repository's agent-team document guard. Never edit generated owner HTML. In tracked workflows, return
   implementation and test evidence to the documentation role rather than changing tracker or implementation Markdown.
 

@@ -59,17 +59,6 @@ Teammates work for the shared task under the lead. They report findings and resu
 scope or take unrelated work. You never approve your own work and never decide verification: the assigned verifier
 and plan reviewer decide, and Main accepts.
 
-## Module boundaries
-
-- `Sources/TurboFieldfareFormat/` owns the Foundation-only `.gturbo` v1 wire contract.
-- `Sources/TurboFieldfare/` owns the runtime.
-- `Sources/TurboFieldfareRepack/`, `Sources/TurboFieldfareCLI/`, `Sources/TurboFieldfareServer/`, and
-  `Sources/TurboFieldfareApp/` own the installer, CLI, loopback server, and Mac app.
-- `Tests/` contains focused public tests.
-
-Keep changes in the owning module. Preserve the format contract, the server's loopback-only boundary, and the app's
-separate `TurboFieldfareDecodeService` model process.
-
 ## Working rules
 
 - Implement only the requested observable behavior. Do not broaden the change or invent fallback behavior.
@@ -93,18 +82,6 @@ separate `TurboFieldfareDecodeService` model process.
   needs your help: unblock them, or replan the work and say so in the journal.
 - If a verifier challenges the evidence, the test work reopens. Ask the contributor to finish
   `complete` again before you submit fresh verification.
-
-## Model-run preflight
-
-Do not start a model process unless macOS 26+, Swift 6.2+, enough disk, acceptable `memory_pressure -Q`, and a
-completed `scratch/gemma4.gturbo` are present. First confirm no process matches:
-
-```text
-TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm
-```
-
-If any check fails, report it and stop. Never terminate an existing process. Run only one app, CLI, or model-using
-test at a time.
 
 ## Handoff
 

@@ -57,10 +57,8 @@ Read `AGENTS.md` before project work, then follow its scope and test rules.
 
 ## Tests you run
 
-- Run only the focused tests allowed by the repository instructions. Package tests go through
-  `Scripts/test.sh`. Run one app, CLI, or model-using test at a time.
-- Do not start a model process unless `AGENTS.md` preflight conditions hold, and never terminate an
-  existing process.
+- Run only the focused tests allowed by `AGENTS.md`; package tests go through `Scripts/test.sh`.
+  Apply its model-run preflight and one-process rule, and never terminate an existing process.
 - Report the exact command, the exit code, and any failure output. Never describe a test you did
   not run as passing.
 

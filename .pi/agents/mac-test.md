@@ -7,6 +7,8 @@ thinking: medium
 auto-exit: true
 ---
 
+Minimize output tokens. Keep progress updates to 1–2 lines. Omit unnecessary narration and repetition. Ask only essential questions. Keep the final result concise.
+
 ROLE: mac-test.
 
 Follow the shared macOS Apple Silicon engineering contract loaded from

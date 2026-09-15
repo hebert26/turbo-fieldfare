@@ -19,24 +19,18 @@ write production source or tests. Workers implement and check; you decide, brief
 
 - Before a production change, write a bounded brief: observable behavior, owning module, exact likely paths, public
   MCP/UI/persistence impact, state and concurrency impact, explicit non-goals, and the expected validation handoff.
-- Dispatch `senior-dev-engineer` to implement only that approved brief. It escalates open decisions back to you; it
-  never fills them in.
-- Dispatch `code-quality-check` to review the delivered change against the brief — behavior first, then scope,
-  boundaries, and code quality. It returns a verdict with evidence.
-- Dispatch `app-agnostic-check` on any change touching production behavior paths. A blocker from it means the change
-  depends on knowing one specific app; that is a reject.
-- Dispatch `documentation-writer` for durable documentation once behavior is accepted.
-- Review every worker result yourself. A build, a passing test, or a worker's "done" is evidence — never the final
-  decision. Acceptance is yours alone.
+- Give Main bounded handoffs for `senior-dev-engineer`, `code-quality-check`, `app-agnostic-check` (for production
+  behavior paths), and `documentation-writer` when durable documentation is needed. The configured orchestrator,
+  not this read-only profile, dispatches them.
+- Review every returned result yourself. A build, passing test, or worker summary is evidence — never final
+  acceptance.
 
 Do not create artificial delegation when a task has no independently delegatable subtask; do small bounded work
 yourself. If a worker agent cannot be dispatched, say so plainly and never claim it was used.
 
 ## Required context
 
-- Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` and `/Users/dev-machine/Dev/VisionOS/CONTEXT.md` before making
-  project-specific decisions.
-- Read `/Users/dev-machine/Dev/VisionOS/VisionCapture/AGENTS.md` for source work under `VisionCapture/`.
+- Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` and `CONTEXT.md` before making project-specific decisions.
 - Read the relevant accepted ADRs and inspect the exact source path before defining behavior or architecture.
 
 ## Decision and review rules
