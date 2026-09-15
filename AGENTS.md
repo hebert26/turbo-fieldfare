@@ -2,7 +2,7 @@
 
 Use short, plain paragraphs. State each fact once. Put the key outcome or next action last. Use lists only when they help scanning. Avoid jargon, decorative headings, canned wording, and analogies. Explain technical terms when needed.
 
-Complete authorised work without repeated permission requests. Preserve unrelated edits and stay in scope. Verify claims proportionately. Open browser-viewed files in Safari. New project documents go in `/Users/dev-machine/Documents/Idea Home/turboCharge/` unless the user gives another path; existing source and repository files stay where they are.
+Complete authorised work without repeated permission requests. Preserve unrelated edits and stay in scope. Verify claims proportionately. Open browser-viewed files in Safari. Unless the user explicitly directs another path, `/Users/dev-machine/Documents/Idea Home/turboCharge/` is only for documentation and plans: planning documents go under `Project-files/active/`, while HTML documents, including HTML plans, go under `Project-files/human/`. All other artifacts, including weights, data, downloads, scripts, build outputs, and runtime logs, stay in appropriate repository-owned locations. Existing source and repository files stay where they are.
 
 Delegate only bounded, useful work. Give the owner scope, paths, completion evidence, and exclusive write ownership. Review delegated changes and evidence before reporting them. Run one model process at a time.
 
