@@ -2,9 +2,9 @@
 
 Use short, plain paragraphs. State each fact once. Put the key outcome or next action last. Use lists only when they help scanning. Avoid jargon, decorative headings, canned wording, and analogies. Explain technical terms when needed.
 
-Complete authorised work without repeated permission requests. Preserve unrelated edits and stay in scope. Verify claims proportionately. Open browser-viewed files in Safari. Unless the user explicitly directs another path, `/Users/dev-machine/Documents/Idea Home/turboCharge/` is only for documentation and plans: planning documents go under `Project-files/active/`, while HTML documents, including HTML plans, go under `Project-files/human/`. All other artifacts, including weights, data, downloads, scripts, build outputs, and runtime logs, stay in appropriate repository-owned locations. Existing source and repository files stay where they are.
+Complete authorised work without repeated permission requests. Preserve unrelated edits and stay in scope. Verify claims proportionately. Open browser-viewed files in Safari. Documentation and plans live at `/Users/dev-machine/dev/personal-project-documents/turboCharge/`. That folder moved from `/Users/dev-machine/Documents/Personal projects/turboCharge/`; use the new path from now on. Unless the user explicitly directs another path, that directory is only for documentation and plans: planning documents go under `Project-files/active/`, while HTML documents, including HTML plans, go under `Project-files/human/`. All other artifacts, including weights, data, downloads, scripts, build outputs, and runtime logs, stay in appropriate repository-owned locations. Existing source and repository files stay where they are.
 
-Delegate only bounded, useful work. Give the owner scope, paths, completion evidence, and exclusive write ownership. Review delegated changes and evidence before reporting them. Run one model process at a time.
+Delegate only bounded, useful work. Give the owner scope, paths, completion evidence, and exclusive write ownership. Review delegated changes and evidence before reporting them. Run one TurboFieldfare inference process at a time; Main may use parallel agent work for independent tasks.
 
 # TurboFieldfare
 

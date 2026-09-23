@@ -3,7 +3,7 @@ import TurboFieldfare
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 4
+    static let currentVersion = 5
 
     var version: Int = currentVersion
     var contextTokens: Int = AppContextLengthOption.eightK.tokens
@@ -20,7 +20,16 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var rdadvisePolicy: AppRDAdvicePolicy = .off
     var loadModelOnLaunch: Bool = false
     var agentModeEnabled: Bool = false
+    /// The original settings key remains the Gemma choice so old files and old
+    /// call sites retain exactly the same default and encoding.
     var toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled
+    var selectedModelID: AppModelID = AppModelCatalog.defaultID
+    var qwenToolThinkingEnabled: Bool = true
+
+    var gemmaToolThinkingEnabled: Bool {
+        get { toolThinkingEnabled }
+        set { toolThinkingEnabled = newValue }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case version
@@ -39,6 +48,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case loadModelOnLaunch
         case agentModeEnabled
         case toolThinkingEnabled
+        case selectedModelID
+        case qwenToolThinkingEnabled
     }
 
     init(version: Int = currentVersion,
@@ -56,7 +67,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
          agentModeEnabled: Bool = false,
-         toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled) {
+         toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled,
+         selectedModelID: AppModelID = AppModelCatalog.defaultID,
+         qwenToolThinkingEnabled: Bool = true) {
         self.version = version
         self.contextTokens = contextTokens
         self.expertCacheSlots = expertCacheSlots
@@ -73,6 +86,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.loadModelOnLaunch = loadModelOnLaunch
         self.agentModeEnabled = agentModeEnabled
         self.toolThinkingEnabled = toolThinkingEnabled
+        self.selectedModelID = selectedModelID
+        self.qwenToolThinkingEnabled = qwenToolThinkingEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -107,6 +122,28 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         toolThinkingEnabled = try container.decodeIfPresent(
             Bool.self,
             forKey: .toolThinkingEnabled) ?? GFTokenizer.toolThinkingEnabled
+        let selectedRaw = try container.decodeIfPresent(
+            String.self,
+            forKey: .selectedModelID)
+        selectedModelID = selectedRaw.flatMap(AppModelID.init(rawValue:))
+            ?? AppModelCatalog.defaultID
+        qwenToolThinkingEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .qwenToolThinkingEnabled) ?? true
+    }
+
+    func toolThinkingEnabled(for modelID: AppModelID) -> Bool {
+        switch modelID {
+        case .gemma4: toolThinkingEnabled
+        case .qwen3_6: qwenToolThinkingEnabled
+        }
+    }
+
+    mutating func setToolThinkingEnabled(_ enabled: Bool, for modelID: AppModelID) {
+        switch modelID {
+        case .gemma4: toolThinkingEnabled = enabled
+        case .qwen3_6: qwenToolThinkingEnabled = enabled
+        }
     }
 
     func isValid() -> Bool {
@@ -137,25 +174,20 @@ enum MacAppSettingsFileStore {
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 let data = try Data(contentsOf: fileURL)
-                // The version is read on its own, before the full decode, because
-                // nine keys decode with a hard `decode` and a newer build is
-                // entitled to have moved any of them. Decoding first threw on
-                // exactly the files this branch exists to protect, and the throw
-                // reached the `catch` below, which deletes the file - so an older
-                // build silently replaced a newer one's settings with its own
-                // defaults. A version gate that cannot survive a schema change
-                // gates nothing.
+                // Read the version before the full schema. A newer build may
+                // have renamed required keys, and trying the full decode first
+                // would reach the catch below and delete that newer file.
                 let stamp = try JSONDecoder().decode(VersionStamp.self, from: data)
-                // This build does not know what a later version means, so it runs
-                // on defaults and leaves the file exactly as its owner wrote it.
+                // This build cannot interpret later versions. Use defaults in
+                // memory while leaving the newer owner's file untouched.
                 guard stamp.version <= MacAppSettings.currentVersion else {
                     return MacAppSettings()
                 }
                 var settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
                 let needsMigration = settings.version < MacAppSettings.currentVersion
                 if needsMigration {
-                    // Version only: every existing value is still a deliberate
-                    // choice, and rewriting one here would silently discard it.
+                    // Existing values stay deliberate choices; only the schema
+                    // version and newly defaulted fields are added on rewrite.
                     settings.version = MacAppSettings.currentVersion
                 }
                 guard settings.isValid() else { throw InvalidSettings() }

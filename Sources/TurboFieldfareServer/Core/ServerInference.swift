@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import Synchronization
 import TurboFieldfare
 
 public enum ServerInferenceEvent: Equatable, Sendable {
@@ -356,16 +357,59 @@ struct StructuredOutputFailure: Error, CustomDebugStringConvertible, Sendable {
 public struct ServerPreparedRequest: Sendable {
     public let request: ValidatedChatRequest
     fileprivate let promptIDs: [Int32]?
+    fileprivate let knownPromptTokenCount: Int?
 
-    public var promptTokenCount: Int? { promptIDs?.count }
+    public var promptTokenCount: Int? { knownPromptTokenCount ?? promptIDs?.count }
 
-    init(request: ValidatedChatRequest, promptIDs: [Int32]? = nil) {
+    init(request: ValidatedChatRequest, promptIDs: [Int32]? = nil,
+         promptTokenCount: Int? = nil) {
         self.request = request
         self.promptIDs = promptIDs
+        self.knownPromptTokenCount = promptTokenCount
     }
 }
 
+public struct ServerModelIdentity: Sendable, Equatable {
+    public let apiModelID: String
+    public let family: LoadedRuntimeFamily
+    public let sourceRevision: String?
+    public let verifiedIdentity: LoadedRuntimeIdentity?
+
+    public static func resolve(
+        admission: ModelFamilyGenerationAdmission,
+        assertedModelID: String?
+    ) throws -> ServerModelIdentity {
+        switch admission.family {
+        case .gemma4:
+            return ServerModelIdentity(
+                apiModelID: assertedModelID ?? ServerArguments.legacyDefaultModelID,
+                family: .gemma4, sourceRevision: nil, verifiedIdentity: nil)
+        case .qwen3_6:
+            guard let verified = admission.verifiedIdentity else {
+                throw ServerArgumentError.invalid(
+                    "verified Qwen admission did not carry a descriptor identity")
+            }
+            if let assertedModelID, assertedModelID != verified.modelID {
+                throw ServerArgumentError.invalid(
+                    "--model-id does not match the verified descriptor model ID")
+            }
+            return ServerModelIdentity(
+                apiModelID: verified.modelID,
+                family: .qwen3_6,
+                sourceRevision: verified.sourceRevision,
+                verifiedIdentity: verified)
+        }
+    }
+}
+
+public struct LoadedServerModel: Sendable {
+    public let backend: any ServerInferenceBackend
+    public let identity: ServerModelIdentity
+    public let visionCapability: String
+}
+
 public protocol ServerInferenceBackend: Sendable {
+    var requestFamily: LoadedRuntimeFamily { get }
     func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest
     func generate(_ request: ValidatedChatRequest,
                   onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void) async throws -> ServerCompletion
@@ -374,6 +418,7 @@ public protocol ServerInferenceBackend: Sendable {
 }
 
 public extension ServerInferenceBackend {
+    var requestFamily: LoadedRuntimeFamily { .gemma4 }
     func prepare(_ request: ValidatedChatRequest) async throws -> ServerPreparedRequest {
         ServerPreparedRequest(request: request)
     }
@@ -383,6 +428,206 @@ public extension ServerInferenceBackend {
         onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
     ) async throws -> ServerCompletion {
         try await generate(prepared.request, onEvent: onEvent)
+    }
+}
+
+public enum ServerModelLoader {
+    public static func load(
+        modelDirectory: URL,
+        assertedModelID: String?,
+        maxContext: Int,
+        visionPackURL: URL?,
+        visionResidencyPolicy: VisionResidencyPolicy,
+        promptCacheMode: ServerPromptCacheMode,
+        runtimeConfiguration: RuntimeConfiguration
+    ) async throws -> LoadedServerModel {
+        let initialAdmission = try ModelFamilyGenerationSession.inspect(
+            directoryURL: modelDirectory)
+        switch initialAdmission.family {
+        case .gemma4:
+            let identity = try ServerModelIdentity.resolve(
+                admission: initialAdmission,
+                assertedModelID: assertedModelID)
+            let backend = try await ServerModelSession.load(
+                modelDirectory: modelDirectory,
+                maxContext: maxContext,
+                visionPackURL: visionPackURL,
+                visionResidencyPolicy: visionResidencyPolicy,
+                promptCacheMode: promptCacheMode,
+                runtimeConfiguration: runtimeConfiguration)
+            return LoadedServerModel(
+                backend: backend, identity: identity,
+                visionCapability: backend.visionCapability)
+        case .qwen3_6:
+            let session = try ModelFamilyGenerationSession.load(
+                directoryURL: modelDirectory,
+                maxContext: maxContext,
+                runtimeConfiguration: runtimeConfiguration,
+                visionPackURL: visionPackURL)
+            guard session.family == .qwen3_6,
+                  let loadedIdentity = session.verifiedIdentity else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+            let loadedAdmission = ModelFamilyGenerationAdmission(
+                family: session.family, verifiedIdentity: loadedIdentity)
+            let identity = try ServerModelIdentity.resolve(
+                admission: loadedAdmission,
+                assertedModelID: assertedModelID)
+            let capability = try ModelFamilyGenerationSession
+                .inspectQwenVisionCompanion(
+                    directoryURL: modelDirectory,
+                    loadedIdentity: loadedIdentity,
+                    visionPackURL: visionPackURL)
+                .rawValue
+            let driver = RealServerQwenGenerationDriver(
+                session: session,
+                modelDirectory: modelDirectory,
+                maxContext: maxContext,
+                visionPackURL: visionPackURL)
+            let backend = ServerQwenModelSession(
+                driver: driver,
+                visionResidencyPolicy: visionResidencyPolicy)
+            return LoadedServerModel(
+                backend: backend, identity: identity,
+                visionCapability: capability)
+        }
+    }
+}
+
+protocol ServerQwenGenerationDriver: Sendable {
+    func preflight(
+        _ request: ModelFamilyGenerationRequest
+    ) async throws -> ModelFamilyGenerationPreflight
+
+    func generate(
+        _ request: ModelFamilyGenerationRequest,
+        onEvent: @escaping @Sendable (ModelFamilyGenerationEvent) -> Void
+    ) async throws -> ModelFamilyGenerationResult
+}
+
+private struct RealServerQwenGenerationDriver: ServerQwenGenerationDriver {
+    let session: ModelFamilyGenerationSession
+    let modelDirectory: URL
+    let maxContext: Int
+    let visionPackURL: URL?
+
+    func preflight(
+        _ request: ModelFamilyGenerationRequest
+    ) async throws -> ModelFamilyGenerationPreflight {
+        try Task.checkCancellation()
+        let result = try ModelFamilyGenerationSession.preflightQwen(
+            directoryURL: modelDirectory,
+            prompt: request.prompt,
+            imagesByID: request.imagesByID,
+            visionPackURL: visionPackURL,
+            visionResidency: request.visionResidency,
+            maxContext: maxContext)
+        try Task.checkCancellation()
+        return result
+    }
+
+    func generate(
+        _ request: ModelFamilyGenerationRequest,
+        onEvent: @escaping @Sendable (ModelFamilyGenerationEvent) -> Void
+    ) async throws -> ModelFamilyGenerationResult {
+        try await session.generate(request, onEvent: onEvent)
+    }
+}
+
+public actor ServerQwenModelSession: ServerInferenceBackend {
+    public nonisolated let requestFamily = LoadedRuntimeFamily.qwen3_6
+
+    private let driver: any ServerQwenGenerationDriver
+    private let visionResidencyPolicy: VisionResidencyPolicy
+
+    init(
+        driver: any ServerQwenGenerationDriver,
+        visionResidencyPolicy: VisionResidencyPolicy = .onDemand
+    ) {
+        self.driver = driver
+        self.visionResidencyPolicy = visionResidencyPolicy
+    }
+
+    public func prepare(_ request: ValidatedChatRequest) async throws
+        -> ServerPreparedRequest {
+        do {
+            let preflight = try await driver.preflight(
+                try generationRequest(request))
+            return ServerPreparedRequest(
+                request: request, promptTokenCount: preflight.promptTokens)
+        } catch {
+            throw Self.requestError(error)
+        }
+    }
+
+    public func generate(
+        _ request: ValidatedChatRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        try await generate(try await prepare(request), onEvent: onEvent)
+    }
+
+    public func generate(
+        _ prepared: ServerPreparedRequest,
+        onEvent: @escaping @Sendable (ServerInferenceEvent) -> Void
+    ) async throws -> ServerCompletion {
+        let request = try generationRequest(prepared.request)
+        let output = Mutex((content: "", toolCalls: [ParsedToolCall]()))
+        let result: ModelFamilyGenerationResult
+        do {
+            result = try await driver.generate(request) { event in
+                switch event {
+                case .prefill:
+                    break
+                case .text(let text):
+                    output.withLock { $0.content += text }
+                    onEvent(.content(text))
+                case .toolCall(let call):
+                    output.withLock { $0.toolCalls.append(call) }
+                    onEvent(.toolCall(call))
+                }
+            }
+        } catch {
+            throw Self.requestError(error)
+        }
+        let collected = output.withLock { $0 }
+        let finishReason = !collected.toolCalls.isEmpty
+            ? "tool_calls" : (result.reason == .maxTokens ? "length" : "stop")
+        return ServerCompletion(
+            content: collected.content,
+            toolCalls: collected.toolCalls,
+            finishReason: finishReason,
+            usage: OpenAIUsage(
+                promptTokens: result.promptTokens,
+                completionTokens: result.newTokens,
+                totalTokens: result.promptTokens + result.newTokens,
+                cachedTokens: 0))
+    }
+
+    private func generationRequest(
+        _ request: ValidatedChatRequest
+    ) throws -> ModelFamilyGenerationRequest {
+        guard let prompt = request.qwenPrompt else {
+            throw ServerRequestError.invalid(
+                message: "verified Qwen request conversion is unavailable",
+                param: "messages", code: "invalid_request_body")
+        }
+        return ModelFamilyGenerationRequest(
+            prompt: prompt,
+            imagesByID: request.qwenImagesByID,
+            visionResidency: visionResidencyPolicy,
+            config: request.generationConfig)
+    }
+
+    private static func requestError(_ error: Error) -> Error {
+        if error is CancellationError { return error }
+        if let value = error as? ServerRequestError { return value }
+        if let value = error as? ModelFamilyGenerationError {
+            return ServerRequestError.invalid(
+                message: value.description,
+                param: "messages", code: "invalid_request")
+        }
+        return error
     }
 }
 

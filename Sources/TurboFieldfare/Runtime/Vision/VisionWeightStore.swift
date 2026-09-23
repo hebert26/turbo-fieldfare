@@ -35,6 +35,11 @@ public enum VisionPackError: Error, Equatable, CustomStringConvertible, Sendable
     }
 }
 
+enum VisionWeightStoreDocument {
+    case gemma(VisionWeightStore)
+    case qwen(QwenVisionWeightStore)
+}
+
 public enum VisionPackLocation {
     public static func companionURL(forTextModel textModelURL: URL) throws -> URL {
         let standardized = textModelURL.standardizedFileURL
@@ -49,6 +54,40 @@ public enum VisionPackLocation {
 }
 
 final class VisionWeightStore {
+    /// Opens the validated family-specific companion without forcing Qwen v2
+    /// metadata through the Gemma v1 receipt or tensor contract.
+    static func openCompanion(
+        directoryURL: URL,
+        compatibleTextSourceSnapshotHash: String,
+        compatibleTextManifestSHA256: String
+    ) throws -> VisionWeightStoreDocument {
+        let directory: GTurboModelDirectory
+        do { directory = try GTurboModelDirectory(rootURL: directoryURL) }
+        catch { throw VisionPackError.invalidMetadata("\(error)") }
+        let data: Data
+        do {
+            data = try directory.readMetadata(
+                GTurboVisionFormatV1.manifestFile,
+                maxBytes: GTurboVisionFormatV2.metadataMaxBytes)
+        } catch {
+            throw VisionPackError.invalidMetadata("\(error)")
+        }
+        let document: GTurboVisionManifestDocument
+        do { document = try GTurboVisionManifestDocumentCodec.decode(data) }
+        catch { throw VisionPackError.invalidMetadata("\(error)") }
+        switch document {
+        case .v1:
+            return .gemma(try open(
+                directoryURL: directoryURL,
+                compatibleTextSourceSnapshotHash: compatibleTextSourceSnapshotHash,
+                compatibleTextManifestSha256: compatibleTextManifestSHA256))
+        case .v2:
+            return .qwen(try QwenVisionWeightStore.open(
+                directoryURL: directoryURL,
+                compatibleTextManifestSHA256: compatibleTextManifestSHA256))
+        }
+    }
+
     let directoryURL: URL
     let manifest: GTurboVisionManifestV1
     private let directory: GTurboModelDirectory

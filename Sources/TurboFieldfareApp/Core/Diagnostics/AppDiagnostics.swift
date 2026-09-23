@@ -70,6 +70,8 @@ public struct AppDiagnostics: Equatable, Sendable {
     public var tokensPerSecond: Double
     public var peakMemoryBytes: UInt64?
     public var visionTowerMappedBytes: UInt64?
+    public var conversationLogicalStateBytes: UInt64?
+    public var expertCacheBytes: UInt64?
     public var runtimeOptions: AppRuntimeOptions
     public var prefill: PrefillExecutionDiagnostics?
     public var runner: AppRunnerDiagnostics?
@@ -104,6 +106,8 @@ public struct AppDiagnostics: Equatable, Sendable {
                 tokensPerSecond: Double,
                 peakMemoryBytes: UInt64?,
                 visionTowerMappedBytes: UInt64? = nil,
+                conversationLogicalStateBytes: UInt64? = nil,
+                expertCacheBytes: UInt64? = nil,
                 runtimeOptions: AppRuntimeOptions,
                 prefill: PrefillExecutionDiagnostics? = nil,
                 runner: AppRunnerDiagnostics? = nil,
@@ -120,6 +124,8 @@ public struct AppDiagnostics: Equatable, Sendable {
         self.tokensPerSecond = tokensPerSecond
         self.peakMemoryBytes = peakMemoryBytes
         self.visionTowerMappedBytes = visionTowerMappedBytes
+        self.conversationLogicalStateBytes = conversationLogicalStateBytes
+        self.expertCacheBytes = expertCacheBytes
         self.runtimeOptions = runtimeOptions
         self.prefill = prefill
         self.runner = runner

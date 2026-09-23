@@ -56,6 +56,17 @@ public struct Model {
         nonmutating set { streamersQueue.sync { streamersBox.measurementCapture = newValue } }
     }
 
+    /// Bytes of the routed-expert cache buffers this model currently owns.
+    /// Gemma opens these streamers lazily and may release them for vision, so
+    /// zero is a valid loaded-state value.
+    public var routedExpertCacheAllocatedBytes: UInt64 {
+        streamersQueue.sync {
+            streamersBox.streamers.compactMap { $0 }.reduce(UInt64(0)) {
+                $0 + $1.allocatedCacheBytes
+            }
+        }
+    }
+
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
@@ -346,6 +357,24 @@ public struct Model {
 }
 
 extension Model {
+
+    /// Family-neutral entry point for callers that do not already know whether
+    /// an installed directory is the legacy Gemma v1 pack or verified Qwen v2.
+    /// The existing `Model.load` below remains the unchanged Gemma-only API.
+    public static func loadFamily(
+        directoryURL: URL,
+        device: MTLDevice,
+        streamingMode: ExpertStreamingMode = .pread(slotCount: 16),
+        expertCachePolicy: ExpertCachePolicy = PreadExpertStreamer.cachePolicyDefault,
+        integrityPolicy: ModelIntegrityPolicy? = nil
+    ) throws -> ModelFamilyRuntime {
+        try ModelFamilyRuntime.load(
+            directoryURL: directoryURL,
+            device: device,
+            streamingMode: streamingMode,
+            expertCachePolicy: expertCachePolicy,
+            integrityPolicy: integrityPolicy)
+    }
 
     /// Open a `.gturbo/` directory and return a typed handle. Eagerly verifies
     /// SHA-256 of `model_weights.bin` and `packed_experts/layout.json`; layer

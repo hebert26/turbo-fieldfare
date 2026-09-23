@@ -38,7 +38,7 @@ Choose a name that does not already exist. This starts another Pi in its own tmu
 tmux new -s pi-fresh 'pi'
 ```
 
-Replace `pi-fresh` with a name you will remember. Reconnect to it with `tmux attach -t pi-fresh`.
+Replace `pi-fresh` with a name you will remember. Reconnect to it with `tmux attach -t '=pi-fresh'`.
 
 For a new name every time, let macOS generate one:
 
@@ -46,6 +46,31 @@ For a new name every time, let macOS generate one:
 name="pi-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 echo "Reconnect with: tmux attach -t $name"
 tmux new -s "$name" 'pi'
+```
+
+### Use hyphens in session names
+
+Use letters, numbers, and hyphens, such as `qwen3-6-35b-a3b`. Avoid dots and colons: tmux uses `:` to separate a session from a window and `.` to identify a pane. A dotted name such as `Qwen3.6-35B-A3B` can be interpreted as a pane target and cause `can't find pane: 6-35B-A3B`.
+
+From a terminal outside tmux, start or reconnect with:
+
+```bash
+cd /Users/dev-machine/dev/turbo-fieldfare-personal
+tmux new -A -s qwen3-6-35b-a3b 'pi'
+```
+
+The session `qwen3-6-35b-a3b` already exists. To attach directly:
+
+```bash
+tmux attach -t '=qwen3-6-35b-a3b'
+```
+
+The `=` tells tmux to match the exact session name rather than a prefix or pattern. Quotes keep the target literal in the shell. The session name is only a label; it does not select Pi's model.
+
+If you are already inside tmux, switch sessions instead of nesting another attachment:
+
+```bash
+tmux switch-client -t '=qwen3-6-35b-a3b'
 ```
 
 ### Replace the `pi` session

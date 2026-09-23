@@ -6,6 +6,7 @@ import ImageIO
 public enum VisionImageError: Error, CustomStringConvertible {
     case invalidSource(String)
     case invalidMetadata(String)
+    case unsupportedVideo(displayName: String)
     case unsupportedFrameCount(Int)
     case sourceTooLarge(bytes: Int, limit: Int)
     case dimensionsTooLarge(width: Int, height: Int, pixelLimit: Int)
@@ -18,6 +19,8 @@ public enum VisionImageError: Error, CustomStringConvertible {
         switch self {
         case .invalidSource(let detail): "invalid image source: \(detail)"
         case .invalidMetadata(let detail): "invalid image metadata: \(detail)"
+        case .unsupportedVideo(let displayName):
+            "Video input is not supported: \(displayName)"
         case .unsupportedFrameCount(let count): "image must contain one frame, found \(count)"
         case .sourceTooLarge(let bytes, let limit):
             "encoded image has \(bytes) bytes, limit is \(limit)"

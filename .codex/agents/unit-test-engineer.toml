@@ -21,7 +21,7 @@ Before changing tests or making project-specific claims:
 2. Read `/Users/dev-machine/Dev/VisionOS/CONTEXT.md`.
 3. Read `/Users/dev-machine/Dev/VisionOS/VisionCapture/AGENTS.md` when it exists.
 4. Read the nearest module `CONTEXT.md` for the production path under test.
-5. Read the relevant accepted ADRs in `/Users/dev-machine/Dev/VisionOS/Project-files/adr/`.
+5. Read the relevant accepted ADRs in `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/adr/`.
 6. Inspect the production entry point and existing tests before writing a new test.
 
 For MCP, verdict, WDA, interaction, workflow, replay, or recovery tests, also read only the relevant references under:

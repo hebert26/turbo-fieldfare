@@ -1,4 +1,6 @@
+import Darwin
 import Foundation
+import TurboFieldfareFormat
 
 public enum ModelIntegrityPolicy: Sendable, Equatable {
     case fullSha256
@@ -120,9 +122,32 @@ public enum VerifiedInstallReceiptReader {
             throw ModelError.trustedReceiptInvalid(detail: "manifest SHA mismatch")
         }
 
-        let actualPath = directoryURL.standardizedFileURL.path
-        guard receipt.modelDirectoryPath == actualPath else {
+        let matchesDirectory: Bool
+        if receipt.sourceRepoID == GTurboFormatV2.qwenRepository,
+           receipt.sourceRevision == GTurboFormatV2.qwenRevision {
+            let receiptPath = try canonicalPhysicalPath(receipt.modelDirectoryPath)
+            let actualPath = try canonicalPhysicalPath(
+                directoryURL.standardizedFileURL.path)
+            matchesDirectory = receiptPath == actualPath
+        } else {
+            matchesDirectory = receipt.modelDirectoryPath
+                == directoryURL.standardizedFileURL.path
+        }
+        guard matchesDirectory else {
             throw ModelError.trustedReceiptInvalid(detail: "model directory mismatch")
         }
+    }
+
+    private static func canonicalPhysicalPath(_ path: String) throws -> String {
+        guard path.hasPrefix("/"), !path.contains("\0") else {
+            throw ModelError.trustedReceiptInvalid(
+                detail: "model directory path is invalid")
+        }
+        guard let resolved = realpath(path, nil) else {
+            throw ModelError.trustedReceiptInvalid(
+                detail: "model directory path cannot be resolved")
+        }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 }

@@ -12,6 +12,8 @@ public enum MultimodalConversationError: Error, CustomStringConvertible {
     case noObservableToolProgress(limit: Int)
     case contextExhausted(prompt: Int, maxContext: Int)
     case imageUnavailable(reason: String?)
+    case unsupportedFamily
+    case tokenCodecUnavailable
 
     public var description: String {
         switch self {
@@ -36,6 +38,10 @@ public enum MultimodalConversationError: Error, CustomStringConvertible {
         case .imageUnavailable(let reason):
             reason.map { "image support is unavailable: \($0)" }
                 ?? "image support is unavailable: no companion pack is installed"
+        case .unsupportedFamily:
+            "this conversation operation is unavailable for the loaded model family"
+        case .tokenCodecUnavailable:
+            "Qwen string, tool, and image conversation input is unavailable until its chat codec is installed"
         }
     }
 }
@@ -189,7 +195,7 @@ public struct ConversationCheckpointReceipt: Sendable {
 /// in the KV itself, so it always knows the boundary and always resumes. Each
 /// turn prefills only the new tokens, and an image is encoded once, when its
 /// turn is appended.
-public actor MultimodalConversation {
+public actor GemmaMultimodalConversation {
     private struct ToolState {
         var messages: [GFTokenizer.Message]
         let tools: [GFTokenizer.FunctionDefinition]
@@ -1545,5 +1551,452 @@ public actor MultimodalConversation {
         return EncodedTurn(
             effectiveTokenIDs: input.effectiveTokenIDs,
             prefillInput: input)
+    }
+}
+
+
+/// Family-resolved conversation facade. Gemma keeps its established actor and
+/// APIs; Qwen exposes only the prepared-token boundary until Phase 14 supplies
+/// a chat codec.
+public actor MultimodalConversation {
+    private enum Backing {
+        case gemma(GemmaMultimodalConversation)
+        case qwen(QwenConversationState, maxContext: Int)
+    }
+
+    private let backing: Backing
+    private var qwenGenerating = false
+    private var qwenResetting = false
+    private var qwenClosed = false
+    private var qwenWaiters: [CheckedContinuation<Void, Never>] = []
+
+    public init(
+        model: Model,
+        context: MetalContext,
+        tokenizer: GFTokenizer,
+        runner: RealForwardRunner,
+        scratch: RawCompletionScratch,
+        visionRuntime: VisionRuntime? = nil,
+        visionRuntimeError: Error? = nil,
+        visionResidency: VisionResidencyPolicy = .defaultPolicy,
+        maxContext: Int
+    ) {
+        // The session is the sole owner and serial admission boundary for both
+        // objects. They lack Sendable annotations because their internal Metal
+        // scratch is not safe for concurrent use; this is the same invariant
+        // that guarded the original single Gemma conversation actor.
+        nonisolated(unsafe) let sharedModel = model
+        nonisolated(unsafe) let sharedVisionRuntime = visionRuntime
+        backing = .gemma(GemmaMultimodalConversation(
+            model: sharedModel,
+            context: context,
+            tokenizer: tokenizer,
+            runner: runner,
+            scratch: scratch,
+            visionRuntime: sharedVisionRuntime,
+            visionRuntimeError: visionRuntimeError,
+            visionResidency: visionResidency,
+            maxContext: maxContext))
+    }
+
+    public init(qwenState: QwenConversationState, maxContext: Int) {
+        backing = .qwen(qwenState, maxContext: maxContext)
+    }
+
+    public var kvTokenCount: Int {
+        get async {
+            switch backing {
+            case .gemma(let conversation): await conversation.kvTokenCount
+            case .qwen(let state, _): await state.status().committed.retainedTokenIDs.count
+            }
+        }
+    }
+
+    public var hasStagedTurn: Bool {
+        get async {
+            switch backing {
+            case .gemma(let conversation): await conversation.hasStagedTurn
+            case .qwen: false
+            }
+        }
+    }
+
+    public var isClosed: Bool {
+        get async {
+            switch backing {
+            case .gemma(let conversation): await conversation.isClosed
+            case .qwen: qwenClosed
+            }
+        }
+    }
+
+    public var isUsable: Bool {
+        get async {
+            switch backing {
+            case .gemma(let conversation): await conversation.isUsable
+            case .qwen: !qwenClosed
+            }
+        }
+    }
+
+    public var isGenerating: Bool {
+        get async {
+            switch backing {
+            case .gemma(let conversation): await conversation.isGenerating
+            case .qwen: qwenGenerating
+            }
+        }
+    }
+
+    public func invalidate() async {
+        switch backing {
+        case .gemma(let conversation):
+            await conversation.invalidate()
+        case .qwen:
+            qwenClosed = true
+            await waitForQwenGeneration()
+        }
+    }
+
+    public func checkpoint(
+        id: UUID,
+        pendingCall: GFTokenizer.HistoricalToolCall,
+        result: ConversationToolResult,
+        record: String,
+        imageProvenance: [String],
+        generationAllowance: Int,
+        finalAnswerAllowance: Int,
+        permitsScreenshot: Bool,
+        force: Bool,
+        performanceRequested: Bool,
+        commit: Bool,
+        checkCancellation: @escaping @Sendable () throws -> Void = {}
+    ) async throws -> ConversationCheckpointReceipt {
+        switch backing {
+        case .gemma(let conversation):
+            try await conversation.checkpoint(
+                id: id, pendingCall: pendingCall, result: result, record: record,
+                imageProvenance: imageProvenance,
+                generationAllowance: generationAllowance,
+                finalAnswerAllowance: finalAnswerAllowance,
+                permitsScreenshot: permitsScreenshot, force: force,
+                performanceRequested: performanceRequested, commit: commit,
+                checkCancellation: checkCancellation)
+        case .qwen:
+            throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func resumeCheckpoint(
+        id: UUID,
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig,
+        checkCancellation: @escaping @Sendable () throws -> Void,
+        shouldStop: (@Sendable () -> Bool)?,
+        captureToolFailureEvidence: Bool,
+        maximumConsecutiveInvisibleTokens: Int?,
+        captureThoughtPreview: Bool,
+        detectThoughtRepetition: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)?,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)?
+    ) async throws -> StructuredConversationTurnResult {
+        switch backing {
+        case .gemma(let conversation):
+            try await conversation.resumeCheckpoint(
+                id: id, config: config, prefillConfig: prefillConfig,
+                checkCancellation: checkCancellation, shouldStop: shouldStop,
+                captureToolFailureEvidence: captureToolFailureEvidence,
+                maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+                captureThoughtPreview: captureThoughtPreview,
+                detectThoughtRepetition: detectThoughtRepetition,
+                onProgress: onProgress,
+                onStructuredProgress: onStructuredProgress)
+        case .qwen:
+            throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func append(parts: [MultimodalContinuationPart], images: [URL] = []) async throws {
+        switch backing {
+        case .gemma(let conversation): try await conversation.append(parts: parts, images: images)
+        case .qwen: throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func clear() async {
+        if case .gemma(let conversation) = backing { await conversation.clear() }
+    }
+
+    public func reset() async throws {
+        switch backing {
+        case .gemma(let conversation):
+            await conversation.reset()
+        case .qwen(let state, _):
+            guard !qwenClosed else { return }
+            qwenResetting = true
+            defer { qwenResetting = false }
+            await waitForQwenGeneration()
+            guard !qwenClosed else { return }
+            try await state.reset()
+        }
+    }
+
+    public func close() async {
+        switch backing {
+        case .gemma(let conversation): await conversation.close()
+        case .qwen:
+            qwenClosed = true
+            await waitForQwenGeneration()
+        }
+    }
+
+    public func send(
+        parts: [MultimodalContinuationPart],
+        images: [URL] = [],
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil
+    ) async throws -> MultimodalTurnResult {
+        switch backing {
+        case .gemma(let conversation):
+            try await conversation.send(
+                parts: parts, images: images, config: config,
+                prefillConfig: prefillConfig,
+                checkCancellation: checkCancellation,
+                shouldStop: shouldStop, onProgress: onProgress)
+        case .qwen:
+            throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func generate(
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil
+    ) async throws -> MultimodalTurnResult {
+        switch backing {
+        case .gemma(let conversation):
+            try await conversation.generate(
+                config: config, prefillConfig: prefillConfig,
+                checkCancellation: checkCancellation,
+                shouldStop: shouldStop, onProgress: onProgress)
+        case .qwen:
+            throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func sendToolUser(
+        parts: [MultimodalContinuationPart],
+        images: [URL] = [],
+        developerPrompt: String?,
+        tools: [GFTokenizer.FunctionDefinition],
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        acceptsUnknownToolNames: Bool = false,
+        captureToolFailureEvidence: Bool = false,
+        maximumConsecutiveInvisibleTokens: Int? = nil,
+        captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
+    ) async throws -> StructuredConversationTurnResult {
+        switch backing {
+        case .gemma(let conversation):
+            try await conversation.sendToolUser(
+                parts: parts, images: images, developerPrompt: developerPrompt,
+                tools: tools, config: config, prefillConfig: prefillConfig,
+                checkCancellation: checkCancellation, shouldStop: shouldStop,
+                acceptsUnknownToolNames: acceptsUnknownToolNames,
+                captureToolFailureEvidence: captureToolFailureEvidence,
+                maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+                captureThoughtPreview: captureThoughtPreview,
+                detectThoughtRepetition: detectThoughtRepetition,
+                onProgress: onProgress,
+                onStructuredProgress: onStructuredProgress)
+        case .qwen:
+            throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func sendToolResults(
+        _ results: [ConversationToolResult],
+        config: GenerationConfig,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @escaping @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        acceptsUnknownToolNames: Bool = false,
+        captureToolFailureEvidence: Bool = false,
+        maximumConsecutiveInvisibleTokens: Int? = nil,
+        captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
+    ) async throws -> StructuredConversationTurnResult {
+        switch backing {
+        case .gemma(let conversation):
+            try await conversation.sendToolResults(
+                results, config: config, prefillConfig: prefillConfig,
+                checkCancellation: checkCancellation, shouldStop: shouldStop,
+                acceptsUnknownToolNames: acceptsUnknownToolNames,
+                captureToolFailureEvidence: captureToolFailureEvidence,
+                maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+                captureThoughtPreview: captureThoughtPreview,
+                detectThoughtRepetition: detectThoughtRepetition,
+                onProgress: onProgress,
+                onStructuredProgress: onStructuredProgress)
+        case .qwen:
+            throw MultimodalConversationError.tokenCodecUnavailable
+        }
+    }
+
+    public func applyTokenizedTurn(
+        _ turn: TokenizedConversationTurn,
+        checkCancellation: @escaping @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        onProgress: (@Sendable (TokenizedConversationProgress) async -> Void)? = nil
+    ) async throws -> TokenizedConversationResult {
+        guard case .qwen(let state, let maxContext) = backing else {
+            throw ConversationStateTransactionError.unsupportedFamily
+        }
+        guard !qwenClosed else { throw MultimodalConversationError.closed }
+        guard !qwenGenerating, !qwenResetting else { throw MultimodalConversationError.busy }
+        guard !turn.promptTokenIDs.isEmpty,
+              turn.promptTokenIDs.count + turn.generatedTokenIDs.count <= maxContext,
+              turn.hiddenSuffixTokenCount >= 0,
+              turn.hiddenSuffixTokenCount <= turn.generatedTokenIDs.count else {
+            throw ConversationStateTransactionError.invalidBoundary("invalid prepared token turn")
+        }
+        qwenGenerating = true
+        defer { finishQwenGeneration() }
+        let transaction = try await state.begin()
+        do {
+            try Task.checkCancellation()
+            try checkCancellation()
+            try await state.prefill(
+                turn.promptTokenIDs,
+                transaction: transaction,
+                onProgress: { done, total in
+                    await onProgress?(.prefill(done: done, total: total))
+                })
+            try Task.checkCancellation()
+            try checkCancellation()
+            if shouldStop?() == true { throw CancellationError() }
+
+            var accepted: [Int32] = []
+            var reason = TokenizedConversationStopReason.complete
+            for tokenID in turn.generatedTokenIDs {
+                try Task.checkCancellation()
+                try checkCancellation()
+                try await state.advance(tokenID, transaction: transaction)
+                accepted.append(tokenID)
+                await onProgress?(.accepted(index: accepted.count - 1, tokenID: tokenID))
+                if shouldStop?() == true {
+                    reason = .softStop
+                    break
+                }
+            }
+            if reason == .complete, turn.hiddenSuffixTokenCount > 0 {
+                try await state.removeSuffix(
+                    tokenCount: turn.hiddenSuffixTokenCount,
+                    transaction: transaction)
+                accepted.removeLast(turn.hiddenSuffixTokenCount)
+            }
+            let metrics = try await state.commit(transaction: transaction)
+            return TokenizedConversationResult(
+                reason: reason,
+                metrics: metrics,
+                acceptedGeneratedTokenIDs: accepted)
+        } catch let operationError {
+            do {
+                try await state.rollback(transaction: transaction)
+            } catch {
+                throw MultimodalConversationError.lineageRecoveryFailed(
+                    reason: "Prepared Qwen turn failed with \(operationError); rollback failed with \(error).")
+            }
+            throw operationError
+        }
+    }
+
+    public func rebuildTokenCheckpoint(
+        _ request: TokenizedCheckpointRequest,
+        checkCancellation: @escaping @Sendable () throws -> Void = {},
+        onProgress: (@Sendable (TokenizedConversationProgress) async -> Void)? = nil
+    ) async throws -> TokenizedCheckpointResult {
+        guard case .qwen(let state, _) = backing else {
+            throw ConversationStateTransactionError.unsupportedFamily
+        }
+        guard !qwenClosed else { throw MultimodalConversationError.closed }
+        guard !qwenGenerating, !qwenResetting else { throw MultimodalConversationError.busy }
+        if request.reason == .sustainedSlowDecode {
+            let metrics = await state.status().committed
+            return TokenizedCheckpointResult(needed: false, committed: false, metrics: metrics)
+        }
+        qwenGenerating = true
+        defer { finishQwenGeneration() }
+        let transaction = try await state.begin()
+        do {
+            try Task.checkCancellation()
+            try checkCancellation()
+            try await state.rebuildCheckpoint(
+                retaining: request.retainedTokenIDs,
+                transaction: transaction,
+                onProgress: { done, total in
+                    await onProgress?(.checkpoint(done: done, total: total))
+                })
+            try Task.checkCancellation()
+            try checkCancellation()
+            let metrics = try await state.commit(transaction: transaction)
+            return TokenizedCheckpointResult(needed: true, committed: true, metrics: metrics)
+        } catch let operationError {
+            do {
+                try await state.rollback(transaction: transaction)
+            } catch {
+                throw MultimodalConversationError.lineageRecoveryFailed(
+                    reason: "Qwen checkpoint failed with \(operationError); rollback failed with \(error).")
+            }
+            throw operationError
+        }
+    }
+
+    public func conversationStateStatus() async throws -> ConversationStateStatus {
+        guard case .qwen(let state, _) = backing else {
+            throw ConversationStateTransactionError.unsupportedFamily
+        }
+        return await state.status()
+    }
+
+    static func assistantMessage(
+        for completion: StructuredConversationTurnResult
+    ) -> GFTokenizer.Message {
+        GemmaMultimodalConversation.assistantMessage(for: completion)
+    }
+
+    static func validateStructuredCompletion(
+        _ decoder: StructuredAssistantDecoder?,
+        stopReason: StopReason,
+        hasToolCalls: Bool
+    ) throws {
+        try GemmaMultimodalConversation.validateStructuredCompletion(
+            decoder, stopReason: stopReason, hasToolCalls: hasToolCalls)
+    }
+
+    private func waitForQwenGeneration() async {
+        guard qwenGenerating else { return }
+        await withCheckedContinuation { continuation in
+            qwenWaiters.append(continuation)
+        }
+    }
+
+    private func finishQwenGeneration() {
+        qwenGenerating = false
+        let waiters = qwenWaiters
+        qwenWaiters = []
+        for waiter in waiters { waiter.resume() }
     }
 }

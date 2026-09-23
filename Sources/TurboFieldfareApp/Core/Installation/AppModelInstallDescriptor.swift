@@ -1,6 +1,18 @@
 import Foundation
 import TurboFieldfareRepackCore
 
+public struct AppModelSourceIdentity: Equatable, Sendable {
+    public let repoID: String
+    public let revision: String
+    public let sourceIndexSHA256: String
+
+    public init(repoID: String, revision: String, sourceIndexSHA256: String) {
+        self.repoID = repoID
+        self.revision = revision
+        self.sourceIndexSHA256 = sourceIndexSHA256
+    }
+}
+
 public struct AppModelInstallDescriptor: Equatable, Sendable {
     public let displayName: String
     public let repoID: String
@@ -29,6 +41,13 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         self.reserveBytes = reserveBytes
     }
 
+    public var sourceIdentity: AppModelSourceIdentity {
+        AppModelSourceIdentity(
+            repoID: repoID,
+            revision: revision,
+            sourceIndexSHA256: sourceIndexSHA256)
+    }
+
     public var requiredFreeBytes: UInt64 {
         installedBytes + rangeStagingBytes + reserveBytes
     }
@@ -52,6 +71,39 @@ public struct AppModelInstallDescriptor: Equatable, Sendable {
         installedBytes: 1_144_373_248 + 4_194_304,
         rangeStagingBytes: UInt64(RemoteChunkPolicy.defaultBytes),
         reserveBytes: 1_073_741_824)
+}
+
+/// The immutable inputs for converting the pinned official Qwen snapshot.
+/// Byte requirements are intentionally absent: P21 derives them from the
+/// selected local source during preflight instead of publishing guesses.
+public struct AppLocalQwenInstallDescriptor: Equatable, Sendable {
+    public let displayName: String
+    public let sourceIdentity: AppModelSourceIdentity
+    public let reserveBytes: UInt64
+
+    public init(displayName: String,
+                sourceIdentity: AppModelSourceIdentity,
+                reserveBytes: UInt64 = 1_073_741_824) {
+        self.displayName = displayName
+        self.sourceIdentity = sourceIdentity
+        self.reserveBytes = reserveBytes
+    }
+}
+
+public enum AppModelInstallRoute: Equatable, Sendable {
+    /// The existing pinned Gemma download and repack path.
+    case remoteRepack(
+        text: AppModelInstallDescriptor,
+        vision: AppModelInstallDescriptor)
+    /// A caller-supplied, already prepared official source. Merely having this
+    /// route in the catalog does not make Qwen installable: the app must also
+    /// receive a source directory and the P21 local workflow implementation.
+    case localQwenConversion(AppLocalQwenInstallDescriptor)
+
+    public var isInstallableWithoutLocalSource: Bool {
+        if case .remoteRepack = self { return true }
+        return false
+    }
 }
 
 public struct AppModelInstallRequirement: Equatable, Sendable {

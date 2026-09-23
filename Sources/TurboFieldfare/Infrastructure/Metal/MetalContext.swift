@@ -129,7 +129,7 @@ public final class MetalContext: @unchecked Sendable {
     }
 
     /// Production shader modules compiled into the shared runtime library.
-    private static let shaderModules: [String] = [
+    static let shaderModules: [String] = [
         "dequant_int4",
         "dequant_int8",
         "rmsnorm",
@@ -141,10 +141,15 @@ public final class MetalContext: @unchecked Sendable {
         "fused",
         "prefill",
         "vision",
+        "qwen_common",
+        "qwen_full_attention",
+        "qwen_linear_attention",
+        "qwen_moe",
+        "qwen_vision",
     ]
 
     /// Bundle locations for runtime shader modules.
-    private static let shaderSubdirectories: [String: String] = [
+    static let shaderSubdirectories: [String: String] = [
         "attention": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
@@ -152,6 +157,11 @@ public final class MetalContext: @unchecked Sendable {
         "logit": "Metal/Sampling",
         "moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
+        "qwen_common": "Metal/Qwen",
+        "qwen_full_attention": "Metal/Qwen",
+        "qwen_linear_attention": "Metal/Qwen",
+        "qwen_moe": "Metal/Qwen",
+        "qwen_vision": "Metal/Qwen",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",
@@ -167,12 +177,29 @@ public final class MetalContext: @unchecked Sendable {
                                  subdirectory: subdirectory)
     }
 
+    static func shaderSourceURLs() throws -> [URL] {
+        try shaderSourceURLs { module, _, _ in
+            shaderURL(module: module)
+        }
+    }
+
+    static func shaderSourceURLs(
+        resolvingWith resolve: (_ module: String, _ extension: String,
+                                _ subdirectory: String) -> URL?
+    ) throws -> [URL] {
+        try shaderModules.map { module in
+            guard let subdirectory = shaderSubdirectories[module],
+                  let url = resolve(module, "metal", subdirectory) else {
+                throw MetalError.missingShaderResource(module)
+            }
+            return url
+        }
+    }
+
     private static func compileShaderLibrary(device: MTLDevice) throws -> MTLLibrary {
         var combined = ""
-        for name in shaderModules {
-            guard let url = shaderURL(module: name) else {
-                throw MetalError.missingShaderResource(name)
-            }
+        let sourceURLs = try shaderSourceURLs()
+        for (name, url) in zip(shaderModules, sourceURLs) {
             let src = try String(contentsOf: url, encoding: .utf8)
             combined += "\n// ==== \(name).metal ====\n" + src + "\n"
         }

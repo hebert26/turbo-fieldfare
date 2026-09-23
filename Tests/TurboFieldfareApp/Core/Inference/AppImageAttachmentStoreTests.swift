@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Testing
+import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
 /// The store is a trust boundary before it is anything else: whatever it
@@ -68,5 +69,42 @@ import Testing
         store.remove(attachment)
         #expect(!manager.fileExists(atPath: attachment.fileURL.path),
                 "removing an attachment left its bytes on disk")
+    }
+
+    /// A movie URL must fail at the app import boundary, before the store
+    /// creates or copies an attachment. The source is caller-owned and must
+    /// remain byte-for-byte unchanged after the rejection.
+    @Test func declaredMovieURLIsRejectedBeforeStaging() throws {
+        let manager = FileManager.default
+        let root = manager.temporaryDirectory
+            .appendingPathComponent("video-import-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? manager.removeItem(at: root) }
+
+        let source = root.appendingPathComponent("clip.mp4")
+        let original = Data("synthetic movie bytes".utf8)
+        try original.write(to: source)
+        let destination = root.appendingPathComponent("staged", isDirectory: true)
+        let store = AppImageAttachmentStore(directoryURL: destination)
+
+        do {
+            _ = try store.stage(source)
+            Issue.record("the movie URL was accepted by the attachment store")
+        } catch let error as VisionImageError {
+            guard case .unsupportedVideo(let displayName) = error else {
+                Issue.record("unexpected image import error: \(error)")
+                return
+            }
+            #expect(displayName == "clip.mp4")
+            #expect(String(describing: error) ==
+                    "Video input is not supported: clip.mp4")
+        }
+
+        #expect(try Data(contentsOf: source) == original,
+                "video rejection changed the caller-owned source")
+        let stagedEntries = (try? manager.contentsOfDirectory(
+            at: destination, includingPropertiesForKeys: nil)) ?? []
+        #expect(stagedEntries.isEmpty,
+                "video rejection left a staged output behind")
     }
 }

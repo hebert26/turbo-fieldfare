@@ -92,6 +92,14 @@ struct TurboFieldfareMacApp: App {
                     .disabled(!model.canCancelInstall)
             }
             CommandMenu("Model") {
+                ForEach(model.modelCatalogEntries) { entry in
+                    Toggle(entry.displayName, isOn: modelSelectionBinding(for: entry.id))
+                        .disabled(!model.canSelectModel || !model.isModelSelectable(entry.id))
+                        .keyboardShortcut(
+                            modelSelectionShortcut(for: entry.id),
+                            modifiers: [.command, .option])
+                }
+                Divider()
                 Button("Load Model", action: model.loadModel)
                     .disabled(!model.canLoadModel)
                 Button("Reload Model", action: model.reloadModel)
@@ -141,6 +149,21 @@ struct TurboFieldfareMacApp: App {
             NSWorkspace.shared.open(url)
         case .unavailable:
             break
+        }
+    }
+
+    private func modelSelectionBinding(for modelID: AppModelID) -> Binding<Bool> {
+        Binding {
+            model.selectedModelID == modelID
+        } set: { isSelected in
+            if isSelected { model.selectModel(modelID) }
+        }
+    }
+
+    private func modelSelectionShortcut(for modelID: AppModelID) -> KeyEquivalent {
+        switch modelID {
+        case .gemma4: "1"
+        case .qwen3_6: "2"
         }
     }
 

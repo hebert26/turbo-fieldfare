@@ -1,8 +1,9 @@
-[features.multi_agent_v2]
-enabled = true
-max_concurrent_threads_per_session = 10
-
 [agents]
+enabled = true
+max_concurrent_threads_per_session = 9
+default_subagent_model = "gpt-5.6-luna"
+default_subagent_reasoning_effort = "medium"
+interrupt_message = true
 job_max_runtime_seconds = 1800
 
 [agents.luna-max-investigator]

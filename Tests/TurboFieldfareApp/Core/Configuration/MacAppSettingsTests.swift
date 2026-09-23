@@ -248,7 +248,7 @@ import Testing
 
     /// Phase D item 15. The newer-version branch says "Every key decodes with
     /// `decodeIfPresent`, so it reads cleanly", and that is false: nine keys use
-    /// a hard `decode`. So a version-3 file whose schema moved any of those nine
+    /// a hard `decode`. So a future-version file whose schema moved any of those nine
     /// throws inside `JSONDecoder().decode` *before* the version guard is
     /// reached, and lands in the `catch` that deletes the file - destroying a
     /// newer build's settings, which is the exact outcome that branch exists to
@@ -259,11 +259,11 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory)
 
-        // A plausible version 3: `topP` became `topProbability`. Everything else
+        // A plausible future version: `topP` became `topProbability`. Everything else
         // this build knows is still present and still valid.
         let newer = """
         {
-          "version": 3,
+          "version": \(MacAppSettings.currentVersion + 1),
           "contextTokens": 8192,
           "expertCacheSlots": 16,
           "temperature": 0.2,

@@ -102,11 +102,21 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
     }
 
     private let memorySampler: AppMemorySampler
+    private let qwenProgressObserver: @Sendable (TokenizedConversationProgress) async -> Void
     private let generationTasks = GenerationTaskRegistry()
 
-    public init(memorySampler: AppMemorySampler = AppMemorySampler()) {
+    public convenience init(memorySampler: AppMemorySampler = AppMemorySampler()) {
+        self.init(session: RealInferenceSession(), memorySampler: memorySampler)
+    }
+
+    init(
+        session: RealInferenceSession,
+        memorySampler: AppMemorySampler = AppMemorySampler(),
+        qwenProgressObserver: @escaping @Sendable (TokenizedConversationProgress) async -> Void = { _ in }
+    ) {
         self.memorySampler = memorySampler
-        self.session = RealInferenceSession()
+        self.qwenProgressObserver = qwenProgressObserver
+        self.session = session
     }
 
     public func ensureLoaded(modelDirectory: URL,
@@ -130,6 +140,10 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
         get async { await session.loadedToolThinkingEnabled }
     }
 
+    public var loadedModelReadiness: AppLoadedModelReadiness? {
+        get async { await session.loadedModelReadiness }
+    }
+
     /// Drops the KV so the next turn starts a fresh lineage. The model stays
     /// loaded: this ends a conversation, it does not unload ~1.6 GB.
     public func resetConversation() async {
@@ -146,7 +160,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
     /// the only writer. The epoch is accepted and ignored; the decode service
     /// holds the gate that uses it.
     public func resetConversation(epoch: UUID) async throws {
-        await session.resetConversation()
+        try await session.resetConversationThrowing()
     }
 
     /// Whether a conversation is still open on the session.
@@ -168,6 +182,104 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
     /// writer thread.
     public var currentConversationTokens: Int {
         session.conversationTokens.withLock { $0 }
+    }
+
+    /// Committed Qwen conversation state bytes. This is a logical element-byte
+    /// count, never process RSS or allocated Array capacity.
+    public var currentConversationLogicalStateBytes: UInt64? {
+        session.conversationLogicalStateBytes.withLock { $0 }
+    }
+
+    /// Bytes allocated by the loaded family's routed-expert caches. Zero is a
+    /// valid loaded value; nil means there is no installed model to report.
+    public var currentExpertCacheBytes: UInt64? {
+        session.expertCacheBytes.withLock { $0 }
+    }
+
+    func generatePreparedQwen(
+        _ request: TokenizedConversationTurn,
+        generationStop: AppGenerationStop? = nil
+    ) -> AsyncThrowingStream<TokenizedConversationEvent, Error> {
+        AsyncThrowingStream<TokenizedConversationEvent, Error> { continuation in
+            let generationID = UUID()
+            guard generationTasks.reserve(generationID) else {
+                continuation.finish(throwing: AppInferenceError.generationInFlight)
+                return
+            }
+            let task = Task { [self] in
+                defer { generationStop?.finish() }
+                let activateStop: (@Sendable () -> Void)?
+                if let generationStop {
+                    activateStop = { [weak self] in
+                        generationStop.activate { [weak self] in self?.stop() }
+                    }
+                } else {
+                    activateStop = nil
+                }
+                do {
+                    let result = try await session.applyQwenTokenizedTurn(
+                        request,
+                        activateStop: activateStop,
+                        onProgress: {
+                            await self.qwenProgressObserver($0)
+                            continuation.yield(.progress($0))
+                        })
+                    continuation.yield(.finished(result))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+                generationTasks.clear(generationID)
+            }
+            generationTasks.attach(task, to: generationID)
+            continuation.onTermination = { [generationTasks] termination in
+                let task = generationTasks.take(generationID)
+                if case .cancelled = termination { task?.cancel() }
+            }
+        }
+    }
+
+    func rebuildPreparedQwenCheckpoint(
+        _ request: TokenizedCheckpointRequest,
+        generationStop: AppGenerationStop? = nil
+    ) -> AsyncThrowingStream<TokenizedCheckpointEvent, Error> {
+        AsyncThrowingStream<TokenizedCheckpointEvent, Error> { continuation in
+            let generationID = UUID()
+            guard generationTasks.reserve(generationID) else {
+                continuation.finish(throwing: AppInferenceError.generationInFlight)
+                return
+            }
+            let task = Task { [self] in
+                defer { generationStop?.finish() }
+                let activateStop: (@Sendable () -> Void)?
+                if let generationStop {
+                    activateStop = { [weak self] in
+                        generationStop.activate { [weak self] in self?.stop() }
+                    }
+                } else {
+                    activateStop = nil
+                }
+                do {
+                    let result = try await session.rebuildQwenTokenCheckpoint(
+                        request,
+                        activateStop: activateStop,
+                        onProgress: {
+                            await self.qwenProgressObserver($0)
+                            continuation.yield(.progress($0))
+                        })
+                    continuation.yield(.finished(result))
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+                generationTasks.clear(generationID)
+            }
+            generationTasks.attach(task, to: generationID)
+            continuation.onTermination = { [generationTasks] termination in
+                let task = generationTasks.take(generationID)
+                if case .cancelled = termination { task?.cancel() }
+            }
+        }
     }
 
     public func generate(_ request: AppGenerationRequest) -> AsyncThrowingStream<AppInferenceEvent, Error> {
@@ -284,14 +396,175 @@ struct TokenizerDirectoryCache: Equatable, Sendable {
     }
 }
 
+enum RealInferenceLifecycleError: Error, Equatable {
+    case lifecycleInProgress
+}
+
+struct RealInferenceLifecycleCheckpoints: Sendable {
+    var afterRetirement: @Sendable () async -> Void
+    var afterPreparation: @Sendable () async -> Void
+
+    init(
+        afterRetirement: @escaping @Sendable () async -> Void = {},
+        afterPreparation: @escaping @Sendable () async -> Void = {}
+    ) {
+        self.afterRetirement = afterRetirement
+        self.afterPreparation = afterPreparation
+    }
+}
+
+private final class RealInferenceLifecycleCompletion: Sendable {
+    private struct State: Sendable {
+        var finished = false
+        var waiters: [CheckedContinuation<Void, Never>] = []
+    }
+    private let state = Mutex(State())
+
+    func wait() async {
+        await withCheckedContinuation { continuation in
+            let finishNow = state.withLock { value in
+                if value.finished { return true }
+                value.waiters.append(continuation)
+                return false
+            }
+            if finishNow { continuation.resume() }
+        }
+    }
+
+    func finish() {
+        let waiters = state.withLock { value -> [CheckedContinuation<Void, Never>] in
+            guard !value.finished else { return [] }
+            value.finished = true
+            defer { value.waiters.removeAll() }
+            return value.waiters
+        }
+        waiters.forEach { $0.resume() }
+    }
+}
+
 /// Owns the loaded model and serializes load / unload / generate. All Metal
-/// command-buffer waits happen inside this actor, off the main actor; one
-/// cooperative-pool thread is occupied for the duration of a generation,
-/// which is acceptable for the app's single session. The 8 GB rule lives
-/// here: a reload releases the loaded model, runner, and scratch before constructing
-/// replacements, so two models are never alive at once.
+/// command-buffer waits happen inside this actor, off the main actor. A
+/// lifecycle transition retains every session-owned old/prepared holder until
+/// its real GPU drain completes, and a second load is refused before it can
+/// detach or construct anything.
 actor RealInferenceSession {
+    private enum LoadedFamily: @unchecked Sendable {
+        case gemma
+        case qwen(QwenTextModel)
+    }
+
+    private final class RetiredInstallation {
+        var family: LoadedFamily?
+        var identity: LoadedRuntimeIdentity?
+        var codec: QwenChatCodec?
+        var qwenGeneration: QwenConversationGenerationSession?
+        var runner: RealForwardRunner?
+        var scratch: RawCompletionScratch?
+        var model: Model?
+        var conversation: MultimodalConversation?
+        var visionRuntime: VisionRuntime?
+        var visionError: Error?
+
+        init(family: LoadedFamily?, identity: LoadedRuntimeIdentity?, codec: QwenChatCodec?,
+             qwenGeneration: QwenConversationGenerationSession?,
+             runner: RealForwardRunner?, scratch: RawCompletionScratch?, model: Model?,
+             conversation: MultimodalConversation?, visionRuntime: VisionRuntime?,
+             visionError: Error?) {
+            self.family = family
+            self.identity = identity
+            self.codec = codec
+            self.qwenGeneration = qwenGeneration
+            self.runner = runner
+            self.scratch = scratch
+            self.model = model
+            self.conversation = conversation
+            self.visionRuntime = visionRuntime
+            self.visionError = visionError
+        }
+
+        var hasResources: Bool {
+            family != nil || identity != nil || codec != nil || qwenGeneration != nil
+                || runner != nil
+                || scratch != nil || model != nil || conversation != nil
+                || visionRuntime != nil || visionError != nil
+        }
+
+        func releaseAll() {
+            family = nil
+            identity = nil
+            codec = nil
+            qwenGeneration = nil
+            runner = nil
+            scratch = nil
+            model = nil
+            conversation = nil
+            visionRuntime = nil
+            visionError = nil
+        }
+    }
+
+    private final class PreparedInstallation {
+        let key: SessionLoadKey
+        let context: MetalContext
+        let family: LoadedFamily
+        let identity: LoadedRuntimeIdentity?
+        let codec: QwenChatCodec?
+        let qwenGeneration: QwenConversationGenerationSession?
+        let tokenizer: GFTokenizer?
+        let runner: RealForwardRunner?
+        let scratch: RawCompletionScratch?
+        let model: Model?
+        let conversation: MultimodalConversation?
+        let visionRuntime: VisionRuntime?
+        let visionError: Error?
+        let logicalStateBytes: UInt64?
+        let expertCacheBytes: UInt64
+
+        init(key: SessionLoadKey, context: MetalContext, family: LoadedFamily,
+             identity: LoadedRuntimeIdentity?, codec: QwenChatCodec?,
+             qwenGeneration: QwenConversationGenerationSession?, tokenizer: GFTokenizer?,
+             runner: RealForwardRunner?, scratch: RawCompletionScratch?, model: Model?,
+             conversation: MultimodalConversation?, visionRuntime: VisionRuntime?,
+             visionError: Error?, logicalStateBytes: UInt64?, expertCacheBytes: UInt64) {
+            self.key = key
+            self.context = context
+            self.family = family
+            self.identity = identity
+            self.codec = codec
+            self.qwenGeneration = qwenGeneration
+            self.tokenizer = tokenizer
+            self.runner = runner
+            self.scratch = scratch
+            self.model = model
+            self.conversation = conversation
+            self.visionRuntime = visionRuntime
+            self.visionError = visionError
+            self.logicalStateBytes = logicalStateBytes
+            self.expertCacheBytes = expertCacheBytes
+        }
+    }
+
+    private final class LifecycleTransition {
+        let id = UUID()
+        let completion = RealInferenceLifecycleCompletion()
+        var retired: RetiredInstallation?
+        var prepared: PreparedInstallation?
+        var teardownRequested = false
+    }
+
+    private let lifecycleCheckpoints: RealInferenceLifecycleCheckpoints
+    private var activeLifecycle: LifecycleTransition?
+    private var lifecycleUnloadWaiters = 0
     private var loadedKey: SessionLoadKey?
+    private var loadedFamily: LoadedFamily?
+    private var verifiedIdentity: LoadedRuntimeIdentity?
+    private var qwenCodec: QwenChatCodec?
+    private var qwenGeneration: QwenConversationGenerationSession?
+    private var qwenOrdinaryGenerationInFlight = false
+    private var qwenOrdinaryGenerationWaiters: [CheckedContinuation<Void, Never>] = []
+    private var qwenTools: [ModelChatToolDefinition] = []
+    private var qwenSystemPrompt: String?
+    private var qwenPendingToolCalls: [ParsedToolCall] = []
     private var ctx: MetalContext?
     private var tokenizer: GFTokenizer?
     private var tokenizerDirectoryCache = TokenizerDirectoryCache()
@@ -311,6 +584,10 @@ actor RealInferenceSession {
     /// stamps it on the turn's terminal event and cannot await this actor
     /// mid-decode.
     nonisolated let conversationTokens = Mutex<Int>(0)
+    /// Logical committed Qwen state bytes, distinct from process RSS.
+    nonisolated let conversationLogicalStateBytes = Mutex<UInt64?>(nil)
+    /// Actual allocated routed-expert cache bytes for the installed family.
+    nonisolated let expertCacheBytes = Mutex<UInt64?>(nil)
     /// Set by Stop, read by the decode loop at each token boundary.
     ///
     /// Cancelling the task instead throws out of `runRawCompletion`'s loop
@@ -328,11 +605,21 @@ actor RealInferenceSession {
         didSet { publishTowerBytes() }
     }
     private var visionRuntimeError: Error?
+    private var conversationLifecycleError: Error?
+
+    init(lifecycleCheckpoints: RealInferenceLifecycleCheckpoints = .init()) {
+        self.lifecycleCheckpoints = lifecycleCheckpoints
+    }
 
     /// Called after anything that maps or releases tower regions.
     private func publishTowerBytes() {
         let value = visionRuntime.map { UInt64($0.retainedWeightBytes) }
         towerBytes.withLock { $0 = value }
+    }
+
+    private func publishGemmaExpertCacheBytes() {
+        guard case .gemma = loadedFamily, let model else { return }
+        expertCacheBytes.withLock { $0 = model.routedExpertCacheAllocatedBytes }
     }
 
     /// A reader the decode loop can call from wherever it runs. The `Mutex` is
@@ -342,20 +629,111 @@ actor RealInferenceSession {
         { [weak self] in self?.stopRequested.withLock { $0 } ?? false }
     }
 
+    /// Ordinary Qwen generation runs in a separate actor over the same state as
+    /// the prepared-token boundary. RealInferenceSession is reentrant while it
+    /// awaits that actor, so retirement needs its own barrier before it releases
+    /// the old installation or permits another model mapping.
+    private func beginQwenOrdinaryGeneration() throws
+        -> QwenConversationGenerationSession {
+        guard !qwenOrdinaryGenerationInFlight else {
+            throw AppInferenceError.generationInFlight
+        }
+        guard let qwenGeneration else { throw AppInferenceError.modelNotLoaded }
+        qwenOrdinaryGenerationInFlight = true
+        return qwenGeneration
+    }
+
+    private func finishQwenOrdinaryGeneration() {
+        guard qwenOrdinaryGenerationInFlight else { return }
+        qwenOrdinaryGenerationInFlight = false
+        let waiters = qwenOrdinaryGenerationWaiters
+        qwenOrdinaryGenerationWaiters.removeAll(keepingCapacity: true)
+        for waiter in waiters { waiter.resume() }
+    }
+
+    private func waitForQwenOrdinaryGeneration() async {
+        guard qwenOrdinaryGenerationInFlight else { return }
+        await withCheckedContinuation { continuation in
+            qwenOrdinaryGenerationWaiters.append(continuation)
+        }
+    }
+
+    private func publishQwenConversationStatus() async {
+        let status = try? await conversation?.conversationStateStatus()
+        conversationTokens.withLock {
+            $0 = status?.committed.retainedTokenIDs.count ?? 0
+        }
+        conversationLogicalStateBytes.withLock {
+            $0 = status?.committed.logicalStateBytes
+        }
+    }
+
     func resetConversation() async {
-        // Same hazard as `unload()`: `runner.reset()` under a live decode either
-        // aborts that turn mid-stream or lets two turns drive one runner.
-        if let conversation { await conversation.invalidate() }
-        conversation = nil
-        conversationImageProvenance.removeAll()
-        runner?.reset()
-        conversationTokens.withLock { $0 = 0 }
+        do {
+            try await resetConversationThrowing()
+        } catch {
+            // The legacy no-throw entry cannot surface a Qwen restore failure.
+            // Preserve it so every later operation fails explicitly instead of
+            // treating an unknown lineage as reusable.
+            conversationLifecycleError = error
+            conversationLogicalStateBytes.withLock { $0 = nil }
+        }
+    }
+
+    func resetConversationThrowing() async throws {
+        switch loadedFamily {
+        case .qwen:
+            await waitForQwenOrdinaryGeneration()
+            if let qwenGeneration {
+                try await qwenGeneration.reset()
+            } else {
+                guard let conversation else { throw AppInferenceError.modelNotLoaded }
+                try await conversation.reset()
+            }
+            qwenTools.removeAll(keepingCapacity: true)
+            qwenSystemPrompt = nil
+            qwenPendingToolCalls.removeAll(keepingCapacity: true)
+            await publishQwenConversationStatus()
+        case .gemma:
+            // Same hazard as `unload()`: reset only after the conversation has
+            // settled its in-flight decode.
+            if let conversation { await conversation.invalidate() }
+            conversation = nil
+            conversationImageProvenance.removeAll()
+            runner?.reset()
+            conversationTokens.withLock { $0 = 0 }
+            conversationLogicalStateBytes.withLock { $0 = nil }
+        case nil:
+            conversationTokens.withLock { $0 = 0 }
+            conversationLogicalStateBytes.withLock { $0 = nil }
+        }
+        conversationLifecycleError = nil
     }
 
     var hasConversation: Bool { conversation != nil }
 
+    var lifecycleOwnedInstallationCount: Int {
+        var count = loadedFamily != nil || conversation != nil ? 1 : 0
+        if activeLifecycle?.retired?.hasResources == true { count += 1 }
+        if activeLifecycle?.prepared != nil { count += 1 }
+        return count
+    }
+
+    var lifecycleTeardownIsRequested: Bool {
+        activeLifecycle?.teardownRequested == true
+    }
+
+    var lifecycleUnloadWaiterCount: Int { lifecycleUnloadWaiters }
+
     func contextCheckpoint(_ request: DecodeContextCheckpointRequest,
                            stop: AppGenerationStop?) async throws -> DecodeContextCheckpointReceipt {
+        if case .qwen = loadedFamily {
+            guard qwenGeneration != nil else {
+                throw AppInferenceError.invalidRequest(
+                    "Qwen string/tool checkpoints require the Phase 14 chat codec; use the prepared-token checkpoint boundary.")
+            }
+            return try await qwenContextCheckpoint(request, stop: stop)
+        }
         guard let conversation else { throw AppInferenceError.modelNotLoaded }
         let start = ContinuousClock.now
         let attachments = (request.result.imageAttachments ?? []).map {
@@ -402,12 +780,248 @@ actor RealInferenceSession {
             preparationSeconds: Double(duration.seconds) + Double(duration.attoseconds) / 1e18)
     }
 
+    private func qwenContextCheckpoint(
+        _ request: DecodeContextCheckpointRequest,
+        stop: AppGenerationStop?
+    ) async throws -> DecodeContextCheckpointReceipt {
+        guard let loadedKey, let qwenCodec else {
+            throw AppInferenceError.modelNotLoaded
+        }
+        if let conversationLifecycleError { throw conversationLifecycleError }
+        let generation = try beginQwenOrdinaryGeneration()
+        defer { finishQwenOrdinaryGeneration() }
+        let started = ContinuousClock.now
+        let check: @Sendable () throws -> Void = {
+            try Task.checkCancellation()
+            if stop?.isRequested == true { throw CancellationError() }
+        }
+        try check()
+
+        let attachments = (request.result.imageAttachments ?? []).map {
+            AppImageAttachment(
+                id: $0.id, fileURL: URL(fileURLWithPath: $0.path),
+                displayName: $0.displayName, encodedBytes: $0.encodedBytes,
+                sha256: $0.sha256)
+        }
+        let imagesByID = try Self.qwenImagesByID(attachments)
+        let pendingArguments = try JSONDecoder().decode(
+            JSONValue.self, from: Data(request.pendingCall.argumentsJSON.utf8))
+        let suppliedArgumentsJSON = try pendingArguments.encoded()
+        guard qwenPendingToolCalls.count == 1,
+              let pending = qwenPendingToolCalls.first,
+              pending.id == request.pendingCall.id,
+              pending.name == request.pendingCall.name,
+              try pending.arguments.encoded() == suppliedArgumentsJSON,
+              request.result.callID == pending.id,
+              request.result.name == pending.name else {
+            throw AppInferenceError.invalidRequest(
+                "Checkpoint result does not match the pending Qwen tool call.")
+        }
+        guard request.generationAllowance > 0, request.finalAnswerAllowance > 0,
+              request.generationAllowance <= max(8_192, loadedKey.maxContext),
+              request.finalAnswerAllowance <= max(2_048, loadedKey.maxContext) else {
+            throw AppInferenceError.invalidRequest(
+                "Checkpoint token allowances are invalid.")
+        }
+        guard !request.record.contains(MultimodalPromptRenderer.placeholder),
+              !request.result.content.contains(MultimodalPromptRenderer.placeholder) else {
+            throw AppInferenceError.invalidRequest(
+                "Checkpoint text contains the reserved image marker.")
+        }
+
+        let resultMessage = Self.qwenToolResultMessages([
+            AppToolResult(
+                callID: request.result.callID,
+                name: request.result.name,
+                content: request.result.content,
+                imageAttachments: attachments)
+        ])[0]
+        let thinking = loadedKey.options.toolThinkingEnabled
+            ? ModelFamilyThinkingMode.enabled : .disabled
+        let continuationTokens = try qwenCodec.encodeContinuation(
+            messages: [resultMessage],
+            options: .init(enableThinking: thinking != .disabled))
+        let imagePreflight: QwenConversationImagePreflight
+        if attachments.isEmpty {
+            imagePreflight = QwenConversationImagePreflight(
+                retainedImageCount: 0, retainedImageRows: 0,
+                retainedFeatureBytes: 0)
+        } else {
+            do {
+                imagePreflight = try await generation.preflightCheckpointImages(
+                    orderedImageIDs: attachments.map { $0.id.uuidString },
+                    imagesByID: imagesByID,
+                    visionResidency: loadedKey.options.visionResidencyPolicy)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw Self.mapQwenGenerationError(error)
+            }
+        }
+        let existingBase = conversationTokens.withLock { $0 }
+        let existingCount = Self.qwenExpandedTokenCount(
+            encodedCount: existingBase + continuationTokens.count,
+            imageRows: imagePreflight.retainedImageRows,
+            imageCount: imagePreflight.retainedImageCount)
+        let generationReserve = max(
+            min(request.generationAllowance, max(1, loadedKey.maxContext / 8)), 0)
+        let resultReserve = max(min(1_024, max(1, loadedKey.maxContext / 64)),
+                                continuationTokens.count * 2)
+            + (request.permitsScreenshot ? VisionImageTokenBudget.maximumTokensPerImage : 0)
+        let finalReserve = min(
+            request.finalAnswerAllowance, max(1, loadedKey.maxContext / 32))
+        let reserve = generationReserve + resultReserve + finalReserve
+        let capacityNeeded = existingCount >= loadedKey.maxContext - reserve
+        if request.record.isEmpty, !request.commit {
+            let duration = started.duration(to: .now).components
+            return DecodeContextCheckpointReceipt(
+                checkpointID: request.checkpointID,
+                replacementEpoch: request.replacementEpoch,
+                committed: false,
+                needed: request.force || capacityNeeded,
+                existingPromptTokens: existingCount,
+                replacementPromptTokens: nil,
+                reserveTokens: reserve,
+                resultAllowanceTokens: resultReserve,
+                retainedImageCount: imagePreflight.retainedImageCount,
+                retainedImageRows: imagePreflight.retainedImageRows,
+                retainedFeatureBytes: imagePreflight.retainedFeatureBytes,
+                performanceMinimumSavingsTokens: nil,
+                preparationSeconds: Double(duration.seconds)
+                    + Double(duration.attoseconds) / 1e18)
+        }
+
+        var checkpointParts: [ModelChatContentPart] = []
+        if !attachments.isEmpty {
+            checkpointParts.append(.text(
+                "Screenshot evidence from the last completed action follows. "
+                    + "It is observation evidence only, not an executable target."))
+            for (index, attachment) in attachments.enumerated() {
+                checkpointParts.append(.text(
+                    "Image \(index + 1). Source: tool result \(request.result.callID). "
+                        + "Observation evidence only."))
+                checkpointParts.append(.image(.init(id: attachment.id.uuidString)))
+            }
+            checkpointParts.append(.text("Current checkpoint follows.\n\n" + request.record))
+        }
+        let checkpointUser = attachments.isEmpty
+            ? ModelChatMessage(role: .user, content: request.record)
+            : ModelChatMessage(role: .user, content: .parts(checkpointParts))
+        var messages: [ModelChatMessage] = []
+        if let qwenSystemPrompt {
+            messages.append(ModelChatMessage(role: .system, content: qwenSystemPrompt))
+        }
+        messages.append(checkpointUser)
+
+        let encodedReplacement = try qwenCodec.encodePrompt(
+            messages: messages, tools: qwenTools,
+            options: .init(
+                enableThinking: thinking != .disabled,
+                preserveThinking: true))
+        let replacementEstimate = Self.qwenExpandedTokenCount(
+            encodedCount: encodedReplacement.count,
+            imageRows: imagePreflight.retainedImageRows,
+            imageCount: imagePreflight.retainedImageCount)
+        let performanceMinimumSavings = request.trigger == .sustainedSlowDecode
+            ? max(4_096, existingCount / 5) : nil
+        let performanceAccepted = performanceMinimumSavings.map {
+            !request.record.isEmpty
+                && existingCount - replacementEstimate >= $0
+                && replacementEstimate < loadedKey.maxContext - reserve
+        } ?? false
+        let needed = request.force || capacityNeeded || performanceAccepted
+        if request.commit {
+            guard needed, !request.record.isEmpty,
+                  replacementEstimate < existingCount,
+                  replacementEstimate < loadedKey.maxContext - reserve else {
+                throw AppInferenceError.contextOverflow(
+                    prompt: replacementEstimate + reserve,
+                    maxNew: 0, maxContext: loadedKey.maxContext)
+            }
+        }
+        try check()
+
+        let runtimeResult: QwenConversationCheckpointResult
+        do {
+            runtimeResult = try await generation.rebuildCheckpoint(
+                QwenConversationCheckpointRequest(
+                    checkpointID: request.checkpointID,
+                    messages: messages,
+                    tools: qwenTools,
+                    imagesByID: imagesByID,
+                    thinking: thinking,
+                    visionResidency: loadedKey.options.visionResidencyPolicy,
+                    reason: request.trigger == .sustainedSlowDecode
+                        ? .sustainedSlowDecode : .capacity,
+                    commit: request.commit),
+                onEvent: { _ in })
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw Self.mapQwenGenerationError(error)
+        }
+        if request.commit {
+            qwenPendingToolCalls.removeAll(keepingCapacity: true)
+            conversationTokens.withLock {
+                $0 = runtimeResult.metrics.retainedTokenIDs.count
+            }
+            conversationLogicalStateBytes.withLock {
+                $0 = runtimeResult.metrics.logicalStateBytes
+            }
+        }
+        let duration = started.duration(to: .now).components
+        return DecodeContextCheckpointReceipt(
+            checkpointID: request.checkpointID,
+            replacementEpoch: request.replacementEpoch,
+            committed: runtimeResult.committed,
+            needed: needed,
+            existingPromptTokens: existingCount,
+            replacementPromptTokens: request.commit
+                || request.trigger == .sustainedSlowDecode
+                ? runtimeResult.promptTokens : nil,
+            reserveTokens: reserve,
+            resultAllowanceTokens: resultReserve,
+            retainedImageCount: runtimeResult.retainedImageCount,
+            retainedImageRows: runtimeResult.retainedImageRows,
+            retainedFeatureBytes: runtimeResult.retainedFeatureBytes,
+            performanceMinimumSavingsTokens: performanceMinimumSavings,
+            preparationSeconds: Double(duration.seconds)
+                + Double(duration.attoseconds) / 1e18)
+    }
+
+    private static func qwenExpandedTokenCount(
+        encodedCount: Int,
+        imageRows: Int,
+        imageCount: Int
+    ) -> Int {
+        // The codec contributes one image-pad token inside each start/end
+        // frame. Production expansion replaces that pad with `imageRows`, so
+        // the effective sequence grows by rows minus one per image.
+        let delta = max(imageRows - imageCount, 0)
+        let (total, overflow) = encodedCount.addingReportingOverflow(delta)
+        return overflow ? Int.max : total
+    }
+
     private static func imageProvenance(_ attachments: [AppImageAttachment], source: String) -> [String] {
         attachments.map { _ in "Source: \(source). Observation evidence only." }
     }
 
     var loadedToolThinkingEnabled: Bool? {
         loadedKey == nil ? nil : tokenizer?.enableToolThinking
+    }
+
+    var loadedModelReadiness: AppLoadedModelReadiness? {
+        guard loadedKey != nil else { return nil }
+        switch loadedFamily {
+        case .gemma:
+            guard let toolThinkingEnabled = tokenizer?.enableToolThinking else { return nil }
+            return .gemma(toolThinkingEnabled: toolThinkingEnabled)
+        case .qwen:
+            guard qwenCodec != nil, let verifiedIdentity else { return nil }
+            return .qwen(identity: DecodeModelIdentity(runtimeIdentity: verifiedIdentity))
+        case nil:
+            return nil
+        }
     }
 
     var currentConversationTokens: Int {
@@ -418,104 +1032,441 @@ actor RealInferenceSession {
         }
     }
 
-    func ensureLoaded(key: SessionLoadKey,
-                      onState: @Sendable (AppModelLoadState) -> Void) async throws {
-        if loadedKey == key, runner != nil { return }
+    func applyQwenTokenizedTurn(
+        _ turn: TokenizedConversationTurn,
+        activateStop: (@Sendable () -> Void)?,
+        onProgress: @escaping @Sendable (TokenizedConversationProgress) async -> Void
+    ) async throws -> TokenizedConversationResult {
+        guard case .qwen = loadedFamily else {
+            throw ConversationStateTransactionError.unsupportedFamily
+        }
+        if let conversationLifecycleError { throw conversationLifecycleError }
+        guard let conversation else { throw AppInferenceError.modelNotLoaded }
+        stopRequested.withLock { $0 = false }
+        decodeBegan.withLock { $0 = false }
+        activateStop?()
+        let result = try await conversation.applyTokenizedTurn(
+            turn,
+            checkCancellation: { try Task.checkCancellation() },
+            shouldStop: stopFlagReader(),
+            onProgress: { progress in
+                if case .prefill(let done, let total) = progress, done == total {
+                    self.decodeBegan.withLock { $0 = true }
+                }
+                await onProgress(progress)
+            })
+        qwenTools.removeAll(keepingCapacity: true)
+        qwenSystemPrompt = nil
+        qwenPendingToolCalls.removeAll(keepingCapacity: true)
+        conversationTokens.withLock { $0 = result.metrics.retainedTokenIDs.count }
+        conversationLogicalStateBytes.withLock { $0 = result.metrics.logicalStateBytes }
+        return result
+    }
 
+    func rebuildQwenTokenCheckpoint(
+        _ request: TokenizedCheckpointRequest,
+        activateStop: (@Sendable () -> Void)?,
+        onProgress: @escaping @Sendable (TokenizedConversationProgress) async -> Void
+    ) async throws -> TokenizedCheckpointResult {
+        guard case .qwen = loadedFamily else {
+            throw ConversationStateTransactionError.unsupportedFamily
+        }
+        if let conversationLifecycleError { throw conversationLifecycleError }
+        guard let conversation else { throw AppInferenceError.modelNotLoaded }
+        stopRequested.withLock { $0 = false }
+        decodeBegan.withLock { $0 = false }
+        activateStop?()
+        let result = try await conversation.rebuildTokenCheckpoint(
+            request,
+            checkCancellation: { try Task.checkCancellation() },
+            onProgress: onProgress)
+        qwenTools.removeAll(keepingCapacity: true)
+        qwenSystemPrompt = nil
+        qwenPendingToolCalls.removeAll(keepingCapacity: true)
+        conversationTokens.withLock { $0 = result.metrics.retainedTokenIDs.count }
+        conversationLogicalStateBytes.withLock { $0 = result.metrics.logicalStateBytes }
+        return result
+    }
+
+    func installLoadedFamily(
+        _ runtime: ModelFamilyRuntime,
+        key: SessionLoadKey,
+        context: MetalContext,
+        onState: @Sendable (AppModelLoadState) -> Void = { _ in }
+    ) async throws {
+        try await performInstall(
+            runtime: runtime, qwenCodec: nil, verifiedIdentity: nil,
+            key: key, context: context, onState: onState)
+    }
+
+    func installLoadedFamily(
+        _ bundle: LoadedModelFamilyBundle,
+        key: SessionLoadKey,
+        context: MetalContext,
+        onState: @Sendable (AppModelLoadState) -> Void = { _ in }
+    ) async throws {
+        try Self.validate(bundle)
+        try await performInstall(
+            runtime: bundle.runtime, qwenCodec: bundle.qwenCodec,
+            verifiedIdentity: bundle.verifiedIdentity,
+            key: key, context: context, onState: onState)
+    }
+
+    /// Test seam for AppCore's ordinary Qwen routing. The test constructs the
+    /// runtime fixture facade with `@testable import TurboFieldfare`, then this
+    /// installs that facade and the exact same state without a disk admission.
+    /// Production loading always uses the verified bundle path above.
+    func installQwenFixture(
+        model: QwenTextModel,
+        state: QwenConversationState,
+        codec: QwenChatCodec,
+        generation: QwenConversationGenerationSession,
+        key: SessionLoadKey,
+        context: MetalContext
+    ) async throws {
+        let transition = try beginLifecycleTransition()
+        do {
+            try await drainRetired(transition)
+            try requireActive(transition)
+            let conversation = MultimodalConversation(
+                qwenState: state, maxContext: key.maxContext)
+            let status = await state.status()
+            let prepared = PreparedInstallation(
+                key: key, context: context, family: .qwen(model),
+                identity: nil, codec: codec, qwenGeneration: generation,
+                tokenizer: nil, runner: nil, scratch: nil, model: nil,
+                conversation: conversation, visionRuntime: nil,
+                visionError: nil,
+                logicalStateBytes: status.committed.logicalStateBytes,
+                expertCacheBytes: await state.expertCacheAllocatedBytes)
+            transition.prepared = prepared
+            try installPrepared(prepared, transition: transition)
+            finishInstall(transition)
+        } catch {
+            await cleanup(transition, explicitUnload: false)
+            throw error
+        }
+    }
+
+    private static func validate(_ bundle: LoadedModelFamilyBundle) throws {
+        switch (bundle.family, bundle.runtime, bundle.verifiedIdentity, bundle.qwenCodec) {
+        case (.gemma4, .gemma, nil, nil):
+            return
+        case (.qwen3_6, .qwen, .some(let identity), .some(_))
+            where identity.family == .qwen3_6:
+            return
+        default:
+            throw AppInferenceError.modelLoadFailed("loaded family bundle is inconsistent")
+        }
+    }
+
+    private func beginLifecycleTransition() throws -> LifecycleTransition {
+        guard activeLifecycle == nil else {
+            throw RealInferenceLifecycleError.lifecycleInProgress
+        }
+        let transition = LifecycleTransition()
+        transition.retired = RetiredInstallation(
+            family: loadedFamily, identity: verifiedIdentity, codec: qwenCodec,
+            qwenGeneration: qwenGeneration, runner: runner, scratch: scratch, model: model,
+            conversation: conversation, visionRuntime: visionRuntime,
+            visionError: visionRuntimeError)
+        activeLifecycle = transition
+
+        // Retire visibility synchronously. The transition remains the sole
+        // session owner of old resources until invalidate and explicit release.
         conversation = nil
         conversationImageProvenance.removeAll()
         conversationTokens.withLock { $0 = 0 }
+        conversationLogicalStateBytes.withLock { $0 = nil }
+        expertCacheBytes.withLock { $0 = nil }
+        loadedFamily = nil
+        qwenCodec = nil
+        qwenGeneration = nil
+        qwenTools.removeAll(keepingCapacity: true)
+        qwenSystemPrompt = nil
+        qwenPendingToolCalls.removeAll(keepingCapacity: true)
+        verifiedIdentity = nil
         runner = nil
         scratch = nil
         model = nil
         loadedKey = nil
         visionRuntime = nil
         visionRuntimeError = nil
+        conversationLifecycleError = nil
+        return transition
+    }
 
-        let start = Date()
-        do {
-            onState(.loading(.validatingDirectory))
-            let manifest = key.directory.appendingPathComponent("manifest.json")
-            guard FileManager.default.fileExists(atPath: manifest.path) else {
-                throw AppInferenceError.modelNotFound(key.directory.path)
-            }
+    private func requireActive(
+        _ transition: LifecycleTransition,
+        permitTeardown: Bool = false
+    ) throws {
+        guard activeLifecycle === transition else { throw CancellationError() }
+        if !permitTeardown, transition.teardownRequested { throw CancellationError() }
+        try Task.checkCancellation()
+    }
 
+    private func drainRetired(_ transition: LifecycleTransition) async throws {
+        await waitForQwenOrdinaryGeneration()
+        qwenTools.removeAll(keepingCapacity: true)
+        qwenSystemPrompt = nil
+        qwenPendingToolCalls.removeAll(keepingCapacity: true)
+        conversationTokens.withLock { $0 = 0 }
+        conversationLogicalStateBytes.withLock { $0 = nil }
+        expertCacheBytes.withLock { $0 = nil }
+        var capturedConversation = transition.retired?.conversation
+        if let capturedConversation { await capturedConversation.invalidate() }
+        capturedConversation = nil
+        transition.retired?.releaseAll()
+        transition.retired = nil
+        await lifecycleCheckpoints.afterRetirement()
+        try requireActive(transition)
+    }
+
+    private func prepare(
+        runtime: ModelFamilyRuntime,
+        qwenCodec admittedQwenCodec: QwenChatCodec?,
+        verifiedIdentity admittedIdentity: LoadedRuntimeIdentity?,
+        key: SessionLoadKey,
+        context: MetalContext,
+        transition: LifecycleTransition,
+        onState: @Sendable (AppModelLoadState) -> Void
+    ) async throws -> PreparedInstallation {
+        let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
+            forceLogitsHead: key.forceLogitsHead)
+        switch runtime {
+        case .gemma(let loadedModel):
+            try requireActive(transition)
             onState(.loading(.tokenizer))
-            if tokenizer == nil || tokenizerDirectoryCache.shouldReload(for: key.directory) {
+            let loadedTokenizer: GFTokenizer
+            if let tokenizer,
+               !tokenizerDirectoryCache.shouldReload(for: key.directory) {
+                loadedTokenizer = tokenizer.withToolThinking(
+                    enabled: key.options.toolThinkingEnabled)
+            } else {
                 do {
-                    tokenizer = try await Self.loadTokenizer(for: key.directory)
-                    tokenizerDirectoryCache.markLoaded(for: key.directory)
+                    loadedTokenizer = try await Self.loadTokenizer(for: key.directory)
+                        .withToolThinking(enabled: key.options.toolThinkingEnabled)
                 } catch {
                     throw AppInferenceError.tokenizerUnavailable("\(error)")
                 }
+                try requireActive(transition)
             }
-            tokenizer = tokenizer?.withToolThinking(enabled: key.options.toolThinkingEnabled)
-            try Task.checkCancellation()
-
-            onState(.loading(.verifyingWeights))
-            let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
-                forceLogitsHead: key.forceLogitsHead)
-            let context: MetalContext
-            if let ctx {
-                context = ctx
-            } else {
-                context = try MetalContext()
-                ctx = context
-            }
-            let loadedModel = try Model.load(
-                directoryURL: key.directory,
-                device: context.device,
-                streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
-                expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
-                integrityPolicy: key.options.modelVerification.runtimeValue)
-            try Task.checkCancellation()
-
+            try requireActive(transition)
             onState(.loading(.preparingRunner))
             let loadedRunner = try RealForwardRunner(
-                model: loadedModel,
-                context: context,
+                model: loadedModel, context: context,
                 maxContext: key.maxContext,
                 runtimeConfiguration: runtimeConfiguration)
-            let loadedScratch = try RawCompletionScratch(context: context,
-                                                         vocab: loadedModel.config.vocabSize)
-            try Task.checkCancellation()
-
+            let loadedScratch = try RawCompletionScratch(
+                context: context, vocab: loadedModel.config.vocabSize)
             let loadedVisionRuntime: VisionRuntime?
             let loadedVisionRuntimeError: Error?
             do {
                 let runtime = try VisionRuntime.open(
-                    textModelURL: key.directory,
-                    context: context)
-                // Keep Ready maps the tower during the load rather than on the
-                // first image, so the wait is where the user asked for it.
+                    textModelURL: key.directory, context: context)
                 if key.options.visionResidencyPolicy == .keepReady {
+                    try requireActive(transition)
                     onState(.loading(.mappingImageTower))
                     try runtime.prewarmWeightRegions()
                 }
                 loadedVisionRuntime = runtime
                 loadedVisionRuntimeError = nil
             } catch {
-                // A missing or invalid pack only means images are unavailable;
-                // the reason travels to the first image turn.
                 loadedVisionRuntime = nil
                 loadedVisionRuntimeError = error
             }
-            try Task.checkCancellation()
+            return PreparedInstallation(
+                key: key, context: context, family: .gemma,
+                identity: nil, codec: nil, qwenGeneration: nil, tokenizer: loadedTokenizer,
+                runner: loadedRunner, scratch: loadedScratch, model: loadedModel,
+                conversation: nil, visionRuntime: loadedVisionRuntime,
+                visionError: loadedVisionRuntimeError, logicalStateBytes: nil,
+                expertCacheBytes: loadedModel.routedExpertCacheAllocatedBytes)
+        case .qwen(let qwenModel):
+            try requireActive(transition)
+            onState(.loading(.preparingRunner))
+            let state = try await QwenConversationState(
+                model: qwenModel, context: context, maxContext: key.maxContext)
+            try requireActive(transition)
+            let qwenConversation = MultimodalConversation(
+                qwenState: state, maxContext: key.maxContext)
+            let qwenGeneration: QwenConversationGenerationSession?
+            switch (admittedIdentity, admittedQwenCodec) {
+            case (.some(let identity), .some(let codec)):
+                qwenGeneration = try QwenConversationGenerationSession(
+                    model: qwenModel, state: state, codec: codec,
+                    verifiedIdentity: identity, modelDirectoryURL: key.directory,
+                    context: context, maxContext: key.maxContext)
+            case (nil, nil):
+                // Existing prepared-token fixture installs deliberately have no
+                // admitted codec or disk identity. Keep that boundary available;
+                // ordinary Qwen generation remains unavailable on such installs.
+                qwenGeneration = nil
+            default:
+                throw AppInferenceError.modelLoadFailed(
+                    "verified Qwen identity and chat codec are inconsistent")
+            }
+            let status = await state.status()
+            try requireActive(transition)
+            return PreparedInstallation(
+                key: key, context: context, family: .qwen(qwenModel),
+                identity: admittedIdentity, codec: admittedQwenCodec,
+                qwenGeneration: qwenGeneration, tokenizer: nil, runner: nil,
+                scratch: nil, model: nil, conversation: qwenConversation,
+                visionRuntime: nil, visionError: nil,
+                logicalStateBytes: status.committed.logicalStateBytes,
+                expertCacheBytes: await state.expertCacheAllocatedBytes)
+        }
+    }
 
-            runner = loadedRunner
-            scratch = loadedScratch
-            model = loadedModel
-            loadedKey = key
-            visionRuntime = loadedVisionRuntime
-            visionRuntimeError = loadedVisionRuntimeError
-            onState(.ready(modelDirectory: key.directory,
-                           loadSeconds: Date().timeIntervalSince(start)))
-        } catch is CancellationError {
-            throw CancellationError()
-        } catch let appError as AppInferenceError {
-            onState(.failed(appError))
-            throw appError
+    private func installPrepared(
+        _ prepared: PreparedInstallation,
+        transition: LifecycleTransition
+    ) throws {
+        try requireActive(transition)
+        loadedKey = prepared.key
+        loadedFamily = prepared.family
+        verifiedIdentity = prepared.identity
+        qwenCodec = prepared.codec
+        qwenGeneration = prepared.qwenGeneration
+        qwenTools.removeAll(keepingCapacity: true)
+        qwenSystemPrompt = nil
+        qwenPendingToolCalls.removeAll(keepingCapacity: true)
+        ctx = prepared.context
+        tokenizer = prepared.tokenizer
+        runner = prepared.runner
+        scratch = prepared.scratch
+        model = prepared.model
+        conversation = prepared.conversation
+        visionRuntime = prepared.visionRuntime
+        visionRuntimeError = prepared.visionError
+        conversationLifecycleError = nil
+        conversationTokens.withLock { $0 = 0 }
+        conversationLogicalStateBytes.withLock { $0 = prepared.logicalStateBytes }
+        expertCacheBytes.withLock { $0 = prepared.expertCacheBytes }
+        if prepared.tokenizer != nil {
+            tokenizerDirectoryCache.markLoaded(for: prepared.key.directory)
+        }
+        transition.prepared = nil
+    }
+
+    private func finishInstall(_ transition: LifecycleTransition) {
+        activeLifecycle = nil
+        transition.completion.finish()
+    }
+
+    private func cleanup(
+        _ transition: LifecycleTransition,
+        explicitUnload: Bool
+    ) async {
+        var preparedConversation = transition.prepared?.conversation
+        if let preparedConversation { await preparedConversation.invalidate() }
+        preparedConversation = nil
+        transition.prepared = nil
+        transition.retired?.releaseAll()
+        transition.retired = nil
+        conversationLogicalStateBytes.withLock { $0 = nil }
+        expertCacheBytes.withLock { $0 = nil }
+        if explicitUnload || transition.teardownRequested {
+            tokenizer = nil
+            tokenizerDirectoryCache.clear()
+            ctx = nil
+        }
+        if activeLifecycle === transition { activeLifecycle = nil }
+        transition.completion.finish()
+    }
+
+    private func performInstall(
+        runtime: ModelFamilyRuntime,
+        qwenCodec: QwenChatCodec?,
+        verifiedIdentity: LoadedRuntimeIdentity?,
+        key: SessionLoadKey,
+        context: MetalContext,
+        onState: @Sendable (AppModelLoadState) -> Void
+    ) async throws {
+        let transition = try beginLifecycleTransition()
+        var prepared: PreparedInstallation?
+        do {
+            try await drainRetired(transition)
+            prepared = try await prepare(
+                runtime: runtime, qwenCodec: qwenCodec,
+                verifiedIdentity: verifiedIdentity, key: key,
+                context: context, transition: transition, onState: onState)
+            transition.prepared = prepared
+            await lifecycleCheckpoints.afterPreparation()
+            try requireActive(transition)
+            try installPrepared(prepared!, transition: transition)
+            prepared = nil
+            finishInstall(transition)
         } catch {
+            prepared = nil
+            await cleanup(transition, explicitUnload: false)
+            if error is CancellationError || transition.teardownRequested {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    func ensureLoaded(key: SessionLoadKey,
+                      onState: @Sendable (AppModelLoadState) -> Void) async throws {
+        if activeLifecycle != nil { throw RealInferenceLifecycleError.lifecycleInProgress }
+        if loadedKey == key, loadedModelReadiness != nil { return }
+
+        let start = Date()
+        let transition: LifecycleTransition
+        do {
+            transition = try beginLifecycleTransition()
+        } catch {
+            throw error
+        }
+        var bundle: LoadedModelFamilyBundle?
+        var prepared: PreparedInstallation?
+        do {
+            try await drainRetired(transition)
+            try requireActive(transition)
+            onState(.loading(.validatingDirectory))
+            let manifest = key.directory.appendingPathComponent("manifest.json")
+            guard FileManager.default.fileExists(atPath: manifest.path) else {
+                throw AppInferenceError.modelNotFound(key.directory.path)
+            }
+            let context = try (ctx ?? MetalContext())
+            let runtimeConfiguration = try key.options.resolvedRuntimeConfiguration(
+                forceLogitsHead: key.forceLogitsHead)
+            try requireActive(transition)
+            onState(.loading(.verifyingWeights))
+            bundle = try ModelFamilyRuntime.loadBundle(
+                directoryURL: key.directory, device: context.device,
+                streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
+                expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
+                integrityPolicy: key.options.modelVerification.runtimeValue)
+            try requireActive(transition)
+            try Self.validate(bundle!)
+            prepared = try await prepare(
+                runtime: bundle!.runtime, qwenCodec: bundle!.qwenCodec,
+                verifiedIdentity: bundle!.verifiedIdentity, key: key,
+                context: context, transition: transition, onState: onState)
+            transition.prepared = prepared
+            bundle = nil
+            await lifecycleCheckpoints.afterPreparation()
+            try requireActive(transition)
+            try installPrepared(prepared!, transition: transition)
+            prepared = nil
+            finishInstall(transition)
+            onState(.ready(
+                modelDirectory: key.directory,
+                loadSeconds: Date().timeIntervalSince(start)))
+        } catch {
+            bundle = nil
+            prepared = nil
+            await cleanup(transition, explicitUnload: false)
+            if error is CancellationError || transition.teardownRequested {
+                throw CancellationError()
+            }
+            if let appError = error as? AppInferenceError {
+                onState(.failed(appError))
+                throw appError
+            }
             let appError = AppInferenceError.modelLoadFailed("\(error)")
             onState(.failed(appError))
             throw appError
@@ -524,6 +1475,142 @@ actor RealInferenceSession {
 
     private static func loadTokenizer(for modelDirectory: URL) async throws -> GFTokenizer {
         try await GFTokenizer.load(forModelDirectory: modelDirectory)
+    }
+
+    private static func qwenThinkingMode(
+        for request: AppGenerationRequest
+    ) -> ModelFamilyThinkingMode {
+        request.runtimeOptions.toolThinkingEnabled ? .enabled : .disabled
+    }
+
+    private static func qwenTools(
+        _ definitions: [AppToolDefinition]
+    ) throws -> [ModelChatToolDefinition] {
+        try definitions.map { definition in
+            ModelChatToolDefinition(function: .init(
+                name: definition.name,
+                description: definition.description,
+                parameters: try qwenJSON(definition.parameters)))
+        }
+    }
+
+    /// App JSON objects predate the ordered Qwen boundary and therefore cannot
+    /// promise insertion order. Sort their keys once at the family adapter so
+    /// the model sees stable bytes while tool and result arrays retain the
+    /// exact host order supplied by Agent Mode.
+    private static func qwenJSON(_ value: JSONValue) throws -> ModelChatJSONValue {
+        switch value {
+        case .object(let object):
+            return .object(try object.keys.sorted().map {
+                ModelChatJSONMember($0, try qwenJSON(object[$0]!))
+            })
+        case .array(let values): return .array(try values.map(qwenJSON))
+        case .string(let value): return .string(value)
+        case .integer(let value): return .integer(value)
+        case .unsignedInteger(let value): return .unsignedInteger(value)
+        case .decimal(let value):
+            let text = NSDecimalNumber(decimal: value).stringValue
+            guard let number = Double(text), number.isFinite else {
+                throw AppInferenceError.invalidRequest(
+                    "Qwen tool JSON contains a number it cannot represent.")
+            }
+            return .number(number)
+        case .number(let value):
+            guard value.isFinite else {
+                throw AppInferenceError.invalidRequest(
+                    "Qwen tool JSON contains a non-finite number.")
+            }
+            return .number(value)
+        case .bool(let value): return .bool(value)
+        case .null: return .null
+        }
+    }
+
+    private static func qwenUserMessage(
+        prompt: String,
+        attachments: [AppImageAttachment]
+    ) -> ModelChatMessage {
+        guard !attachments.isEmpty else {
+            return ModelChatMessage(role: .user, content: prompt)
+        }
+        var parts = attachments.map {
+            ModelChatContentPart.image(.init(id: $0.id.uuidString))
+        }
+        if !prompt.isEmpty { parts.append(.text(prompt)) }
+        return ModelChatMessage(role: .user, content: .parts(parts))
+    }
+
+    private static func qwenToolResultMessages(
+        _ results: [AppToolResult]
+    ) -> [ModelChatMessage] {
+        results.map { result in
+            var parts: [ModelChatContentPart] = [.text(result.content)]
+            parts.append(contentsOf: result.imageAttachments.map {
+                .image(.init(id: $0.id.uuidString))
+            })
+            let content: ModelChatContent = result.imageAttachments.isEmpty
+                ? .text(result.content) : .parts(parts)
+            return ModelChatMessage(
+                role: .tool, content: content,
+                toolCallID: result.callID, name: result.name)
+        }
+    }
+
+    private static func qwenImagesByID(
+        _ attachments: [AppImageAttachment]
+    ) throws -> [String: URL] {
+        var result: [String: URL] = [:]
+        result.reserveCapacity(attachments.count)
+        for attachment in attachments {
+            try Task.checkCancellation()
+            let actualDigest = try Sha256Verifier.hashFile(
+                at: attachment.fileURL, chunkBytes: 256 * 1_024)
+            guard actualDigest == attachment.sha256 else {
+                throw AppInferenceError.invalidRequest(
+                    "Image \(attachment.displayName) changed after selection.")
+            }
+            guard result.updateValue(
+                attachment.fileURL, forKey: attachment.id.uuidString) == nil else {
+                throw AppInferenceError.invalidRequest("Images must be distinct.")
+            }
+        }
+        return result
+    }
+
+    private static func mapQwenGenerationError(_ error: Error) -> AppInferenceError {
+        if let appError = error as? AppInferenceError { return appError }
+        if let error = error as? ModelFamilyGenerationError {
+            switch error {
+            case .contextOverflow(let prompt, let maxNew, let maximum):
+                return .contextOverflow(prompt: prompt, maxNew: maxNew, maxContext: maximum)
+            case .busy:
+                return .generationInFlight
+            case .modelIdentityChanged:
+                return .reloadRequired
+            case .emptyPrompt, .unsupportedInput, .missingImage, .unexpectedImage,
+                    .duplicateImageID, .verifiedVisionUnavailable, .incompatibleVisionPack:
+                return .invalidRequest(error.description)
+            }
+        }
+        if let error = error as? ConversationStateTransactionError {
+            switch error {
+            case .restoreFailed:
+                return .conversationLineageLost(String(describing: error))
+            case .contextExceeded(let requested, let maximum):
+                return .contextOverflow(prompt: requested, maxNew: 0, maxContext: maximum)
+            case .busy:
+                return .generationInFlight
+            case .staleTransaction, .invalidBoundary, .unsupportedFamily,
+                    .tokenCodecUnavailable:
+                return .invalidRequest(String(describing: error))
+            }
+        }
+        if error is QwenChatCodecError
+            || error is QwenConversationGenerationError
+            || error is MultimodalPromptRendererError {
+            return .invalidRequest(String(describing: error))
+        }
+        return .unknown(String(describing: error))
     }
 
     static func forceLogitsHead(for request: AppGenerationRequest) -> Bool {
@@ -546,23 +1633,40 @@ actor RealInferenceSession {
     }
 
     func unload() async {
-        // Awaited, not just dropped. `MultimodalConversation` holds the model,
-        // runner, scratch and vision runtime as strong `let`s, and a turn in
-        // flight holds its own reference — so nilling this while a decode runs
-        // frees nothing and the next load builds a second set beside the live
-        // one. `invalidate()` is what waits for that decode.
-        if let conversation { await conversation.invalidate() }
-        conversation = nil
-        conversationImageProvenance.removeAll()
+        if let activeLifecycle {
+            activeLifecycle.teardownRequested = true
+            lifecycleUnloadWaiters += 1
+            defer { lifecycleUnloadWaiters -= 1 }
+            await activeLifecycle.completion.wait()
+            return
+        }
+        guard loadedKey != nil || loadedFamily != nil || conversation != nil else {
+            tokenizer = nil
+            tokenizerDirectoryCache.clear()
+            ctx = nil
+            conversationLogicalStateBytes.withLock { $0 = nil }
+            expertCacheBytes.withLock { $0 = nil }
+            return
+        }
+        guard let transition = try? beginLifecycleTransition() else { return }
+        transition.teardownRequested = true
+        await waitForQwenOrdinaryGeneration()
+        qwenTools.removeAll(keepingCapacity: true)
+        qwenSystemPrompt = nil
+        qwenPendingToolCalls.removeAll(keepingCapacity: true)
         conversationTokens.withLock { $0 = 0 }
-        visionRuntime = nil
-        visionRuntimeError = nil
-        model = nil
-        runner = nil
-        scratch = nil
+        conversationLogicalStateBytes.withLock { $0 = nil }
+        expertCacheBytes.withLock { $0 = nil }
+        var capturedConversation = transition.retired?.conversation
+        if let capturedConversation { await capturedConversation.invalidate() }
+        capturedConversation = nil
+        transition.retired?.releaseAll()
+        transition.retired = nil
         tokenizer = nil
         tokenizerDirectoryCache.clear()
-        loadedKey = nil
+        ctx = nil
+        if activeLifecycle === transition { activeLifecycle = nil }
+        transition.completion.finish()
     }
 
     /// The single-prompt path: reset the KV and prefill the whole rendered
@@ -846,11 +1950,156 @@ actor RealInferenceSession {
                     "Agent Mode reached its invisible-output token limit (\(limit) tokens) "
                         + "without visible answer text or a completed tool call. "
                         + "No new VisionCapture request was dispatched from this model step.")
+            case .unsupportedFamily, .tokenCodecUnavailable:
+                throw AppInferenceError.invalidRequest("\(error)")
             case .closed, .busy, .emptyTurn,
                     .toolModeRequiresNewConversation, .invalidToolContinuation:
                 throw AppInferenceError.unknown("\(error)")
             }
         }
+    }
+
+    private func runQwenTurn(
+        request: AppGenerationRequest,
+        loadedKey: SessionLoadKey,
+        progress: ProgressState,
+        memorySampler: AppMemorySampler,
+        continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation
+    ) async throws -> TurnOutcome {
+        let expectedKey = SessionLoadKey(
+            directory: request.modelDirectory.standardizedFileURL,
+            maxContext: request.maxContextTokens,
+            options: request.runtimeOptions,
+            forceLogitsHead: Self.forceLogitsHead(for: request))
+        guard loadedKey == expectedKey else { throw AppInferenceError.reloadRequired }
+        if let conversationLifecycleError { throw conversationLifecycleError }
+        let generation = try beginQwenOrdinaryGeneration()
+        defer { finishQwenOrdinaryGeneration() }
+
+        if !request.continuesConversation {
+            try await generation.reset()
+            qwenTools.removeAll(keepingCapacity: true)
+            qwenSystemPrompt = nil
+            qwenPendingToolCalls.removeAll(keepingCapacity: true)
+            await publishQwenConversationStatus()
+        }
+
+        let turn: QwenConversationTurn
+        let tools: [ModelChatToolDefinition]
+        let systemPrompt: String?
+        switch request.toolTurn {
+        case .user(let developerPrompt, let definitions):
+            guard qwenPendingToolCalls.isEmpty else {
+                throw AppInferenceError.invalidRequest(
+                    "Qwen is waiting for the exact results of its pending tool calls.")
+            }
+            tools = try Self.qwenTools(definitions)
+            systemPrompt = developerPrompt
+            turn = .user(Self.qwenUserMessage(
+                prompt: request.prompt, attachments: request.imageAttachments))
+        case .results(let results):
+            guard results.count == qwenPendingToolCalls.count,
+                  zip(results, qwenPendingToolCalls).allSatisfy({ result, call in
+                      result.callID == call.id && result.name == call.name
+                  }) else {
+                throw AppInferenceError.invalidRequest(
+                    "Tool results do not match the pending Qwen tool calls.")
+            }
+            tools = qwenTools
+            systemPrompt = nil
+            turn = .toolResults(Self.qwenToolResultMessages(results))
+        case .checkpoint(let id):
+            guard qwenPendingToolCalls.isEmpty, request.imageAttachments.isEmpty else {
+                throw AppInferenceError.invalidRequest(
+                    "Qwen checkpoint resume does not accept another image.")
+            }
+            tools = qwenTools
+            systemPrompt = nil
+            turn = .checkpoint(id)
+        case nil:
+            guard qwenPendingToolCalls.isEmpty else {
+                throw AppInferenceError.invalidRequest(
+                    "Qwen is waiting for the exact results of its pending tool calls.")
+            }
+            tools = []
+            systemPrompt = nil
+            turn = .user(Self.qwenUserMessage(
+                prompt: request.prompt, attachments: request.imageAttachments))
+        }
+
+        let imagesByID = try Self.qwenImagesByID(request.imageAttachments)
+        let previousTokens = conversationTokens.withLock { $0 }
+        memorySampler.resetPeak()
+        _ = memorySampler.sample()
+        progress.prefillStart = Date()
+        let terminalCalls = Mutex<[ParsedToolCall]>([])
+        let config = Self.generationConfig(
+            for: request, maxNewTokens: request.maxNewTokens)
+        let result: QwenConversationGenerationResult
+        do {
+            result = try await generation.generate(
+                QwenConversationGenerationRequest(
+                    turn: turn,
+                    systemPrompt: systemPrompt,
+                    tools: tools,
+                    imagesByID: imagesByID,
+                    thinking: Self.qwenThinkingMode(for: request),
+                    visionResidency: request.runtimeOptions.visionResidencyPolicy,
+                    config: config),
+                shouldStop: stopFlagReader(),
+                onEvent: { event in
+                    switch event {
+                    case .prefill(let done, let total):
+                        if done == total {
+                            self.decodeBegan.withLock { $0 = true }
+                            progress.decodeStart = Date()
+                        }
+                        continuation.yield(.prefillProgress(done: done, total: total))
+                    case .structuredProgress(let value):
+                        progress.updateStructuredProgress(value)
+                        progress.generated = max(progress.generated,
+                            value.thinkingTokens + value.toolCallTokens
+                                + value.visibleResponseTokens + value.channelLabelTokens
+                                + value.unknownHiddenChannelTokens)
+                    case .text(let text):
+                        if progress.firstTokenDate == nil { progress.firstTokenDate = Date() }
+                        let index = progress.nextVisibleEventIndex
+                        continuation.yield(.token(AppTokenEvent(
+                            index: index,
+                            textDelta: text,
+                            elapsedDecodeSeconds: progress.elapsedDecodeSeconds,
+                            structuredProgress: progress.structuredProgress,
+                            thinkingPreview: progress.thinkingPreview,
+                            toolCallPreview: progress.toolCallPreview)))
+                    case .toolCall(let call):
+                        terminalCalls.withLock { $0.append(call) }
+                    }
+                })
+        } catch is CancellationError {
+            await publishQwenConversationStatus()
+            throw CancellationError()
+        } catch {
+            await publishQwenConversationStatus()
+            throw Self.mapQwenGenerationError(error)
+        }
+
+        progress.generated = result.newTokens
+        progress.promptTokenCount = result.promptTokens
+        let calls = terminalCalls.withLock { $0 }
+        qwenTools = tools
+        if let systemPrompt { qwenSystemPrompt = systemPrompt }
+        qwenPendingToolCalls = calls
+        conversationTokens.withLock { $0 = result.metrics.retainedTokenIDs.count }
+        conversationLogicalStateBytes.withLock { $0 = result.metrics.logicalStateBytes }
+        return TurnOutcome(
+            reason: result.reason,
+            prefillSeconds: result.prefillSeconds,
+            decodeSeconds: result.decodeSeconds,
+            newTokens: result.newTokens,
+            cachedTokens: request.continuesConversation ? previousTokens : nil,
+            computedPrefillTokens: result.promptTokens,
+            conversationTokens: result.metrics.retainedTokenIDs.count,
+            toolCalls: calls)
     }
 
     func run(request: AppGenerationRequest,
@@ -888,7 +2137,40 @@ actor RealInferenceSession {
                 options: request.runtimeOptions,
                 forceLogitsHead: Self.forceLogitsHead(for: request))
             guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
-            guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
+            switch loadedFamily {
+            case .qwen:
+                guard qwenGeneration != nil else {
+                    throw AppInferenceError.invalidRequest(
+                        "Qwen string, tool, and image generation requires the Phase 14 chat codec; use the prepared-token boundary.")
+                }
+                let outcome = try await runQwenTurn(
+                    request: request, loadedKey: loadedKey,
+                    progress: progress, memorySampler: memorySampler,
+                    continuation: continuation)
+                for call in outcome.toolCalls {
+                    continuation.yield(.toolCall(AppToolCall(
+                        id: call.id, name: call.name, arguments: call.arguments)))
+                }
+                let diagnostics = makeDiagnostics(
+                    request: request, memorySampler: memorySampler, progress: progress,
+                    stopReason: Self.stopReason(outcome.reason),
+                    prefillSeconds: outcome.prefillSeconds,
+                    decodeSeconds: outcome.decodeSeconds, generated: outcome.newTokens,
+                    cachedTokens: outcome.cachedTokens,
+                    computedPrefillTokens: outcome.computedPrefillTokens,
+                    conversationTokens: outcome.conversationTokens,
+                    prefill: PrefillExecutionDiagnostics(
+                        config: prefillConfig,
+                        executedMode: prefillConfig.mode == .chunked ? .chunked : .off,
+                        kvStorageMode: .fp16))
+                continuation.yield(.finished(diagnostics))
+                continuation.finish()
+                return
+            case .gemma:
+                guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
+            case nil:
+                throw AppInferenceError.modelNotLoaded
+            }
             guard let runner, let tokenizer, let ctx, let scratch else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
@@ -904,8 +2186,17 @@ actor RealInferenceSession {
             let prefillDiagnostics = PrefillExecutionDiagnostics(config: prefillConfig,
                                                                  executedMode: executedPrefillMode,
                                                                  kvStorageMode: .fp16)
+            // `Model` owns mutable streamer state behind its serial queue. The
+            // generation registry keeps this installation alive and unique for
+            // the callback while the queue-backed accessor reads real buffers.
+            nonisolated(unsafe) let reportingModel = model
 
             let report: @Sendable (RawDecodeProgress) -> Void = { event in
+                if let reportingModel {
+                    self.expertCacheBytes.withLock {
+                        $0 = reportingModel.routedExpertCacheAllocatedBytes
+                    }
+                }
                 switch event {
                 case .prefill(let done, let total):
                     if done == total {
@@ -1049,6 +2340,7 @@ actor RealInferenceSession {
                                 continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation,
                                 prefill: PrefillExecutionDiagnostics? = nil,
                                 forcePartialDiagnostics: Bool = false) {
+        publishGemmaExpertCacheBytes()
         // A parsing error can follow held-back thought bytes on a control token.
         // Flush their display window without counting another sampled token.
         if progress.generated > 0,
@@ -1083,6 +2375,7 @@ actor RealInferenceSession {
                                  computedPrefillTokens: Int? = nil,
                                  conversationTokens: Int? = nil,
                                  prefill: PrefillExecutionDiagnostics? = nil) -> AppDiagnostics {
+        publishGemmaExpertCacheBytes()
         _ = memorySampler.sample()
         let ttft: Double?
         if let first = progress.firstTokenDate, let start = progress.decodeStart {
@@ -1107,6 +2400,8 @@ actor RealInferenceSession {
             tokensPerSecond: decodeSeconds > 0 ? Double(generated) / decodeSeconds : 0,
             peakMemoryBytes: memorySampler.peakBytes,
             visionTowerMappedBytes: visionRuntime.map { UInt64($0.retainedWeightBytes) },
+            conversationLogicalStateBytes: conversationLogicalStateBytes.withLock { $0 },
+            expertCacheBytes: expertCacheBytes.withLock { $0 },
             runtimeOptions: request.runtimeOptions,
             prefill: prefill,
             runner: runnerTiming,
@@ -1192,6 +2487,11 @@ private final class ProgressState: @unchecked Sendable {
         }
     }
     var generated = 0
+    private var visibleEventCount = 0
+    var nextVisibleEventIndex: Int {
+        defer { visibleEventCount += 1 }
+        return visibleEventCount
+    }
     var promptTokenCount: Int?
     var prefillStart: Date?
     var decodeStart: Date?

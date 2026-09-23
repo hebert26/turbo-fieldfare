@@ -2,9 +2,14 @@ import Foundation
 import TurboFieldfare
 
 public struct ServerArguments: Equatable, Sendable {
+    public static let legacyDefaultModelID = "gemma-4-26b-a4b-it"
+
     public let model: String
     public let port: Int
-    public let modelID: String
+    /// Optional operator assertion. The loaded family resolves the served ID.
+    public let modelIDAssertion: String?
+    /// Compatibility view for callers that inspect parsed Gemma arguments.
+    public var modelID: String { modelIDAssertion ?? Self.legacyDefaultModelID }
     public let maxContext: Int
     public let queueLimit: Int
     public let promptCacheMode: ServerPromptCacheMode
@@ -24,11 +29,14 @@ public struct ServerArguments: Equatable, Sendable {
       --vision-residency <on-demand|keep-ready>
                                  Routed-expert residency during vision (default on-demand).
       --port <1...65535>         Loopback port (default 8080).
-      --model-id <id>            API model identifier (default gemma-4-26b-a4b-it).
+      --model-id <id>            Optional model identity assertion. Gemma also
+                                 accepts it as an API alias. Verified Qwen requires
+                                 an exact descriptor model ID match.
       --max-context <tokens>     4096, 8192, 16384, 32768, or 65536 (default 16384).
       --queue-limit <count>      Maximum queued requests (default 4).
       --prompt-cache-mode <off|single-prefix>
-                                 Prompt KV reuse mode (default single-prefix).
+                                 Gemma prompt KV reuse mode (default single-prefix).
+                                 Verified Qwen is currently no-cache and reports 0.
       --expert-cache-slots <n>   Expert-cache slots: \(allowedValueList(RuntimeConfiguration.allowedExpertCacheSlots)) (default 16).
       --expert-cache-policy <s>  Expert-cache policy: lfu or lru (default lfu).
       --prefill on|off           Enable or disable chunked prompt prefill (default on).
@@ -76,7 +84,7 @@ public struct ServerArguments: Equatable, Sendable {
     public static func parse(_ input: [String]) throws -> ServerArguments {
         var model: String?
         var port = 8080
-        var modelID = "gemma-4-26b-a4b-it"
+        var modelIDAssertion: String?
         var maxContext = 16_384
         var queueLimit = 4
         var promptCacheMode: ServerPromptCacheMode = .singlePrefix
@@ -108,7 +116,7 @@ public struct ServerArguments: Equatable, Sendable {
                 guard !value.isEmpty else {
                     throw ServerArgumentError.invalid("--model-id must not be empty")
                 }
-                modelID = value
+                modelIDAssertion = value
             case "--max-context":
                 guard let parsed = Int(value),
                       [4_096, 8_192, 16_384, 32_768, 65_536].contains(parsed) else {
@@ -174,7 +182,7 @@ public struct ServerArguments: Equatable, Sendable {
         guard let model else { throw ServerArgumentError.invalid("--model is required") }
         return ServerArguments(model: model,
                                port: port,
-                               modelID: modelID,
+                               modelID: modelIDAssertion,
                                maxContext: maxContext,
                                queueLimit: queueLimit,
                                promptCacheMode: promptCacheMode,
@@ -185,6 +193,36 @@ public struct ServerArguments: Equatable, Sendable {
                                rdadvisePolicy: rdadvisePolicy,
                                visionPack: visionPack,
                                visionResidency: visionResidency)
+    }
+
+    public init(
+        model: String,
+        port: Int,
+        modelID: String? = nil,
+        maxContext: Int,
+        queueLimit: Int,
+        promptCacheMode: ServerPromptCacheMode,
+        expertCacheSlots: Int,
+        expertCachePolicy: RuntimeExpertCachePolicy,
+        prefillPolicy: RuntimePrefillPolicy,
+        prefillChunkTokens: Int,
+        rdadvisePolicy: RDAdvicePolicyMode,
+        visionPack: String?,
+        visionResidency: VisionResidencyPolicy
+    ) {
+        self.model = model
+        self.port = port
+        modelIDAssertion = modelID
+        self.maxContext = maxContext
+        self.queueLimit = queueLimit
+        self.promptCacheMode = promptCacheMode
+        self.expertCacheSlots = expertCacheSlots
+        self.expertCachePolicy = expertCachePolicy
+        self.prefillPolicy = prefillPolicy
+        self.prefillChunkTokens = prefillChunkTokens
+        self.rdadvisePolicy = rdadvisePolicy
+        self.visionPack = visionPack
+        self.visionResidency = visionResidency
     }
 }
 

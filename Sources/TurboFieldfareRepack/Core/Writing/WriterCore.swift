@@ -36,6 +36,41 @@ public enum WriterCore {
         }
     }
 
+    typealias PositionedWrite = (
+        _ fd: Int32, _ path: String, _ bytes: UnsafeRawBufferPointer, _ offset: UInt64
+    ) throws -> Int
+
+    /// Writes one transformed component through an injectable exact-write
+    /// seam. Production still uses `Posix.pwriteAll`; tests can prove that a
+    /// short write cannot cross the group commit boundary.
+    static func pwriteTransformedComponent(
+        _ data: Data,
+        dstFd: Int32,
+        dstPath: String,
+        dstOffset: UInt64,
+        audit: RepackAudit,
+        write: PositionedWrite = { fd, path, bytes, offset in
+            guard let base = bytes.baseAddress else { return 0 }
+            try Posix.pwriteAll(
+                fd: fd, path: path, buf: base, count: bytes.count, offset: offset)
+            return bytes.count
+        }
+    ) throws {
+        guard !data.isEmpty else {
+            throw RepackError.configurationInvalid(
+                detail: "transformed component cannot be empty")
+        }
+        let written = try data.withUnsafeBytes {
+            try write(dstFd, dstPath, $0, dstOffset)
+        }
+        guard written == data.count else {
+            throw RepackError.pwriteShort(
+                path: dstPath, expected: data.count, wrote: written, errno: 0)
+        }
+        audit.recordTile(bytes: data.count)
+        audit.recordWrite(bytes: data.count)
+    }
+
     /// Compute SHA-256 of an entire (presumed-written) file by streaming it
     /// through `tileBytes` pread chunks. Drops pages with `F_NOCACHE` style
     /// behaviour via fcntl. Allocates one bounded scratch buffer.

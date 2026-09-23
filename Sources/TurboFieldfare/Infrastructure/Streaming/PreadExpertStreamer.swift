@@ -60,7 +60,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public let layout: StreamLayout
     public let slotCount: Int
-    private let slotAllocationSize: Int
     public let cachePolicy: ExpertCachePolicy
 
     private let fd: Int32
@@ -128,7 +127,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
-        self.slotAllocationSize = allocationSize
         var pointers: [UnsafeMutableRawPointer] = []
         var buffers: [MTLBuffer] = []
         pointers.reserveCapacity(slotCount)
@@ -425,11 +423,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
     }
 
-    /// Model-derived CPU-side scratch owned by this streamer: its aligned
-    /// slot allocation. Diagnostic metadata for residency reporting, not an
-    /// ownership or lifetime API.
+    /// Bytes of the actual Metal cache buffers this streamer owns. Each slot
+    /// buffer is counted once; configured slot geometry is not used as a
+    /// substitute for the buffers that were successfully created.
+    public var allocatedCacheBytes: UInt64 {
+        slotBuffers.reduce(UInt64(0)) { total, buffer in
+            total + UInt64(buffer.length)
+        }
+    }
+
+    /// CPU-side scratch owned by this streamer. Diagnostic metadata for
+    /// residency reporting, not an ownership or lifetime API.
     public var diagnosticSlotScratchBytes: UInt64 {
-        UInt64(slotCount) * UInt64(slotAllocationSize)
+        allocatedCacheBytes
     }
 
     func recordMeasurementSnapshot(_ capture: RuntimeMeasurementCapture, layer: Int, reason: UInt64) {

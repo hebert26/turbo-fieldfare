@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import TurboFieldfareFormat
 
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
@@ -103,6 +104,134 @@ public struct ArchConfig: Sendable, Equatable {
         var mask = [UInt8](repeating: 0, count: 30)
         for i in stride(from: 5, to: 30, by: 6) { mask[i] = 1 }
         return mask
+    }
+}
+
+/// Runtime configuration for Qwen 3.6. Fields retain their native Qwen
+/// meaning instead of being forced into Gemma's `ArchConfig` vocabulary.
+public struct QwenArchConfig: Sendable, Equatable {
+    public let hiddenSize: Int
+    public let numLayers: Int
+    public let fullAttentionLayerMask: [UInt8]
+    public let numAttentionHeads: Int
+    public let numKeyValueHeads: Int
+    public let headDimension: Int
+    public let attentionOutputGate: Bool
+    public let linearConvolutionKernel: Int
+    public let linearKeyHeads: Int
+    public let linearKeyHeadDimension: Int
+    public let linearValueHeads: Int
+    public let linearValueHeadDimension: Int
+    public let recurrentStateIsFP32: Bool
+    public let partialRotaryFactor: Double
+    public let ropeTheta: Double
+    public let mropeSections: [Int]
+    public let numberOfExperts: Int
+    public let expertsPerToken: Int
+    public let routedExpertIntermediateSize: Int
+    public let sharedExpertIntermediateSize: Int
+    public let vocabularySize: Int
+    public let tiedWordEmbeddings: Bool
+    public let hiddenActivation: String
+    public let bosTokenID: Int
+    public let eosTokenID: Int
+    public let imageTokenID: Int
+    public let videoTokenID: Int
+    public let visionStartTokenID: Int
+    public let visionEndTokenID: Int
+
+    init(wire: GTurboQwenArchitectureV2) {
+        hiddenSize = wire.hiddenSize
+        numLayers = wire.numLayers
+        fullAttentionLayerMask = wire.layerTypes.map { $0 == .fullAttention ? 1 : 0 }
+        numAttentionHeads = wire.numAttentionHeads
+        numKeyValueHeads = wire.numKeyValueHeads
+        headDimension = wire.headDimension
+        attentionOutputGate = wire.attentionOutputGate
+        linearConvolutionKernel = wire.linearConvolutionKernel
+        linearKeyHeads = wire.linearKeyHeads
+        linearKeyHeadDimension = wire.linearKeyHeadDimension
+        linearValueHeads = wire.linearValueHeads
+        linearValueHeadDimension = wire.linearValueHeadDimension
+        recurrentStateIsFP32 = wire.recurrentStateType == .fp32
+        partialRotaryFactor = wire.partialRotaryFactor
+        ropeTheta = wire.ropeTheta
+        mropeSections = wire.mropeSections
+        numberOfExperts = wire.numberOfExperts
+        expertsPerToken = wire.expertsPerToken
+        routedExpertIntermediateSize = wire.routedExpertIntermediateSize
+        sharedExpertIntermediateSize = wire.sharedExpertIntermediateSize
+        vocabularySize = wire.vocabularySize
+        tiedWordEmbeddings = wire.tiedWordEmbeddings
+        hiddenActivation = wire.hiddenActivation
+        bosTokenID = wire.bosTokenID
+        eosTokenID = wire.eosTokenID
+        imageTokenID = wire.imageTokenID
+        videoTokenID = wire.videoTokenID
+        visionStartTokenID = wire.visionStartTokenID
+        visionEndTokenID = wire.visionEndTokenID
+    }
+}
+
+public enum LoadedModelArchitecture: Sendable, Equatable {
+    case gemma4(ArchConfig)
+    case qwen3_6(QwenArchConfig)
+}
+
+public enum LoadedTensorStorage: String, Sendable, Equatable {
+    case bf16
+    case fp32
+    case affineInt4
+    case affineInt8
+}
+
+public struct LoadedTensorRegion: Sendable, Equatable {
+    public let name: String
+    public let file: String
+    public let offset: UInt64
+    public let size: UInt64
+    public let shape: [UInt64]
+    public let storage: LoadedTensorStorage
+    public let quantizationCategory: String?
+
+    init(wire: GTurboTensorRegionV2) {
+        name = wire.name
+        file = wire.file
+        offset = wire.offset
+        size = wire.size
+        shape = wire.shape
+        storage = switch wire.storage {
+        case .bf16: .bf16
+        case .fp32: .fp32
+        case .affineInt4: .affineInt4
+        case .affineInt8: .affineInt8
+        }
+        quantizationCategory = wire.quantizationCategory?.rawValue
+    }
+}
+
+/// A format-verified v2 manifest ready for a later family runtime factory.
+public struct LoadedModelManifest: Sendable, Equatable {
+    public let descriptor: InstalledModelDescriptor
+    public let architecture: LoadedModelArchitecture
+    public let files: [String: ManifestFileEntry]
+    public let tensorRegions: [LoadedTensorRegion]
+    public let expertsPerLayer: Int
+    public let numLayers: Int
+    public let expertStride: UInt64
+
+    init(descriptor: InstalledModelDescriptor,
+         architecture: LoadedModelArchitecture,
+         files: [String: ManifestFileEntry],
+         tensorRegions: [LoadedTensorRegion],
+         expertsPerLayer: Int, numLayers: Int, expertStride: UInt64) {
+        self.descriptor = descriptor
+        self.architecture = architecture
+        self.files = files
+        self.tensorRegions = tensorRegions
+        self.expertsPerLayer = expertsPerLayer
+        self.numLayers = numLayers
+        self.expertStride = expertStride
     }
 }
 

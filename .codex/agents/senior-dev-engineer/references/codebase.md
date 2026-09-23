@@ -8,9 +8,7 @@ Use this when changing source, answering project-shape questions, or deciding wh
 - `/Users/dev-machine/Dev/VisionOS/CONTEXT.md` for project shape, vocabulary, and architecture orientation
 - `/Users/dev-machine/Dev/VisionOS/VisionCapture/AGENTS.md` for source work under `VisionCapture/`
 - Nearest module `CLAUDE.md` or `AGENTS.md` for touched files
-- Knowledge index when product/system context is needed:
-  - preferred: `/Users/dev-machine/Dev/VisionOS/Project-files/knowledge/index.md`
-  - fallback: `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.md`
+- Knowledge index when product/system context is needed: `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.html`
 
 ## Module Ownership
 
@@ -28,8 +26,8 @@ Use this when changing source, answering project-shape questions, or deciding wh
 
 - Do not modify deprecated `VisionCapture/Sources/CLI/` unless the user explicitly asks.
 - Do not look for `Tools/` or `Website/` under `VisionCapture/`; they are repo-root folders.
-- Keep plans, specs, and durable docs under `/Users/dev-machine/Dev/VisionOS/Project-files/`.
-- Keep ADRs under `/Users/dev-machine/Dev/VisionOS/Project-files/adr/`.
+- Keep plans, specs, and durable docs under `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/`.
+- Keep ADRs under `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/adr/`.
 - Keep AgentOS role memory under `/Users/dev-machine/Dev/VisionOS/.agentOS/agents/<role-id>/`.
 - Keep shared AgentOS memory under `/Users/dev-machine/Dev/VisionOS/.agentOS/memory/`.
 - Use `/Users/dev-machine/Dev/VisionOS/.claude/agent-memory/` only for legacy Claude-specific tooling.

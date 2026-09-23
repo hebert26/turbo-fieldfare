@@ -1,3 +1,6 @@
+herdr --session Qwen3.6-35B-A3B
+
+
 # A simple guide to Codex
 
 Checked against official OpenAI documentation on 7 September 2026.

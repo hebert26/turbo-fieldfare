@@ -1,6 +1,12 @@
 import Foundation
 import Metal
 
+/// Family-selected transformation applied immediately before softmax.
+public enum LogitTransform: Sendable, Equatable {
+    case gemmaSoftcap(Float)
+    case raw
+}
+
 /// Generation knobs threaded from the caller through the `Generator` into the
 /// sampler. Pure value type; one per `generate(...)` call.
 ///
@@ -15,6 +21,8 @@ public struct GenerationConfig: Sendable {
     public var seed: UInt64? = nil         // nil = nondeterministic
     public var stopStrings: [String] = []
     public var extraStopTokens: Set<Int32> = []
+    /// Gemma's existing default remains explicit. Qwen callers select `.raw`.
+    public var logitTransform: LogitTransform = .gemmaSoftcap(30)
 
     public init(maxNewTokens: Int = 256,
                 temperature: Float = 1.0,
@@ -32,6 +40,52 @@ public struct GenerationConfig: Sendable {
         self.seed = seed
         self.stopStrings = stopStrings
         self.extraStopTokens = extraStopTokens
+        logitTransform = .gemmaSoftcap(30)
+    }
+
+    public init(maxNewTokens: Int,
+                temperature: Float,
+                topK: Int?,
+                topP: Float?,
+                repetitionPenalty: Float,
+                seed: UInt64?,
+                stopStrings: [String],
+                extraStopTokens: Set<Int32>,
+                logitTransform: LogitTransform) {
+        self.init(
+            maxNewTokens: maxNewTokens,
+            temperature: temperature,
+            topK: topK,
+            topP: topP,
+            repetitionPenalty: repetitionPenalty,
+            seed: seed,
+            stopStrings: stopStrings,
+            extraStopTokens: extraStopTokens)
+        self.logitTransform = logitTransform
+    }
+
+    /// Explicit raw-logit profile for Qwen. Stop IDs are supplied by the
+    /// selected family at the call site rather than silently merged globally.
+    public static func qwenRaw(
+        maxNewTokens: Int = 256,
+        temperature: Float = 1.0,
+        topK: Int? = nil,
+        topP: Float? = nil,
+        repetitionPenalty: Float = 1.0,
+        seed: UInt64? = nil,
+        stopStrings: [String] = [],
+        stopTokenIDs: Set<Int32>
+    ) -> GenerationConfig {
+        GenerationConfig(
+            maxNewTokens: maxNewTokens,
+            temperature: temperature,
+            topK: topK,
+            topP: topP,
+            repetitionPenalty: repetitionPenalty,
+            seed: seed,
+            stopStrings: stopStrings,
+            extraStopTokens: stopTokenIDs,
+            logitTransform: .raw)
     }
 
     public func validate() throws {
@@ -65,6 +119,11 @@ public struct GenerationConfig: Sendable {
             throw GeneratorError.invalidGenerationConfig(
                 "topP below one requires topK; full-vocabulary nucleus sampling is not implemented")
         }
+        if case .gemmaSoftcap(let value) = logitTransform,
+           (!value.isFinite || value <= 0) {
+            throw GeneratorError.invalidGenerationConfig(
+                "Gemma logit softcap must be finite and greater than zero")
+        }
     }
 
 }
@@ -81,8 +140,8 @@ enum SamplePath: Sendable, Equatable {
 ///
 /// The built `sample` kernel already does temperature / top-k / top-p / seeded
 /// draw / greedy argmax on GPU reading softmaxed probs, so this type's job is:
-/// (1) run the softcap+softmax front-end (`logit_softcap_softmax`), (2) apply
-/// repetition penalty — the one policy that needs `history` random access — as
+/// (1) run Gemma's softcap+softmax front-end or Qwen's raw stable softmax,
+/// (2) apply repetition penalty — the one policy that needs `history` random access — as
 /// a single in-place CPU pass over the (shared) logits before the front-end,
 /// and (3) derive a per-position seed so a fixed `seed` is reproducible across
 /// token positions.
@@ -98,21 +157,20 @@ final class Sampler {
     private let sampleKernel: Sample
     private let topK64Kernel: SampleTopK64
     let vocab: Int
-    private let logitSoftcap: Float
 
-    init(context: MetalContext, vocab: Int = 262_144,
-                logitSoftcap: Float = 30.0) throws {
+    init(context: MetalContext, vocab: Int = 262_144) throws {
         self.softcap = try LogitSoftcapSoftmax(context: context)
         self.sampleKernel = try Sample(context: context)
         self.topK64Kernel = try SampleTopK64(context: context, vocab: vocab)
         self.vocab = vocab
-        self.logitSoftcap = logitSoftcap
     }
 
     /// Encode the sampler onto `commandBuffer`. `logits` is FP16 [vocab],
     /// post-lm_head and pre-softcap, in a `.storageModeShared` buffer (the
     /// repetition-penalty path edits it in place). `probs` is a preallocated
-    /// FP16 [vocab] scratch. `outToken` holds one UInt32. `position` indexes the
+    /// FP16 [vocab] scratch. The raw Qwen path writes it on the host before the
+    /// GPU sample encoder; Gemma writes it with `logit_softcap_softmax`.
+    /// `outToken` holds one UInt32. `position` indexes the
     /// per-position seed advance. Returns the path taken.
     @discardableResult
     func sample(commandBuffer: MTLCommandBuffer,
@@ -126,13 +184,21 @@ final class Sampler {
 
         let appliedPenalty = config.repetitionPenalty != 1.0 && !history.isEmpty
         if appliedPenalty {
-            applyRepetitionPenaltyInPlace(logits: logits,
-                                          history: history,
-                                          penalty: config.repetitionPenalty)
+            applyRepetitionPenaltyInPlace(
+                logits: logits,
+                history: history,
+                penalty: config.repetitionPenalty,
+                transform: config.logitTransform)
         }
 
-        softcap.encode(commandBuffer: commandBuffer,
-                       logits: logits, probs: probs, v: v, softcap: logitSoftcap)
+        switch config.logitTransform {
+        case .gemmaSoftcap(let value):
+            softcap.encode(
+                commandBuffer: commandBuffer,
+                logits: logits, probs: probs, v: v, softcap: value)
+        case .raw:
+            rawSoftmax(logits: logits, probabilities: probs)
+        }
 
         let isGreedy = config.temperature == 0
         let seed = Self.seedFor(config: config, position: position)
@@ -158,7 +224,26 @@ final class Sampler {
         return isGreedy ? .greedyGPU : .gpuSampled
     }
 
-    // MARK: - Repetition penalty (host, in place)
+    // MARK: - Raw Qwen softmax and repetition penalty
+
+    /// Stable host softmax for Qwen's explicit raw-logit path. Both buffers are
+    /// shared and the call occurs before the sampling command buffer is
+    /// committed, so its writes are visible to the following GPU sample kernel.
+    private func rawSoftmax(logits: MTLBuffer, probabilities: MTLBuffer) {
+        let input = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
+        let output = probabilities.contents().bindMemory(to: Float16.self, capacity: vocab)
+        var maximum = -Float.infinity
+        for index in 0..<vocab { maximum = max(maximum, Float(input[index])) }
+        var denominator: Float = 0
+        for index in 0..<vocab {
+            denominator += expf(Float(input[index]) - maximum)
+        }
+        let inverse = 1 / denominator
+        for index in 0..<vocab {
+            output[index] = Float16(
+                expf(Float(input[index]) - maximum) * inverse)
+        }
+    }
 
     /// HF convention: for each token id seen in `history`, a positive logit is
     /// divided by `penalty`, a negative logit multiplied. Edits the shared
@@ -173,9 +258,12 @@ final class Sampler {
     /// high-confidence tokens that form repetition loops. So: softcap the raw
     /// value, penalize, and invert through atanh so the downstream
     /// softcap+softmax kernel reproduces the penalized capped logit.
-    private func applyRepetitionPenaltyInPlace(logits: MTLBuffer,
-                                               history: [Int32],
-                                               penalty: Float) {
+    private func applyRepetitionPenaltyInPlace(
+        logits: MTLBuffer,
+        history: [Int32],
+        penalty: Float,
+        transform: LogitTransform
+    ) {
         let ptr = logits.contents().bindMemory(to: Float16.self, capacity: vocab)
         var seen = Set<Int32>()
         seen.reserveCapacity(history.count)
@@ -184,7 +272,8 @@ final class Sampler {
             let i = Int(id)
             let z = Float(ptr[i])
             let penalized: Float
-            if logitSoftcap > 0 {
+            switch transform {
+            case .gemmaSoftcap(let logitSoftcap):
                 let capped = logitSoftcap * tanhf(z / logitSoftcap)
                 let cappedPenalized = capped > 0 ? capped / penalty : capped * penalty
                 // A saturated negative logit times the penalty can leave the
@@ -193,7 +282,7 @@ final class Sampler {
                 let limit = logitSoftcap * 0.9999
                 let clamped = max(min(cappedPenalized, limit), -limit)
                 penalized = logitSoftcap * atanhf(clamped / logitSoftcap)
-            } else {
+            case .raw:
                 penalized = z > 0 ? z / penalty : z * penalty
             }
             ptr[i] = Float16(penalized)

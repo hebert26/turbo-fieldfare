@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareFormat
 
 /// A failed attempt, never a completed assistant turn or an instruction to replay input.
 public struct ThoughtRepetitionRecovery: Error, Codable, Equatable, Sendable {
@@ -114,7 +115,8 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         case label
     }
 
-    private let tokenizer: GFTokenizer
+    private let tokenizer: GFTokenizer?
+    private var qwenDecoder: QwenStructuredAssistantDecoder?
     private let allowedTools: Set<String>
     private let acceptsUnknownToolNames: Bool
     private let idGenerator: @Sendable () -> String
@@ -144,6 +146,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
                     "call_" + (0..<24).map { _ in String(format: "%x", UInt8.random(in: 0...15)) }.joined()
                 }) {
         self.tokenizer = tokenizer
+        qwenDecoder = nil
         self.allowedTools = allowedTools
         self.acceptsUnknownToolNames = acceptsUnknownToolNames
         self.captureFailureEvidence = captureFailureEvidence
@@ -159,7 +162,77 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         }
     }
 
+    public init(
+        descriptor: InstalledModelDescriptor,
+        qwenTools: [ModelChatToolDefinition],
+        startsInThoughtChannel: Bool,
+        idGenerator: @escaping @Sendable () -> String = {
+            "call_" + (0..<24).map { _ in
+                String(format: "%x", UInt8.random(in: 0...15))
+            }.joined()
+        }
+    ) throws {
+        guard descriptor.family == .qwen3_6 else {
+            throw GemmaToolCallParserError.malformed
+        }
+        tokenizer = nil
+        qwenDecoder = QwenStructuredAssistantDecoder(
+            tools: qwenTools,
+            startsInThoughtChannel: startsInThoughtChannel,
+            idGenerator: idGenerator)
+        allowedTools = []
+        acceptsUnknownToolNames = false
+        self.idGenerator = idGenerator
+        captureFailureEvidence = false
+        captureThoughtPreview = false
+        thoughtRepetition = nil
+    }
+
+    public convenience init(
+        descriptor: InstalledModelDescriptor,
+        tokenizer: GFTokenizer,
+        allowedTools: Set<String>,
+        startsInThoughtChannel: Bool = false,
+        acceptsUnknownToolNames: Bool = false,
+        captureFailureEvidence: Bool = false,
+        captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
+        idGenerator: @escaping @Sendable () -> String = {
+            "call_" + (0..<24).map { _ in
+                String(format: "%x", UInt8.random(in: 0...15))
+            }.joined()
+        }
+    ) throws {
+        guard descriptor.family == .gemma4 else {
+            throw GemmaToolCallParserError.malformed
+        }
+        self.init(
+            tokenizer: tokenizer,
+            allowedTools: allowedTools,
+            startsInThoughtChannel: startsInThoughtChannel,
+            acceptsUnknownToolNames: acceptsUnknownToolNames,
+            captureFailureEvidence: captureFailureEvidence,
+            captureThoughtPreview: captureThoughtPreview,
+            detectThoughtRepetition: detectThoughtRepetition,
+            idGenerator: idGenerator)
+    }
+
     public func consume(tokenID: Int32, delta: String) throws -> [StructuredAssistantEvent] {
+        if var qwenDecoder {
+            do {
+                let events = try qwenDecoder.consume(delta)
+                // `<|im_end|>` is ID 248046 in the pinned, SHA-verified
+                // tokenizer configuration (`QwenTokenizer.eosID`). It marks
+                // terminal state but never publishes calls.
+                if tokenID == 248_046 { try qwenDecoder.markEndOfStream() }
+                self.qwenDecoder = qwenDecoder
+                return events
+            } catch {
+                self.qwenDecoder = qwenDecoder
+                throw error
+            }
+        }
+        guard let tokenizer else { throw GemmaToolCallParserError.malformed }
         guard !failed else { throw GemmaToolCallParserError.malformed }
         defer { recordProgress() }
 
@@ -265,6 +338,18 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     /// through `consume`; without this a generation cut off inside the
     /// thought channel would leak its held-back bytes into visible content.
     public func consumeTail(_ text: String) throws -> [StructuredAssistantEvent] {
+        if var qwenDecoder {
+            do {
+                let events = try qwenDecoder.hasSeenEndOfStream
+                    ? qwenDecoder.consumeTerminalTail(text)
+                    : qwenDecoder.consume(text)
+                self.qwenDecoder = qwenDecoder
+                return events
+            } catch {
+                self.qwenDecoder = qwenDecoder
+                throw error
+            }
+        }
         guard !failed else { throw GemmaToolCallParserError.malformed }
         guard toolTokens == nil, !text.isEmpty else { return [] }
         return routeText(text)
@@ -307,18 +392,33 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         progress.earlierThoughtTextOmitted = true
     }
 
-    public func finish() throws {
+    @discardableResult
+    public func finish() throws -> [StructuredAssistantEvent] {
+        if var qwenDecoder {
+            do {
+                let events = try qwenDecoder.finish()
+                self.qwenDecoder = qwenDecoder
+                return events
+            } catch {
+                self.qwenDecoder = qwenDecoder
+                throw error
+            }
+        }
         guard !failed, toolTokens == nil else {
             captureFailure(phase: "unfinished_tool_span", tokens: toolTokens)
             throw GemmaToolCallParserError.malformed
         }
+        return []
     }
 
-    public var hasToolCalls: Bool { emittedCalls > 0 }
+    public var hasToolCalls: Bool {
+        qwenDecoder?.hasToolCalls ?? (emittedCalls > 0)
+    }
 
     /// Inspect only the opening 256 tokens / 8 KiB. Reaching either bound
     /// disables this check, never generation. Complete parsing is unchanged.
     private func inspectOpening(tokenID: Int32, tokens: [Int32]) throws {
+        guard tokenizer != nil else { throw GemmaToolCallParserError.malformed }
         // Only committed fragments are safe to reject. Flushing a byte-fallback
         // run here could manufacture replacement text before its final byte.
         guard let fragment = openingDetokenizer?.push(tokenID) else { return }
@@ -351,7 +451,7 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
     }
 
     private func refreshToolCallPreview(tokens: [Int32]) {
-        guard captureThoughtPreview else { return }
+        guard captureThoughtPreview, let tokenizer else { return }
         previewTokenCount = tokens.count
         let prefixLimit = 2 * 1_024
         let tailLimit = 6 * 1_024
@@ -416,7 +516,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
         guard captureFailureEvidence, failureEvidence == nil else { return }
         failureEvidence = StructuredToolFailureEvidence(
             phase: phase, payloadTokenIDs: tokens,
-            payloadText: text ?? tokens.map { tokenizer.decode($0, skipSpecialTokens: false) },
+            payloadText: text ?? tokens.flatMap { tokens in
+                tokenizer.map { $0.decode(tokens, skipSpecialTokens: false) }
+            },
             triggerTokenID: trigger, originalStopReason: nil)
     }
 }

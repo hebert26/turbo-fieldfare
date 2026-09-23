@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Parses bounded safetensors header bytes fetched by the remote installer.
 /// Tensor payload coordinates remain absolute source-file offsets so later
@@ -43,6 +44,39 @@ enum Safetensors {
         return try parseHeaderBytes(path: path,
                                     fileSize: fileSize,
                                     headerBytes: data)
+    }
+
+    /// Parses a header from an untrusted local snapshot leaf without following
+    /// it or blocking on a FIFO. This is intentionally separate from the
+    /// remote parser, whose input is a downloader-owned temporary file.
+    static func parseLocalHeader(path: String) throws -> Header {
+        let fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        if fd < 0 { throw RepackError.fileOpenFailed(path: path, errno: errno) }
+        defer { close(fd) }
+
+        var info = stat()
+        guard fstat(fd, &info) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
+            throw RepackError.fileStatFailed(path: path, errno: errno == 0 ? EINVAL : errno)
+        }
+        guard info.st_size >= 8 else {
+            throw RepackError.safetensorsHeaderInvalid(path: path, detail: "file too short")
+        }
+        let fileSize = UInt64(info.st_size)
+        var headerSizeLE: UInt64 = 0
+        try withUnsafeMutableBytes(of: &headerSizeLE) { raw in
+            try Posix.preadAll(fd: fd, path: path, buf: raw.baseAddress!, count: 8, offset: 0)
+        }
+        let headerSize = UInt64(littleEndian: headerSizeLE)
+        guard headerSize <= maxHeaderBytes, headerSize <= fileSize - 8,
+              headerSize <= UInt64(Int.max) else {
+            throw RepackError.safetensorsHeaderTooLarge(path: path, size: headerSize)
+        }
+        var data = Data(count: Int(headerSize))
+        try data.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress, !raw.isEmpty else { return }
+            try Posix.preadAll(fd: fd, path: path, buf: base, count: raw.count, offset: 8)
+        }
+        return try parseHeaderBytes(path: path, fileSize: fileSize, headerBytes: data)
     }
 
     static func parseHeaderBytes(path: String,

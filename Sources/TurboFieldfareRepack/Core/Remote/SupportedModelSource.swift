@@ -1,14 +1,17 @@
 import Foundation
 
+/// Compatibility aliases for the existing remote Gemma installer source.
+/// Additional catalog entries must not change this remote-install contract.
 public enum SupportedModelSource {
-    public static let displayName = "Gemma 4 26B-A4B IT 4-bit"
-    public static let repoID = "mlx-community/gemma-4-26b-a4b-it-4bit"
-    public static let revision = "0d77464eeb233a2da68ebf9d7dc4edaac7db956d"
-    public static let sourceIndexSHA256 =
-        "bf198c9f5ea6462addca1966e5dd669c407537a876e82cf06db9084c5c850b13"
-    public static let approximateDownloadBytes: UInt64 = 14_620_479_420
-    public static let installedBytes: UInt64 = 14_291_921_884
-    public static let reserveBytes: UInt64 = 1_073_741_824
+    private static let source = ModelSourceCatalog.gemma
+
+    public static let displayName = source.displayName
+    public static let repoID = source.repository
+    public static let revision = source.revision
+    public static let sourceIndexSHA256 = source.sourceIndexSHA256
+    public static let approximateDownloadBytes = source.approximateDownloadBytes
+    public static let installedBytes = source.installedBytes
+    public static let reserveBytes = source.reserveBytes
 
     public static func installOptions(outputDirectory: URL,
                                       overwrite: Bool,

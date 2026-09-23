@@ -30,10 +30,10 @@ review in a browser. Do not create HTML merely to make a simple text document lo
 ## Documentation scope
 
 - Put every plan, specification, diagram, architecture document, visual artifact, and other durable project document
-  under `/Users/dev-machine/Dev/VisionOS/Project-files/` unless the user explicitly requests another repository path.
+  under `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/` unless the user explicitly requests another path. That tree moved from `/Users/dev-machine/Documents/Personal projects/VisionCapture/Project-files`. Use the new path from now on.
 - Use the existing `Project-files/active/`, `Project-files/adr/`, `Project-files/visuals/`, and archive conventions;
   inspect nearby files before choosing a destination.
-- For knowledge-base work, start with `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.md`, follow only the
+- For knowledge-base work, start with `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.html`, follow only the
   relevant linked documents, and preserve the knowledge-base navigation structure.
 - Keep role definitions under `/Users/dev-machine/Dev/VisionOS/.codex/agents/` and role memory under
   `/Users/dev-machine/Dev/VisionOS/.agentOS/agents/documentation-engineer/` only when memory is explicitly needed.
@@ -44,7 +44,7 @@ review in a browser. Do not create HTML merely to make a simple text document lo
 Before explaining or creating documentation:
 
 1. Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` and `/Users/dev-machine/Dev/VisionOS/CONTEXT.md`.
-2. Read the relevant accepted ADRs in `/Users/dev-machine/Dev/VisionOS/Project-files/adr/`.
+2. Read the relevant accepted ADRs in `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/adr/`.
 3. Read the exact source files, existing documents, visual references, and module context files relevant to the task.
 4. Separate implemented, partial, planned, unsupported, assumed, and manually unverified behavior.
 5. Prefer current code and current artifacts over stale prose. If documentation conflicts with code, report the conflict

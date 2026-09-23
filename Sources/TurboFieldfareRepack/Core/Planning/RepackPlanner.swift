@@ -93,6 +93,20 @@ struct RepackPlan: Sendable {
     let excludedMultimodalTensorNames: [String]
 }
 
+enum RepackPlanningSource: Sendable {
+    case gemma(
+        metadata: IndexLoader.SourceMetadata,
+        architecture: ArchInfo,
+        shardHeaders: [Safetensors.Header]
+    )
+    case qwen(snapshotDirectory: String, includeVision: Bool)
+}
+
+enum FamilyRepackPlan: Sendable {
+    case gemma(RepackPlan)
+    case qwen(QwenRepackPlan)
+}
+
 // MARK: - Planner
 
 struct VisionPackPlan: Sendable {
@@ -111,6 +125,27 @@ struct VisionPackPlan: Sendable {
 }
 
 enum RepackPlanner {
+
+    /// Family dispatch completes all planning before a caller can select a
+    /// writer. The established Gemma implementation remains the same method.
+    static func plan(
+        source: RepackPlanningSource,
+        outputDirectory: String
+    ) throws -> FamilyRepackPlan {
+        switch source {
+        case let .gemma(metadata, architecture, shardHeaders):
+            return .gemma(try plan(
+                meta: metadata,
+                arch: architecture,
+                shardHeaders: shardHeaders,
+                outputDir: outputDirectory))
+        case let .qwen(snapshotDirectory, includeVision):
+            return .qwen(try QwenRepackPlanner.plan(
+                snapshotDirectory: snapshotDirectory,
+                outputDirectory: outputDirectory,
+                includeVision: includeVision))
+        }
+    }
 
     static func planVisionCompanion(
         meta: IndexLoader.SourceMetadata,

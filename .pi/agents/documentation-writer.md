@@ -22,7 +22,7 @@ Use the assigned task to identify the documentation artifact. Verify technical c
 - Never run `git add`, `git commit`, `git push`, branch commands, or destructive Git commands.
 - Keep VisionCapture documentation app-agnostic. Use placeholders for customer app labels, bundle IDs, screen names, and workflows.
 - Preserve existing document conventions and links.
-- Do not create plans or project documents outside `/Users/dev-machine/Dev/VisionOS/Project-files`.
+- Do not create plans or project documents outside `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files`. That tree moved from `/Users/dev-machine/Documents/Personal projects/VisionCapture/Project-files`. Use the new path from now on.
 
 ## Output
 

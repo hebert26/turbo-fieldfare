@@ -194,12 +194,12 @@ private struct LiveGenerationPreviews: View {
                 .accessibilityIdentifier("history-compaction-status")
             if let preview = model.thinkingPreview, !preview.text.isEmpty {
                 LiveGenerationPreviewPanel(
-                    title: "Gemma thinking",
+                    title: "\(loadedModelName) thinking",
                     detail: "Recent text from this model step. This is not a final answer or a verified app result.",
                     text: preview.text,
                     omissionNotice: preview.earlierTextOmitted
                         ? "Earlier thinking omitted. Showing the latest 8 KiB of text." : nil,
-                    accessibilityID: "gemma-thinking-panel")
+                    accessibilityID: "model-thinking-panel")
             }
             if let preview = model.toolCallPreview {
                 LiveGenerationPreviewPanel(
@@ -208,10 +208,20 @@ private struct LiveGenerationPreviews: View {
                     text: preview.text,
                     omissionNotice: preview.middleTextOmitted
                         ? "Middle text omitted. Up to the first 2 KiB and latest 6 KiB are joined in this preview." : nil,
-                    accessibilityID: "gemma-tool-call-draft-panel",
+                    accessibilityID: "model-tool-call-draft-panel",
                     monospaced: true)
             }
         }
+    }
+
+    private var loadedModelName: String {
+        AppModelIdentityPresentation.resolve(
+            selected: model.selectedModelEntry,
+            installationStatus: model.installationStatus,
+            loadState: model.loadState,
+            transition: model.modelSelectionTransition,
+            readiness: model.loadedModelReadiness)
+            .loadedName ?? "Model"
     }
 }
 

@@ -46,22 +46,101 @@ public struct DecodeImageAttachment: Codable, Sendable, Equatable {
     }
 }
 
+public enum DecodeModelFamily: String, Codable, Sendable, Equatable {
+    case gemma4
+    case qwen3_6
+}
+
+public struct DecodeQuantizationIdentity: Codable, Sendable, Equatable {
+    public var category: String
+    public var storage: String
+    public var groupSize: Int?
+    public var scaleType: String?
+    public var biasType: String?
+
+    public init(category: String, storage: String, groupSize: Int? = nil,
+                scaleType: String? = nil, biasType: String? = nil) {
+        self.category = category
+        self.storage = storage
+        self.groupSize = groupSize
+        self.scaleType = scaleType
+        self.biasType = biasType
+    }
+}
+
+public struct DecodeVerifiedVisionIdentity: Codable, Sendable, Equatable {
+    public var sourceRevision: String
+    public var processorConfigSHA256: String
+    public var compatibleTextManifestSHA256: String
+    public var visionPayloadSHA256: String
+    public var supportsStillImages: Bool
+    public var supportsVideo: Bool
+
+    public init(sourceRevision: String, processorConfigSHA256: String,
+                compatibleTextManifestSHA256: String, visionPayloadSHA256: String,
+                supportsStillImages: Bool, supportsVideo: Bool) {
+        self.sourceRevision = sourceRevision
+        self.processorConfigSHA256 = processorConfigSHA256
+        self.compatibleTextManifestSHA256 = compatibleTextManifestSHA256
+        self.visionPayloadSHA256 = visionPayloadSHA256
+        self.supportsStillImages = supportsStillImages
+        self.supportsVideo = supportsVideo
+    }
+}
+
+public enum DecodeVisionIdentity: Codable, Sendable, Equatable {
+    case unavailable
+    case verified(DecodeVerifiedVisionIdentity)
+}
+
+public struct DecodeModelIdentity: Codable, Sendable, Equatable {
+    public var family: DecodeModelFamily
+    public var modelID: String
+    public var sourceRevision: String
+    public var formatMajor: Int
+    public var formatMinor: Int
+    public var sourceIndexSHA256: String
+    public var quantizationPolicySHA256: String
+    public var textManifestSHA256: String
+    public var quantization: [DecodeQuantizationIdentity]
+    public var vision: DecodeVisionIdentity
+
+    public init(family: DecodeModelFamily, modelID: String, sourceRevision: String,
+                formatMajor: Int, formatMinor: Int, sourceIndexSHA256: String,
+                quantizationPolicySHA256: String, textManifestSHA256: String,
+                quantization: [DecodeQuantizationIdentity], vision: DecodeVisionIdentity) {
+        self.family = family
+        self.modelID = modelID
+        self.sourceRevision = sourceRevision
+        self.formatMajor = formatMajor
+        self.formatMinor = formatMinor
+        self.sourceIndexSHA256 = sourceIndexSHA256
+        self.quantizationPolicySHA256 = quantizationPolicySHA256
+        self.textManifestSHA256 = textManifestSHA256
+        self.quantization = quantization
+        self.vision = vision
+    }
+}
+
 public struct DecodeLoadRequest: Codable, Sendable {
     public var modelPath: String
     public var maxContextTokens: Int
     public var runtimeOptions: DecodeRuntimeOptions
     public var forceLogitsHead: Bool
     public var requestID: UUID
+    /// Client-minted lifecycle authority. Nil preserves historical Gemma frames.
+    public var attemptID: UUID?
 
     public init(modelPath: String, maxContextTokens: Int,
                 runtimeOptions: DecodeRuntimeOptions = DecodeRuntimeOptions(),
                 forceLogitsHead: Bool = false,
-                requestID: UUID = UUID()) {
+                requestID: UUID = UUID(), attemptID: UUID? = nil) {
         self.modelPath = modelPath
         self.maxContextTokens = maxContextTokens
         self.runtimeOptions = runtimeOptions
         self.forceLogitsHead = forceLogitsHead
         self.requestID = requestID
+        self.attemptID = attemptID
     }
 }
 
@@ -135,6 +214,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
     public var runtimeMeasurementCapture: DecodeRuntimeMeasurementRequest?
     /// Opted-in capture cancellation follows this exact generation across admission.
     public var scopedCancellation: Bool?
+    /// Service-minted successful-load incarnation. Missing only on legacy input.
+    public var loadID: UUID?
 
     public init(prompt: String,
                 imageAttachments: [DecodeImageAttachment]? = nil,
@@ -145,7 +226,8 @@ public struct DecodeGenerationRequest: Codable, Sendable {
                 generationID: UUID = UUID(),
                 conversationEpoch: UUID? = nil,
                 turnIndex: Int? = nil,
-                toolTurn: DecodeToolTurn? = nil) {
+                toolTurn: DecodeToolTurn? = nil,
+                loadID: UUID? = nil) {
         self.conversationEpoch = conversationEpoch
         self.turnIndex = turnIndex
         self.toolTurn = toolTurn
@@ -159,6 +241,7 @@ public struct DecodeGenerationRequest: Codable, Sendable {
         self.repetitionPenalty = repetitionPenalty
         self.runtimeOptions = runtimeOptions
         self.generationID = generationID
+        self.loadID = loadID
     }
 }
 
@@ -234,6 +317,8 @@ public struct DecodePerformanceCheckpointEvidence: Codable, Equatable, Sendable 
 /// identity is transport-only. checkpointID identifies the immutable transaction.
 public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
     public var requestID: UUID
+    /// Service-minted successful-load incarnation. Missing only on legacy input.
+    public var loadID: UUID?
     public var checkpointID: UUID
     public var sourceEpoch: UUID
     public var sourceTurnIndex: Int
@@ -249,7 +334,8 @@ public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
     public var finalAnswerAllowance: Int
     public var permitsScreenshot: Bool
 
-    public init(requestID: UUID = UUID(), checkpointID: UUID, sourceEpoch: UUID,
+    public init(requestID: UUID = UUID(), loadID: UUID? = nil,
+                checkpointID: UUID, sourceEpoch: UUID,
                 sourceTurnIndex: Int, replacementEpoch: UUID, pendingCall: DecodeToolCall,
                 result: DecodeToolResult, record: String, commit: Bool, force: Bool = false,
                 trigger: DecodeContextCheckpointTrigger? = nil,
@@ -257,6 +343,7 @@ public struct DecodeContextCheckpointRequest: Codable, Equatable, Sendable {
                 generationAllowance: Int = 8_192, finalAnswerAllowance: Int = 2_048,
                 permitsScreenshot: Bool = true) {
         self.requestID = requestID
+        self.loadID = loadID
         self.checkpointID = checkpointID
         self.sourceEpoch = sourceEpoch
         self.sourceTurnIndex = sourceTurnIndex
@@ -327,27 +414,78 @@ public struct DecodeToolCall: Codable, Equatable, Sendable {
 public struct DecodeResetConversationRequest: Codable, Sendable, Equatable {
     public var epoch: UUID
     public var requestID: UUID
+    /// Service-minted successful-load incarnation. Missing only on legacy input.
+    public var loadID: UUID?
 
-    public init(epoch: UUID = UUID(), requestID: UUID = UUID()) {
+    public init(epoch: UUID = UUID(), requestID: UUID = UUID(), loadID: UUID? = nil) {
         self.epoch = epoch
         self.requestID = requestID
+        self.loadID = loadID
+    }
+}
+
+public struct DecodeUnloadRequest: Codable, Sendable, Equatable {
+    public var requestID: UUID
+    public var loadID: UUID?
+
+    public init(requestID: UUID = UUID(), loadID: UUID? = nil) {
+        self.requestID = requestID
+        self.loadID = loadID
+    }
+}
+
+public struct DecodeCancelGenerationRequest: Codable, Sendable, Equatable {
+    public var operationID: UUID
+    public var loadID: UUID?
+
+    public init(operationID: UUID, loadID: UUID? = nil) {
+        self.operationID = operationID
+        self.loadID = loadID
+    }
+}
+
+/// Cancels one not-yet-committed load. Both values are required so reusing a
+/// request UUID cannot grant authority over a later attempt.
+public struct DecodeCancelLoadRequest: Codable, Sendable, Equatable {
+    public var requestID: UUID
+    public var attemptID: UUID
+
+    public init(requestID: UUID, attemptID: UUID) {
+        self.requestID = requestID
+        self.attemptID = attemptID
+    }
+}
+
+/// Model-independent challenge used to prove that the observed process owns
+/// this exact transport before any model command is admitted.
+public struct DecodeLifetimeProbe: Codable, Sendable, Equatable {
+    public var nonce: UUID
+
+    public init(nonce: UUID = UUID()) {
+        self.nonce = nonce
     }
 }
 
 public enum DecodeServiceCommand: Codable, Sendable {
+    case lifetimeProbe(DecodeLifetimeProbe)
     case load(DecodeLoadRequest)
+    case cancelLoad(DecodeCancelLoadRequest)
     case generate(DecodeGenerationRequest)
     case resetConversation(DecodeResetConversationRequest)
     case contextCheckpoint(DecodeContextCheckpointRequest)
     case cancel
     case cancelGeneration(UUID)
+    case cancelGenerationBound(DecodeCancelGenerationRequest)
     case unload(UUID)
+    case unloadBound(DecodeUnloadRequest)
     case shutdown
 }
 
 public enum DecodeServiceEventKind: String, Codable, Sendable {
+    case lifetimeAcknowledged
     case loading
     case ready
+    case loadCancelled
     case prefill
     case snapshot
     case toolCall
@@ -483,6 +621,16 @@ public struct DecodeToolCallPreview: Codable, Equatable, Sendable {
 public struct DecodeServiceEvent: Codable, Sendable {
     public var contextCheckpoint: DecodeContextCheckpointReceipt?
     public var kind: DecodeServiceEventKind
+    /// Echoes a load attempt without granting model/session identity.
+    public var loadAttemptID: UUID?
+    /// Echoes a model-independent lifetime challenge.
+    public var lifetimeNonce: UUID?
+    /// Optional only so historical event payloads remain decodable.
+    public var loadedFamily: DecodeModelFamily?
+    /// Service-minted successful-load incarnation.
+    public var loadID: UUID?
+    /// Required for admitted Qwen events and absent for Gemma v1.
+    public var modelIdentity: DecodeModelIdentity?
     public var generationID: UUID
     public var sequence: UInt64
     public var textDelta: String
@@ -502,6 +650,11 @@ public struct DecodeServiceEvent: Codable, Sendable {
     /// Bytes of image tower the inference process holds mapped, or nil when
     /// it has no vision runtime.
     public var visionTowerMappedBytes: UInt64?
+    /// Logical bytes in the committed conversation state, when the runtime can
+    /// report that state directly.
+    public var conversationLogicalStateBytes: UInt64?
+    /// Bytes of routed-expert cache buffers the loaded runtime currently owns.
+    public var expertCacheBytes: UInt64?
     /// Prompt tokens served from the retained KV instead of being prefilled
     /// again. Reported per turn because a cache nobody can see is a cache that
     /// can regress to nothing without a single bug report.
@@ -538,6 +691,11 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var measurementDroppedBytes: UInt64?
 
     public init(kind: DecodeServiceEventKind, generationID: UUID,
+                loadAttemptID: UUID? = nil,
+                lifetimeNonce: UUID? = nil,
+                loadedFamily: DecodeModelFamily? = nil,
+                loadID: UUID? = nil,
+                modelIdentity: DecodeModelIdentity? = nil,
                 sequence: UInt64 = 0, textDelta: String = "",
                 tokenCount: Int = 0, promptTokenCount: Int? = nil,
                 computedPrefillTokens: Int? = nil,
@@ -548,6 +706,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 stopReason: String? = nil, error: String? = nil,
                 currentMemoryBytes: UInt64? = nil, peakMemoryBytes: UInt64? = nil,
                 visionTowerMappedBytes: UInt64? = nil,
+                conversationLogicalStateBytes: UInt64? = nil,
+                expertCacheBytes: UInt64? = nil,
                 cachedPromptTokens: Int? = nil,
                 conversationTokenCount: Int? = nil,
                 conversationEpoch: UUID? = nil,
@@ -559,6 +719,11 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 thinkingPreview: DecodeThinkingPreview? = nil,
                 toolCallPreview: DecodeToolCallPreview? = nil) {
         self.kind = kind
+        self.loadAttemptID = loadAttemptID
+        self.lifetimeNonce = lifetimeNonce
+        self.loadedFamily = loadedFamily
+        self.loadID = loadID
+        self.modelIdentity = modelIdentity
         self.generationID = generationID
         self.sequence = sequence
         self.textDelta = textDelta
@@ -576,6 +741,8 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.currentMemoryBytes = currentMemoryBytes
         self.peakMemoryBytes = peakMemoryBytes
         self.visionTowerMappedBytes = visionTowerMappedBytes
+        self.conversationLogicalStateBytes = conversationLogicalStateBytes
+        self.expertCacheBytes = expertCacheBytes
         self.cachedPromptTokens = cachedPromptTokens
         self.conversationTokenCount = conversationTokenCount
         self.conversationEpoch = conversationEpoch

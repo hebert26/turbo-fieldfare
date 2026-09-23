@@ -28,8 +28,9 @@ do {
 do {
     let signals = ServerTerminationSignals()
     let modelURL = URL(fileURLWithPath: arguments.model).standardizedFileURL
-    let backend = try await ServerModelSession.load(
+    let loaded = try await ServerModelLoader.load(
         modelDirectory: modelURL,
+        assertedModelID: arguments.modelIDAssertion,
         maxContext: arguments.maxContext,
         visionPackURL: arguments.visionPack.map {
             URL(fileURLWithPath: $0).standardizedFileURL
@@ -38,12 +39,16 @@ do {
         promptCacheMode: arguments.promptCacheMode,
         runtimeConfiguration: runtimeConfiguration)
     let server = TurboFieldfareHTTPServer(
-        modelID: arguments.modelID,
+        modelID: loaded.identity.apiModelID,
         queueLimit: arguments.queueLimit,
-        backend: backend,
-        visionCapability: backend.visionCapability)
+        backend: loaded.backend,
+        visionCapability: loaded.visionCapability,
+        modelFamily: loaded.identity.family,
+        modelRevision: loaded.identity.sourceRevision)
     _ = try await server.start(port: arguments.port)
-    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(arguments.modelID) context=\(arguments.maxContext) prompt_cache=\(arguments.promptCacheMode.rawValue) vision=\(backend.visionCapability) vision_residency=\(arguments.visionResidency.rawValue)")
+    let cache = loaded.identity.family == .qwen3_6
+        ? "off(cached_tokens=0)" : arguments.promptCacheMode.rawValue
+    print("TurboFieldfareServer ready at http://127.0.0.1:\(arguments.port) model=\(loaded.identity.apiModelID) family=\(loaded.identity.family.rawValue) context=\(arguments.maxContext) prompt_cache=\(cache) vision=\(loaded.visionCapability) vision_residency=\(arguments.visionResidency.rawValue)")
 
     _ = await signals.wait()
     try await server.shutdown()

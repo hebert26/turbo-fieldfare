@@ -1,5 +1,11 @@
 import TurboFieldfare
 
+public enum CLIThinkingMode: String, Sendable, Equatable {
+    case auto
+    case on
+    case off
+}
+
 public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
@@ -8,6 +14,9 @@ public struct Args: Equatable, Sendable {
     public var images: [String]
     public var visionPack: String?
     public var visionResidency: VisionResidencyPolicy
+    public var thinking: CLIThinkingMode
+    public var toolsFile: String?
+    public var showModelIdentity: Bool
     public var maxNew: Int
     public var maxContext: Int
     public var temperature: Float
@@ -33,6 +42,9 @@ public struct Args: Equatable, Sendable {
                 images: [String] = [],
                 visionPack: String? = nil,
                 visionResidency: VisionResidencyPolicy = .defaultPolicy,
+                thinking: CLIThinkingMode = .auto,
+                toolsFile: String? = nil,
+                showModelIdentity: Bool = false,
                 maxNew: Int = 1_024,
                 maxContext: Int = 8192,
                 temperature: Float = 0.2,
@@ -55,6 +67,9 @@ public struct Args: Equatable, Sendable {
         self.images = images
         self.visionPack = visionPack
         self.visionResidency = visionResidency
+        self.thinking = thinking
+        self.toolsFile = toolsFile
+        self.showModelIdentity = showModelIdentity
         self.maxNew = maxNew
         self.maxContext = maxContext
         self.temperature = temperature
@@ -81,6 +96,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
     case requiredMissing(String)
     case mutuallyExclusive(String, String)
     case modeMissing
+    case unsupported(String)
     case imagePromptNeedsExpertCacheSlots(have: Int, need: Int)
 
     public var description: String {
@@ -93,6 +109,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
         case .mutuallyExclusive(let a, let b): return "\(a) and \(b) are mutually exclusive"
         case .modeMissing:
             return "one of --prompt, --chat-prompt or --messages-file is required"
+        case .unsupported(let detail): return detail
         case .imagePromptNeedsExpertCacheSlots(let have, let need):
             return "--image requires chunked prefill, which needs at least \(need) "
                 + "expert-cache slots; --expert-cache-slots \(have) cannot serve it: "
@@ -103,7 +120,7 @@ public enum ArgsError: Error, Equatable, CustomStringConvertible {
 
 extension Args {
     public static let usage = """
-    TurboFieldfareCLI — Gemma 4 26B-A4B text generation
+    TurboFieldfareCLI — Gemma and verified Qwen generation
 
     usage: TurboFieldfareCLI --model <dir>
            (--prompt <string> | --chat-prompt <string> | --messages-file <path>) [options]
@@ -113,13 +130,19 @@ extension Args {
       --prompt <string>         Raw-completion prompt.
       --chat-prompt <string>    Single-turn instruction chat; pairs with --image
       --messages-file <path>    JSON chat messages with role and content fields.
-      --image <path>            Attach an image; repeatable. Needs --chat-prompt
+      --image <path>            Attach a still image; repeatable. Needs --chat-prompt
                                 and an installed companion pack.
       --vision-pack <dir>       Companion pack (default beside the model).
       --vision-residency <on-demand|keep-ready>
                                 Routed-expert residency during vision (default on-demand).
+      --video <path>            Unsupported. Video input is rejected before model load.
 
     options:
+      --thinking <auto|on|off>  Chat thinking mode. Explicit on/off requires verified Qwen;
+                                default auto preserves each family's existing behavior.
+      --tools-file <path>       OpenAI-shaped Qwen function definitions for chat. Calls are
+                                returned for the caller to approve; the CLI never runs them.
+      --show-model-identity     Print loaded family, model, revision, and format to stderr.
       --max-new <int>            Generated-token limit (default 1024).
       --max-context <int>        Context limit in tokens (default 8192).
       --temperature <float>      Sampling temperature (default 0.2; 0 = greedy).
@@ -189,6 +212,9 @@ extension Args {
         var images: [String] = []
         var visionPack: String?
         var visionResidency: VisionResidencyPolicy = .defaultPolicy
+        var thinking: CLIThinkingMode = .auto
+        var toolsFile: String?
+        var showModelIdentity = false
         var maxNew = 1_024
         var maxContext = 8192
         var temperature: Float = 0.2
@@ -215,6 +241,9 @@ extension Args {
             case "--quiet":
                 quiet = true
                 index += 1
+            case "--show-model-identity":
+                showModelIdentity = true
+                index += 1
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -231,6 +260,17 @@ extension Args {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 visionResidency = policy
+            case "--thinking":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let mode = CLIThinkingMode(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                thinking = mode
+            case "--tools-file":
+                toolsFile = try takeValue(argv, &index, flag: flag)
+            case "--video":
+                _ = try takeValue(argv, &index, flag: flag)
+                throw ArgsError.unsupported("--video is not supported")
             case "--messages-file":
                 messagesFile = try takeValue(argv, &index, flag: flag)
             case "--max-new":
@@ -247,7 +287,7 @@ extension Args {
                 maxContext = parsed
             case "--temperature":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed >= 0 else {
+                guard let parsed = Float(value), parsed.isFinite, parsed >= 0 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 temperature = parsed
@@ -265,7 +305,7 @@ extension Args {
                 topP = parsed
             case "--repetition-penalty":
                 let value = try takeValue(argv, &index, flag: flag)
-                guard let parsed = Float(value), parsed > 0 else {
+                guard let parsed = Float(value), parsed.isFinite, parsed > 0 else {
                     throw ArgsError.invalidValue(flag: flag, value: value)
                 }
                 repetitionPenalty = parsed
@@ -333,6 +373,12 @@ extension Args {
         if prompt != nil, !images.isEmpty {
             throw ArgsError.mutuallyExclusive("--prompt", "--image")
         }
+        if prompt != nil, toolsFile != nil {
+            throw ArgsError.mutuallyExclusive("--prompt", "--tools-file")
+        }
+        if prompt != nil, thinking != .auto {
+            throw ArgsError.mutuallyExclusive("--prompt", "--thinking")
+        }
         let minimumSlots = RuntimeConfiguration.minimumExpertCacheSlotsForChunkedPrefill
         if !images.isEmpty, expertCacheSlots < minimumSlots {
             throw ArgsError.imagePromptNeedsExpertCacheSlots(
@@ -361,6 +407,9 @@ extension Args {
                              images: images,
                              visionPack: visionPack,
                              visionResidency: visionResidency,
+                             thinking: thinking,
+                             toolsFile: toolsFile,
+                             showModelIdentity: showModelIdentity,
                              maxNew: maxNew,
                              maxContext: maxContext,
                              temperature: temperature,

@@ -1,0 +1,873 @@
+import Foundation
+import Metal
+
+enum QwenMoEError: Error, Equatable, Sendable {
+    case invalidConfiguration(field: String, value: Int)
+    case invalidCount(field: String, expected: Int, actual: Int)
+    case nonfiniteRouterValue(token: Int, expert: Int)
+    case duplicateExpertWithinToken(token: Int, expert: Int)
+    case missingExpert(Int)
+    case invalidExpertShape(expert: Int)
+    case arithmeticOverflow(operation: String)
+    case bufferTooSmall(name: String, required: Int, actual: Int)
+    case invalidAffineBinding(String)
+    case commandBufferAlreadySubmitted
+    case commandEncoderUnavailable
+    case invalidPipelineLimit
+    case routingKernelRejectedInput(token: Int)
+}
+
+struct QwenMoEConfiguration: Equatable, Sendable {
+    let hiddenSize: Int
+    let expertCount: Int
+    let topK: Int
+    let routedIntermediateSize: Int
+    let sharedIntermediateSize: Int
+
+    init(hiddenSize: Int, expertCount: Int, topK: Int = 8,
+         routedIntermediateSize: Int, sharedIntermediateSize: Int) throws {
+        for (field, value) in [
+            ("hiddenSize", hiddenSize), ("expertCount", expertCount),
+            ("routedIntermediateSize", routedIntermediateSize),
+            ("sharedIntermediateSize", sharedIntermediateSize),
+        ] where value <= 0 || UInt32(exactly: value) == nil {
+            throw QwenMoEError.invalidConfiguration(field: field, value: value)
+        }
+        guard topK == 8, expertCount >= topK else {
+            throw QwenMoEError.invalidConfiguration(field: "topK", value: topK)
+        }
+        self.hiddenSize = hiddenSize
+        self.expertCount = expertCount
+        self.topK = topK
+        self.routedIntermediateSize = routedIntermediateSize
+        self.sharedIntermediateSize = sharedIntermediateSize
+    }
+
+    static func official() throws -> Self {
+        try Self(
+            hiddenSize: 2_048, expertCount: 256, topK: 8,
+            routedIntermediateSize: 512, sharedIntermediateSize: 512)
+    }
+}
+
+struct QwenMoERoutingDiagnostics: Sendable, Equatable {
+    /// Token-major `[token][rank]`.
+    let selectedExpertIDs: [[Int]]
+    let normalizedWeights: [[Float]]
+    /// Full FP32 softmax, token-major `[token][expert]`.
+    let probabilities: [[Float]]
+}
+
+struct QwenMoEDenseExpert: Sendable {
+    /// Row-major `[2 * routedIntermediate, hidden]`, gate rows then up rows.
+    let gateUp: [Float]
+    /// Row-major `[hidden, routedIntermediate]`.
+    let down: [Float]
+}
+
+struct QwenMoEDenseSharedExpert: Sendable {
+    let gate: [Float]
+    let up: [Float]
+    let down: [Float]
+    /// One FP32 row `[hidden]` used by `sigmoid(shared_expert_gate(x))`.
+    let outputGate: [Float]
+}
+
+struct QwenMoEReferenceResult: Sendable, Equatable {
+    let routing: QwenMoERoutingDiagnostics
+    let routedOutput: [Float]
+    let sharedGate: [Float]
+    let sharedOutput: [Float]
+    let output: [Float]
+}
+
+struct QwenMoEAffineBinding: @unchecked Sendable {
+    let values: MTLBuffer
+    let valuesOffset: Int
+    let scales: MTLBuffer
+    let scalesOffset: Int
+    let biases: MTLBuffer
+    let biasesOffset: Int
+    let layout: QwenMetalAffineLayout
+
+    init(values: MTLBuffer, valuesOffset: Int = 0,
+         scales: MTLBuffer, scalesOffset: Int = 0,
+         biases: MTLBuffer, biasesOffset: Int = 0,
+         layout: QwenMetalAffineLayout) {
+        self.values = values
+        self.valuesOffset = valuesOffset
+        self.scales = scales
+        self.scalesOffset = scalesOffset
+        self.biases = biases
+        self.biasesOffset = biasesOffset
+        self.layout = layout
+    }
+}
+
+struct QwenMoESharedAffineBindings: @unchecked Sendable {
+    let gate: QwenMoEAffineBinding
+    let up: QwenMoEAffineBinding
+    let down: QwenMoEAffineBinding
+    let outputGate: QwenMoEAffineBinding
+
+    init(gate: QwenMoEAffineBinding, up: QwenMoEAffineBinding,
+         down: QwenMoEAffineBinding, outputGate: QwenMoEAffineBinding) {
+        self.gate = gate
+        self.up = up
+        self.down = down
+        self.outputGate = outputGate
+    }
+}
+
+final class QwenMoEScratch: @unchecked Sendable {
+    let routedActivation: MTLBuffer
+    let sharedGate: MTLBuffer
+    let sharedUp: MTLBuffer
+    let sharedActivation: MTLBuffer
+    let sharedOutput: MTLBuffer
+    let sharedOutputGate: MTLBuffer
+
+    fileprivate init(routedActivation: MTLBuffer, sharedGate: MTLBuffer,
+                     sharedUp: MTLBuffer, sharedActivation: MTLBuffer,
+                     sharedOutput: MTLBuffer, sharedOutputGate: MTLBuffer) {
+        self.routedActivation = routedActivation
+        self.sharedGate = sharedGate
+        self.sharedUp = sharedUp
+        self.sharedActivation = sharedActivation
+        self.sharedOutput = sharedOutput
+        self.sharedOutputGate = sharedOutputGate
+    }
+}
+
+/// Qwen MoE reference ordering and concrete correctness Metal operations.
+/// The production session-family integration is deliberately a Phase-12 concern.
+final class QwenMoE {
+    private struct RoutingParameters {
+        var tokenCount: UInt32
+        var expertCount: UInt32
+        var topK: UInt32
+        var reserved: UInt32 = 0
+    }
+
+    private struct RoutedParameters {
+        var hiddenSize: UInt32
+        var intermediateSize: UInt32
+        var valuesOffset: UInt32
+        var scalesOffset: UInt32
+        var biasesOffset: UInt32
+        var valuesRowStride: UInt32
+        var groupsPerRow: UInt32
+        var groupSize: UInt32
+        var scratchOffset: UInt32
+        var reserved0: UInt32 = 0
+        var reserved1: UInt32 = 0
+        var reserved2: UInt32 = 0
+    }
+
+    private struct ElementParameters {
+        var elementCount: UInt32
+        var reserved0: UInt32 = 0
+        var reserved1: UInt32 = 0
+        var reserved2: UInt32 = 0
+    }
+
+    private struct RoutedWork {
+        let mapped: QwenMappedExpert
+        var gateUp: RoutedParameters
+        var down: RoutedParameters
+    }
+
+    let configuration: QwenMoEConfiguration
+    private let device: MTLDevice
+    private let queue: MTLCommandQueue
+    private let routingPipeline: MTLComputePipelineState
+    private let clearPipeline: MTLComputePipelineState
+    private let routedGateUpPipeline: MTLComputePipelineState
+    private let routedDownPipeline: MTLComputePipelineState
+    private let affinePipeline: MTLComputePipelineState
+    private let activationPipeline: MTLComputePipelineState
+    private let sharedEpiloguePipeline: MTLComputePipelineState
+
+    init(context: MetalContext, configuration: QwenMoEConfiguration) throws {
+        self.configuration = configuration
+        device = context.device
+        queue = context.queue
+        routingPipeline = try context.pipeline("qwen_moe_route_top8_fp32")
+        clearPipeline = try context.pipeline("qwen_moe_clear_fp32")
+        routedGateUpPipeline = try context.pipeline("qwen_moe_routed_gate_up_int4")
+        routedDownPipeline = try context.pipeline("qwen_moe_routed_down_add_int4")
+        affinePipeline = try context.pipeline("qwen_moe_affine_project")
+        activationPipeline = try context.pipeline("qwen_moe_silu_multiply")
+        sharedEpiloguePipeline = try context.pipeline("qwen_moe_shared_epilogue")
+    }
+
+    static func route(logits: [Float], configuration: QwenMoEConfiguration) throws
+        -> QwenMoERoutingDiagnostics {
+        guard logits.count.isMultiple(of: configuration.expertCount) else {
+            throw QwenMoEError.invalidCount(
+                field: "routerLogits", expected: configuration.expertCount,
+                actual: logits.count)
+        }
+        let tokenCount = logits.count / configuration.expertCount
+        var allIDs: [[Int]] = []
+        var allWeights: [[Float]] = []
+        var allProbabilities: [[Float]] = []
+        allIDs.reserveCapacity(tokenCount)
+        allWeights.reserveCapacity(tokenCount)
+        allProbabilities.reserveCapacity(tokenCount)
+
+        for token in 0..<tokenCount {
+            let start = token * configuration.expertCount
+            let values = Array(logits[start..<(start + configuration.expertCount)])
+            for (expert, value) in values.enumerated() where !value.isFinite {
+                throw QwenMoEError.nonfiniteRouterValue(token: token, expert: expert)
+            }
+            guard let maximum = values.max() else {
+                throw QwenMoEError.invalidCount(field: "routerLogits", expected: 1, actual: 0)
+            }
+            let exponentials = values.map { Foundation.exp($0 - maximum) }
+            let denominator = exponentials.reduce(Float(0), +)
+            guard denominator.isFinite, denominator > 0 else {
+                throw QwenMoEError.nonfiniteRouterValue(token: token, expert: 0)
+            }
+            let probabilities = exponentials.map { $0 / denominator }
+            let selected = probabilities.indices.sorted { lhs, rhs in
+                if probabilities[lhs] != probabilities[rhs] {
+                    return probabilities[lhs] > probabilities[rhs]
+                }
+                // TurboFieldfare's defined exact-tie rule. This is not a claim
+                // about generic torch.topk ordering on other stacks.
+                return lhs < rhs
+            }.prefix(configuration.topK)
+            let ids = Array(selected)
+            let selectedSum = ids.reduce(Float(0)) { $0 + probabilities[$1] }
+            guard selectedSum.isFinite, selectedSum > 0 else {
+                throw QwenMoEError.nonfiniteRouterValue(token: token, expert: ids[0])
+            }
+            allIDs.append(ids)
+            allWeights.append(ids.map { probabilities[$0] / selectedSum })
+            allProbabilities.append(probabilities)
+        }
+        return QwenMoERoutingDiagnostics(
+            selectedExpertIDs: allIDs,
+            normalizedWeights: allWeights,
+            probabilities: allProbabilities)
+    }
+
+    static func evaluate(
+        input: [Float],
+        routerLogits: [Float],
+        configuration: QwenMoEConfiguration,
+        routedExperts: [Int: QwenMoEDenseExpert],
+        sharedExpert: QwenMoEDenseSharedExpert
+    ) throws -> QwenMoEReferenceResult {
+        guard input.count.isMultiple(of: configuration.hiddenSize) else {
+            throw QwenMoEError.invalidCount(
+                field: "input", expected: configuration.hiddenSize, actual: input.count)
+        }
+        let tokenCount = input.count / configuration.hiddenSize
+        guard routerLogits.count == tokenCount * configuration.expertCount else {
+            throw QwenMoEError.invalidCount(
+                field: "routerLogits",
+                expected: tokenCount * configuration.expertCount,
+                actual: routerLogits.count)
+        }
+        let routing = try route(logits: routerLogits, configuration: configuration)
+        try validate(sharedExpert: sharedExpert, configuration: configuration)
+        var routedOutput = [Float](repeating: 0, count: input.count)
+        var sharedOutput = [Float](repeating: 0, count: input.count)
+        var sharedGates = [Float](repeating: 0, count: tokenCount)
+
+        for token in 0..<tokenCount {
+            let hidden = Array(input[
+                token * configuration.hiddenSize..<(token + 1) * configuration.hiddenSize])
+            for rank in 0..<configuration.topK {
+                let expertID = routing.selectedExpertIDs[token][rank]
+                guard let expert = routedExperts[expertID] else {
+                    throw QwenMoEError.missingExpert(expertID)
+                }
+                try validate(expert: expert, expertID: expertID, configuration: configuration)
+                let projected = project(
+                    hidden, matrix: expert.gateUp,
+                    rows: 2 * configuration.routedIntermediateSize,
+                    columns: configuration.hiddenSize)
+                var activated = [Float](repeating: 0, count: configuration.routedIntermediateSize)
+                for index in activated.indices {
+                    activated[index] = silu(projected[index])
+                        * projected[configuration.routedIntermediateSize + index]
+                }
+                let down = project(
+                    activated, matrix: expert.down,
+                    rows: configuration.hiddenSize,
+                    columns: configuration.routedIntermediateSize)
+                let weight = routing.normalizedWeights[token][rank]
+                for index in 0..<configuration.hiddenSize {
+                    routedOutput[token * configuration.hiddenSize + index] += down[index] * weight
+                }
+            }
+
+            let sharedGateProjection = project(
+                hidden, matrix: sharedExpert.gate,
+                rows: configuration.sharedIntermediateSize,
+                columns: configuration.hiddenSize)
+            let sharedUpProjection = project(
+                hidden, matrix: sharedExpert.up,
+                rows: configuration.sharedIntermediateSize,
+                columns: configuration.hiddenSize)
+            var sharedActivation = [Float](repeating: 0, count: configuration.sharedIntermediateSize)
+            for index in sharedActivation.indices {
+                sharedActivation[index] = silu(sharedGateProjection[index]) * sharedUpProjection[index]
+            }
+            let down = project(
+                sharedActivation, matrix: sharedExpert.down,
+                rows: configuration.hiddenSize,
+                columns: configuration.sharedIntermediateSize)
+            var rawGate: Float = 0
+            for index in 0..<configuration.hiddenSize {
+                rawGate += hidden[index] * sharedExpert.outputGate[index]
+            }
+            let gate = sigmoid(rawGate)
+            sharedGates[token] = gate
+            for index in 0..<configuration.hiddenSize {
+                sharedOutput[token * configuration.hiddenSize + index] = down[index] * gate
+            }
+        }
+        let output = zip(routedOutput, sharedOutput).map(+)
+        return QwenMoEReferenceResult(
+            routing: routing, routedOutput: routedOutput,
+            sharedGate: sharedGates, sharedOutput: sharedOutput, output: output)
+    }
+
+    func makeScratch() throws -> QwenMoEScratch {
+        func buffer(elements: Int, label: String) throws -> MTLBuffer {
+            let bytes = try Self.checkedMultiply(elements, MemoryLayout<Float>.stride, operation: label)
+            guard let result = device.makeBuffer(length: bytes, options: .storageModePrivate) else {
+                throw QwenMoEError.bufferTooSmall(name: label, required: bytes, actual: 0)
+            }
+            result.label = label
+            return result
+        }
+        return try QwenMoEScratch(
+            routedActivation: buffer(
+                elements: configuration.topK * configuration.routedIntermediateSize,
+                label: "qwen.moe.routedActivation"),
+            sharedGate: buffer(elements: configuration.sharedIntermediateSize,
+                               label: "qwen.moe.sharedGate"),
+            sharedUp: buffer(elements: configuration.sharedIntermediateSize,
+                             label: "qwen.moe.sharedUp"),
+            sharedActivation: buffer(elements: configuration.sharedIntermediateSize,
+                                     label: "qwen.moe.sharedActivation"),
+            sharedOutput: buffer(elements: configuration.hiddenSize,
+                                 label: "qwen.moe.sharedOutput"),
+            sharedOutputGate: buffer(elements: 1,
+                                     label: "qwen.moe.sharedOutputGate"))
+    }
+
+    func encodeRouting(commandBuffer: MTLCommandBuffer,
+                       logits: MTLBuffer,
+                       tokenCount: Int,
+                       selectedExpertIDs: MTLBuffer,
+                       normalizedWeights: MTLBuffer,
+                       status: MTLBuffer) throws {
+        guard tokenCount > 0 else {
+            throw QwenMoEError.invalidConfiguration(field: "tokenCount", value: tokenCount)
+        }
+        let logitsCount = try Self.checkedMultiply(
+            tokenCount, configuration.expertCount, operation: "router logits count")
+        try Self.requireBuffer(logits, named: "routerLogits", elements: logitsCount, as: Float.self)
+        let selectedCount = try Self.checkedMultiply(
+            tokenCount, configuration.topK, operation: "selected count")
+        try Self.requireBuffer(
+            selectedExpertIDs, named: "selectedExpertIDs", elements: selectedCount, as: UInt32.self)
+        try Self.requireBuffer(
+            normalizedWeights, named: "normalizedWeights", elements: selectedCount, as: Float.self)
+        try Self.requireBuffer(status, named: "routingStatus", elements: tokenCount, as: UInt32.self)
+        try requireNotSubmitted(commandBuffer)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var parameters = RoutingParameters(
+            tokenCount: try Self.uint32(tokenCount, field: "tokenCount"),
+            expertCount: UInt32(configuration.expertCount),
+            topK: UInt32(configuration.topK))
+        encoder.setComputePipelineState(routingPipeline)
+        encoder.setBytes(&parameters, length: MemoryLayout<RoutingParameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(logits, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+        encoder.setBuffer(selectedExpertIDs, offset: 0,
+                          index: QwenMetalBufferIndex.output.rawValue)
+        encoder.setBuffer(normalizedWeights, offset: 0,
+                          index: QwenMetalBufferIndex.scratch.rawValue)
+        encoder.setBuffer(status, offset: 0, index: QwenMetalBufferIndex.state.rawValue)
+        try dispatch(encoder, pipeline: routingPipeline, count: tokenCount)
+        encoder.endEncoding()
+    }
+
+    /// Encodes and submits one token's complete routed and shared expert work.
+    /// `routingWeights` contains exactly Top-8 FP32 weights in the same order
+    /// as `lease.experts`.
+    ///
+    /// The command buffer is created and committed inside this operation. No
+    /// externally committable, encoded-but-unowned interval exists: before the
+    /// mapped reads are encoded the lease transfers to completion ownership;
+    /// every path after that transfer commits the buffer, and cancellation only
+    /// marks its result discarded until actual completion releases the slots.
+    @discardableResult
+    func submitExperts(hidden: MTLBuffer,
+                       lease: QwenMappedExpertLease,
+                       routingWeights: MTLBuffer,
+                       sharedBindings: QwenMoESharedAffineBindings,
+                       scratch: QwenMoEScratch,
+                       output: MTLBuffer) throws -> MTLCommandBuffer {
+        let work = try prepareSubmission(
+            hidden: hidden, lease: lease, routingWeights: routingWeights,
+            sharedBindings: sharedBindings, output: output)
+
+        // This is the sole mapped-buffer submission boundary. Validation above
+        // leaves the lease unsubmitted on failure. The lease owns command-buffer
+        // creation, transition, failure cleanup, commit, and completion release.
+        return try lease.submit(on: queue) { commandBuffer in
+            try encodeRoutedCommands(
+                commandBuffer: commandBuffer, hidden: hidden, work: work,
+                routingWeights: routingWeights, scratch: scratch, output: output)
+            try encodeSharedCommands(
+                commandBuffer: commandBuffer, hidden: hidden,
+                bindings: sharedBindings, scratch: scratch, output: output)
+        }
+    }
+
+    /// Adds a resident shared expert to an externally managed command buffer.
+    /// This operation never accesses streamed mappings.
+    func encodeShared(commandBuffer: MTLCommandBuffer,
+                      hidden: MTLBuffer,
+                      bindings: QwenMoESharedAffineBindings,
+                      scratch: QwenMoEScratch,
+                      output: MTLBuffer) throws {
+        try validateShared(hidden: hidden, bindings: bindings, output: output)
+        try requireNotSubmitted(commandBuffer)
+        try validateSharedDispatches()
+        try encodeSharedCommands(
+            commandBuffer: commandBuffer, hidden: hidden,
+            bindings: bindings, scratch: scratch, output: output)
+    }
+
+    private func prepareSubmission(
+        hidden: MTLBuffer,
+        lease: QwenMappedExpertLease,
+        routingWeights: MTLBuffer,
+        sharedBindings: QwenMoESharedAffineBindings,
+        output: MTLBuffer
+    ) throws -> [RoutedWork] {
+        try lease.requireUsable()
+        guard lease.experts.count == configuration.topK else {
+            throw QwenMoEError.invalidCount(
+                field: "mappedExperts", expected: configuration.topK,
+                actual: lease.experts.count)
+        }
+        try Self.requireBuffer(hidden, named: "hidden", elements: configuration.hiddenSize, as: Float.self)
+        try Self.requireBuffer(
+            routingWeights, named: "routingWeights", elements: configuration.topK, as: Float.self)
+        try validateShared(hidden: hidden, bindings: sharedBindings, output: output)
+
+        var work: [RoutedWork] = []
+        work.reserveCapacity(lease.experts.count)
+        for (rank, mapped) in lease.experts.enumerated() {
+            try validate(mapped: mapped)
+            work.append(RoutedWork(
+                mapped: mapped,
+                gateUp: try routedParameters(
+                    descriptor: mapped.gateUp,
+                    scratchOffset: rank * configuration.routedIntermediateSize,
+                    intermediateSize: configuration.routedIntermediateSize),
+                down: try routedParameters(
+                    descriptor: mapped.down,
+                    scratchOffset: rank * configuration.routedIntermediateSize,
+                    intermediateSize: configuration.routedIntermediateSize)))
+        }
+        try requireDispatchable(clearPipeline, count: configuration.hiddenSize)
+        try requireDispatchable(
+            routedGateUpPipeline, count: configuration.routedIntermediateSize)
+        try requireDispatchable(routedDownPipeline, count: configuration.hiddenSize)
+        try validateSharedDispatches()
+        return work
+    }
+
+    private func encodeRoutedCommands(
+        commandBuffer: MTLCommandBuffer,
+        hidden: MTLBuffer,
+        work: [RoutedWork],
+        routingWeights: MTLBuffer,
+        scratch: QwenMoEScratch,
+        output: MTLBuffer
+    ) throws {
+        try encodeClear(commandBuffer: commandBuffer, buffer: output, count: configuration.hiddenSize)
+        for (rank, item) in work.enumerated() {
+            guard let gateUpEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw QwenMoEError.commandEncoderUnavailable
+            }
+            var gateUp = item.gateUp
+            gateUpEncoder.setComputePipelineState(routedGateUpPipeline)
+            gateUpEncoder.setBytes(&gateUp, length: MemoryLayout<RoutedParameters>.stride,
+                                   index: QwenMetalBufferIndex.parameters.rawValue)
+            gateUpEncoder.setBuffer(hidden, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+            gateUpEncoder.setBuffer(item.mapped.buffer, offset: 0,
+                                    index: QwenMetalBufferIndex.weights.rawValue)
+            gateUpEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                    index: QwenMetalBufferIndex.scratch.rawValue)
+            gateUpEncoder.useResource(item.mapped.buffer, usage: .read)
+            try dispatch(gateUpEncoder, pipeline: routedGateUpPipeline,
+                         count: configuration.routedIntermediateSize)
+            gateUpEncoder.endEncoding()
+
+            guard let downEncoder = commandBuffer.makeComputeCommandEncoder() else {
+                throw QwenMoEError.commandEncoderUnavailable
+            }
+            var down = item.down
+            downEncoder.setComputePipelineState(routedDownPipeline)
+            downEncoder.setBytes(&down, length: MemoryLayout<RoutedParameters>.stride,
+                                 index: QwenMetalBufferIndex.parameters.rawValue)
+            downEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                  index: QwenMetalBufferIndex.input.rawValue)
+            downEncoder.setBuffer(item.mapped.buffer, offset: 0,
+                                  index: QwenMetalBufferIndex.weights.rawValue)
+            downEncoder.setBuffer(output, offset: 0,
+                                  index: QwenMetalBufferIndex.output.rawValue)
+            downEncoder.setBuffer(
+                routingWeights, offset: rank * MemoryLayout<Float>.stride,
+                index: QwenMetalBufferIndex.state.rawValue)
+            downEncoder.useResource(item.mapped.buffer, usage: .read)
+            try dispatch(downEncoder, pipeline: routedDownPipeline,
+                         count: configuration.hiddenSize)
+            downEncoder.endEncoding()
+        }
+    }
+
+    private func encodeSharedCommands(
+        commandBuffer: MTLCommandBuffer,
+        hidden: MTLBuffer,
+        bindings: QwenMoESharedAffineBindings,
+        scratch: QwenMoEScratch,
+        output: MTLBuffer
+    ) throws {
+        try encodeAffine(
+            commandBuffer: commandBuffer, input: hidden, binding: bindings.gate,
+            output: scratch.sharedGate)
+        try encodeAffine(
+            commandBuffer: commandBuffer, input: hidden, binding: bindings.up,
+            output: scratch.sharedUp)
+        try encodeActivation(
+            commandBuffer: commandBuffer, gate: scratch.sharedGate,
+            up: scratch.sharedUp, output: scratch.sharedActivation,
+            count: configuration.sharedIntermediateSize)
+        try encodeAffine(
+            commandBuffer: commandBuffer, input: scratch.sharedActivation,
+            binding: bindings.down, output: scratch.sharedOutput)
+        try encodeAffine(
+            commandBuffer: commandBuffer, input: hidden,
+            binding: bindings.outputGate, output: scratch.sharedOutputGate)
+
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var parameters = ElementParameters(elementCount: UInt32(configuration.hiddenSize))
+        encoder.setComputePipelineState(sharedEpiloguePipeline)
+        encoder.setBytes(&parameters, length: MemoryLayout<ElementParameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(scratch.sharedOutputGate, offset: 0,
+                          index: QwenMetalBufferIndex.weights.rawValue)
+        encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        encoder.setBuffer(scratch.sharedOutput, offset: 0,
+                          index: QwenMetalBufferIndex.scratch.rawValue)
+        try dispatch(encoder, pipeline: sharedEpiloguePipeline,
+                     count: configuration.hiddenSize)
+        encoder.endEncoding()
+    }
+
+    static func readRoutingDiagnostics(
+        selectedExpertIDs: MTLBuffer,
+        normalizedWeights: MTLBuffer,
+        status: MTLBuffer,
+        tokenCount: Int,
+        configuration: QwenMoEConfiguration
+    ) throws -> QwenMoERoutingDiagnostics {
+        let selectedCount = try checkedMultiply(
+            tokenCount, configuration.topK, operation: "routing diagnostics count")
+        try requireBuffer(
+            selectedExpertIDs, named: "selectedExpertIDs", elements: selectedCount,
+            as: UInt32.self)
+        try requireBuffer(
+            normalizedWeights, named: "normalizedWeights", elements: selectedCount,
+            as: Float.self)
+        try requireBuffer(status, named: "routingStatus", elements: tokenCount, as: UInt32.self)
+        let statuses = status.contents().bindMemory(to: UInt32.self, capacity: tokenCount)
+        let ids = selectedExpertIDs.contents().bindMemory(to: UInt32.self, capacity: selectedCount)
+        let weights = normalizedWeights.contents().bindMemory(to: Float.self, capacity: selectedCount)
+        var allIDs: [[Int]] = []
+        var allWeights: [[Float]] = []
+        for token in 0..<tokenCount {
+            guard statuses[token] == 0 else {
+                throw QwenMoEError.routingKernelRejectedInput(token: token)
+            }
+            let range = token * configuration.topK..<(token + 1) * configuration.topK
+            allIDs.append(range.map { Int(ids[$0]) })
+            allWeights.append(range.map { weights[$0] })
+        }
+        return QwenMoERoutingDiagnostics(
+            selectedExpertIDs: allIDs, normalizedWeights: allWeights,
+            probabilities: [])
+    }
+
+    private func encodeClear(commandBuffer: MTLCommandBuffer,
+                             buffer: MTLBuffer, count: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var parameters = ElementParameters(elementCount: UInt32(count))
+        encoder.setComputePipelineState(clearPipeline)
+        encoder.setBytes(&parameters, length: MemoryLayout<ElementParameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(buffer, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        try dispatch(encoder, pipeline: clearPipeline, count: count)
+        encoder.endEncoding()
+    }
+
+    private func encodeAffine(commandBuffer: MTLCommandBuffer,
+                              input: MTLBuffer,
+                              binding: QwenMoEAffineBinding,
+                              output: MTLBuffer) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var layout = binding.layout
+        encoder.setComputePipelineState(affinePipeline)
+        encoder.setBytes(&layout, length: MemoryLayout<QwenMetalAffineLayout>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(input, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+        encoder.setBuffer(binding.values, offset: binding.valuesOffset,
+                          index: QwenMetalBufferIndex.weights.rawValue)
+        encoder.setBuffer(binding.scales, offset: binding.scalesOffset,
+                          index: QwenMetalBufferIndex.scales.rawValue)
+        encoder.setBuffer(binding.biases, offset: binding.biasesOffset,
+                          index: QwenMetalBufferIndex.biases.rawValue)
+        encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        try dispatch(encoder, pipeline: affinePipeline, count: Int(layout.rowCount))
+        encoder.endEncoding()
+    }
+
+    private func encodeActivation(commandBuffer: MTLCommandBuffer,
+                                  gate: MTLBuffer, up: MTLBuffer,
+                                  output: MTLBuffer, count: Int) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var parameters = ElementParameters(elementCount: UInt32(count))
+        encoder.setComputePipelineState(activationPipeline)
+        encoder.setBytes(&parameters, length: MemoryLayout<ElementParameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(gate, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+        encoder.setBuffer(up, offset: 0, index: QwenMetalBufferIndex.weights.rawValue)
+        encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        try dispatch(encoder, pipeline: activationPipeline, count: count)
+        encoder.endEncoding()
+    }
+
+    private func routedParameters(
+        descriptor: PackedAffineDescriptor,
+        scratchOffset: Int,
+        intermediateSize: Int
+    ) throws -> RoutedParameters {
+        let columns = Int(descriptor.shape.last ?? 0)
+        let rowStride = (columns + 1) / 2
+        let groups = (columns + Quantization.groupSize - 1) / Quantization.groupSize
+        return RoutedParameters(
+            hiddenSize: UInt32(configuration.hiddenSize),
+            intermediateSize: UInt32(intermediateSize),
+            valuesOffset: try Self.uint32(descriptor.valuesOffset, field: "valuesOffset"),
+            scalesOffset: try Self.uint32(descriptor.scalesOffset, field: "scalesOffset"),
+            biasesOffset: try Self.uint32(descriptor.biasesOffset, field: "biasesOffset"),
+            valuesRowStride: try Self.uint32(rowStride, field: "valuesRowStride"),
+            groupsPerRow: try Self.uint32(groups, field: "groupsPerRow"),
+            groupSize: UInt32(Quantization.groupSize),
+            scratchOffset: try Self.uint32(scratchOffset, field: "scratchOffset"))
+    }
+
+    private func validate(mapped: QwenMappedExpert) throws {
+        guard mapped.length >= expertStrideEnd(mapped.gateUp),
+              mapped.length >= expertStrideEnd(mapped.down),
+              mapped.gateUp.shape == [UInt32(configuration.routedIntermediateSize * 2),
+                                      UInt32(configuration.hiddenSize)],
+              mapped.down.shape == [UInt32(configuration.hiddenSize),
+                                    UInt32(configuration.routedIntermediateSize)],
+              mapped.gateUp.bitWidth == 4, mapped.down.bitWidth == 4 else {
+            throw QwenMoEError.invalidExpertShape(expert: mapped.expertID)
+        }
+    }
+
+    private func expertStrideEnd(_ descriptor: PackedAffineDescriptor) -> UInt64 {
+        max(descriptor.valuesOffset + descriptor.valuesSize,
+            descriptor.scalesOffset + descriptor.scalesSize,
+            descriptor.biasesOffset + descriptor.biasesSize)
+    }
+
+    private func validateShared(hidden: MTLBuffer,
+                                bindings: QwenMoESharedAffineBindings,
+                                output: MTLBuffer) throws {
+        try Self.requireBuffer(
+            hidden, named: "hidden", elements: configuration.hiddenSize, as: Float.self)
+        try Self.requireBuffer(
+            output, named: "output", elements: configuration.hiddenSize, as: Float.self)
+        try validate(binding: bindings.gate, rows: configuration.sharedIntermediateSize,
+                     columns: configuration.hiddenSize, name: "sharedGate")
+        try validate(binding: bindings.up, rows: configuration.sharedIntermediateSize,
+                     columns: configuration.hiddenSize, name: "sharedUp")
+        try validate(binding: bindings.down, rows: configuration.hiddenSize,
+                     columns: configuration.sharedIntermediateSize, name: "sharedDown")
+        try validate(binding: bindings.outputGate, rows: 1,
+                     columns: configuration.hiddenSize, name: "sharedOutputGate")
+    }
+
+    private func validateSharedDispatches() throws {
+        try requireDispatchable(affinePipeline, count: configuration.sharedIntermediateSize)
+        try requireDispatchable(affinePipeline, count: configuration.hiddenSize)
+        try requireDispatchable(affinePipeline, count: 1)
+        try requireDispatchable(activationPipeline, count: configuration.sharedIntermediateSize)
+        try requireDispatchable(sharedEpiloguePipeline, count: configuration.hiddenSize)
+    }
+
+    private func validate(binding: QwenMoEAffineBinding,
+                          rows: Int, columns: Int, name: String) throws {
+        guard binding.layout.rowCount == UInt32(rows),
+              binding.layout.columnCount == UInt32(columns),
+              binding.layout.groupSize == UInt32(QwenMetalABI.affineGroupSize),
+              binding.layout.bitWidth == 4 || binding.layout.bitWidth == 8,
+              binding.valuesOffset >= 0, binding.scalesOffset >= 0,
+              binding.biasesOffset >= 0 else {
+            throw QwenMoEError.invalidAffineBinding(name)
+        }
+        try Self.requireBuffer(
+            binding.values, named: "\(name).values", offset: binding.valuesOffset,
+            bytes: Int(binding.layout.rowCount) * Int(binding.layout.valuesRowStrideBytes))
+        try Self.requireBuffer(
+            binding.scales, named: "\(name).scales", offset: binding.scalesOffset,
+            bytes: Int(binding.layout.rowCount) * Int(binding.layout.metadataRowStrideBytes))
+        try Self.requireBuffer(
+            binding.biases, named: "\(name).biases", offset: binding.biasesOffset,
+            bytes: Int(binding.layout.rowCount) * Int(binding.layout.metadataRowStrideBytes))
+    }
+
+    private func requireNotSubmitted(_ commandBuffer: MTLCommandBuffer) throws {
+        guard commandBuffer.status == .notEnqueued else {
+            throw QwenMoEError.commandBufferAlreadySubmitted
+        }
+    }
+
+    private func requireDispatchable(_ pipeline: MTLComputePipelineState,
+                                     count: Int) throws {
+        guard count > 0, pipeline.maxTotalThreadsPerThreadgroup > 0,
+              pipeline.threadExecutionWidth > 0 else {
+            throw QwenMoEError.invalidPipelineLimit
+        }
+    }
+
+    private func dispatch(_ encoder: MTLComputeCommandEncoder,
+                          pipeline: MTLComputePipelineState, count: Int) throws {
+        try requireDispatchable(pipeline, count: count)
+        let width = min(pipeline.maxTotalThreadsPerThreadgroup,
+                        max(1, pipeline.threadExecutionWidth))
+        encoder.dispatchThreads(
+            MTLSize(width: count, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: min(width, count), height: 1, depth: 1))
+    }
+
+    private static func validate(expert: QwenMoEDenseExpert, expertID: Int,
+                                 configuration: QwenMoEConfiguration) throws {
+        let gateUpCount = try checkedMultiply(
+            2 * configuration.routedIntermediateSize, configuration.hiddenSize,
+            operation: "routed gate_up count")
+        let downCount = try checkedMultiply(
+            configuration.hiddenSize, configuration.routedIntermediateSize,
+            operation: "routed down count")
+        guard expert.gateUp.count == gateUpCount, expert.down.count == downCount else {
+            throw QwenMoEError.invalidExpertShape(expert: expertID)
+        }
+    }
+
+    private static func validate(sharedExpert: QwenMoEDenseSharedExpert,
+                                 configuration: QwenMoEConfiguration) throws {
+        let firstCount = try checkedMultiply(
+            configuration.sharedIntermediateSize, configuration.hiddenSize,
+            operation: "shared gate/up count")
+        let downCount = try checkedMultiply(
+            configuration.hiddenSize, configuration.sharedIntermediateSize,
+            operation: "shared down count")
+        guard sharedExpert.gate.count == firstCount,
+              sharedExpert.up.count == firstCount,
+              sharedExpert.down.count == downCount,
+              sharedExpert.outputGate.count == configuration.hiddenSize else {
+            throw QwenMoEError.invalidCount(
+                field: "sharedExpert", expected: firstCount,
+                actual: sharedExpert.gate.count)
+        }
+    }
+
+    private static func project(_ input: [Float], matrix: [Float],
+                                rows: Int, columns: Int) -> [Float] {
+        var output = [Float](repeating: 0, count: rows)
+        for row in 0..<rows {
+            var sum: Float = 0
+            let base = row * columns
+            for column in 0..<columns {
+                sum += matrix[base + column] * input[column]
+            }
+            output[row] = sum
+        }
+        return output
+    }
+
+    private static func silu(_ value: Float) -> Float {
+        value / (1 + Foundation.exp(-value))
+    }
+
+    private static func sigmoid(_ value: Float) -> Float {
+        1 / (1 + Foundation.exp(-value))
+    }
+
+    private static func uint32(_ value: Int, field: String) throws -> UInt32 {
+        guard let result = UInt32(exactly: value) else {
+            throw QwenMoEError.invalidConfiguration(field: field, value: value)
+        }
+        return result
+    }
+
+    private static func uint32(_ value: UInt64, field: String) throws -> UInt32 {
+        guard let result = UInt32(exactly: value) else {
+            throw QwenMoEError.arithmeticOverflow(operation: field)
+        }
+        return result
+    }
+
+    private static func checkedMultiply(_ lhs: Int, _ rhs: Int,
+                                        operation: String) throws -> Int {
+        let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else { throw QwenMoEError.arithmeticOverflow(operation: operation) }
+        return result
+    }
+
+    private static func requireBuffer<T>(
+        _ buffer: MTLBuffer, named name: String, offset: Int = 0,
+        elements: Int, as _: T.Type
+    ) throws {
+        let bytes = try checkedMultiply(elements, MemoryLayout<T>.stride, operation: "\(name) bytes")
+        try requireBuffer(buffer, named: name, offset: offset, bytes: bytes)
+    }
+
+    private static func requireBuffer(
+        _ buffer: MTLBuffer, named name: String, offset: Int = 0, bytes: Int
+    ) throws {
+        guard offset >= 0, bytes >= 0, offset <= buffer.length,
+              bytes <= buffer.length - offset else {
+            throw QwenMoEError.bufferTooSmall(
+                name: name, required: max(0, offset) + max(0, bytes), actual: buffer.length)
+        }
+    }
+}

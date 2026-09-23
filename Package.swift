@@ -69,6 +69,9 @@ let package = Package(
             path: "Sources/TurboFieldfareApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
+            ],
+            linkerSettings: [
+                .linkedLibrary("bsm"),
             ]
         ),
         .target(
@@ -137,7 +140,11 @@ let package = Package(
                 .product(name: "Hub", package: "swift-transformers"),
             ],
             path: "Tests/TurboFieldfare/Core",
-            resources: [.copy("Runtime/Vision/Fixtures/images")]
+            resources: [
+                .copy("Runtime/Vision/Fixtures/images"),
+                .copy("QwenFixtures/qwen36-tiny-fixtures.json"),
+                .copy("QwenFixtures/qwen36-tiny-text-model-fixtures.json"),
+            ]
         ),
         .testTarget(
             name: "TurboFieldfareRepackTests",

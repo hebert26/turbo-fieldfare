@@ -20,16 +20,16 @@ struct ModelInstallView: View {
             .frame(maxWidth: .infinity)
         }
         .confirmationDialog(
-            "Discard the saved model download?",
+            discardConfirmationTitle,
             isPresented: $showingDiscardConfirmation,
             titleVisibility: .visible
         ) {
-            Button("Discard Download", role: .destructive) {
+            Button(discardButtonLabel, role: .destructive) {
                 model.discardModelDownload()
             }
-            Button("Keep Download", role: .cancel) {}
+            Button(keepButtonLabel, role: .cancel) {}
         } message: {
-            Text("Downloaded ranges will be removed. The installed model, if any, is preserved.")
+            Text(discardConfirmationMessage)
         }
     }
 
@@ -42,10 +42,16 @@ struct ModelInstallView: View {
             Text("Model required")
                 .font(.title.bold())
                 .accessibilityHeading(.h1)
-            Text("TurboFieldfare needs \(model.installDescriptor.displayName) before it can generate text.")
+            Text("TurboFieldfare needs \(model.selectedModelEntry.displayName) before it can generate text.")
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
+            if isLocalQwenInstall {
+                Text(qwenSourceStatusText)
+                    .font(.caption)
+                    .foregroundStyle(qwenSourceStatusColor)
+                    .multilineTextAlignment(.center)
+            }
         }
     }
 
@@ -112,10 +118,10 @@ struct ModelInstallView: View {
                    let downloaded = model.installDownloadedBytes,
                    let total = model.installTotalBytes {
                     ProgressView(value: fraction)
-                        .accessibilityLabel("Model download")
+                        .accessibilityLabel(progressAccessibilityLabel)
                         .accessibilityValue(Text(accessibleProgressValue(fraction: fraction)))
                     HStack {
-                        Text("Downloaded \(MetricFormat.storage(downloaded)) of \(MetricFormat.storage(total))")
+                        Text(progressAmountText(completed: downloaded, total: total))
                         Spacer()
                         Text(MetricFormat.percent(fraction * 100))
                     }
@@ -123,7 +129,7 @@ struct ModelInstallView: View {
                     .foregroundStyle(.secondary)
                     HStack(alignment: .firstTextBaseline, spacing: 16) {
                         if let reused = model.installReusedBytes, reused > 0 {
-                            Text("Reused \(MetricFormat.storage(reused)) from the saved download")
+                            Text(reusedAmountText(reused))
                                 .font(.caption)
                         }
                         Spacer(minLength: 16)
@@ -142,7 +148,7 @@ struct ModelInstallView: View {
             }
             .frame(maxWidth: .infinity)
         } else if case .cancelled = model.installState {
-            Label("Download paused", systemImage: "pause.circle")
+            Label(pausedLabel, systemImage: "pause.circle")
                 .foregroundStyle(.secondary)
         } else if case .failed(let message) = model.installState {
             Label(message, systemImage: "exclamationmark.triangle.fill")
@@ -166,7 +172,7 @@ struct ModelInstallView: View {
                     .disabled(!model.canCancelInstall)
             } else {
                 if model.hasPartialModelDownload {
-                    Button("Discard Download", role: .destructive) {
+                    Button(discardButtonLabel, role: .destructive) {
                         showingDiscardConfirmation = true
                     }
                     .buttonStyle(.bordered)
@@ -177,7 +183,7 @@ struct ModelInstallView: View {
                 .buttonStyle(.bordered)
                 .disabled(model.isInstallingModel)
 
-                Button(model.hasPartialModelDownload ? "Resume" : "Download",
+                Button(installButtonLabel,
                        action: model.installModel)
                     .buttonStyle(.borderedProminent)
                     .disabled(!model.canInstallModel)
@@ -189,12 +195,82 @@ struct ModelInstallView: View {
     private var readinessLabel: String {
         switch model.installReadiness {
         case .checking:
-            return "Checking available space"
+            return isLocalQwenInstall
+                ? "Verifying the local source and available space"
+                : "Checking available space"
         case .failed(let message):
             return message
         case .ready, .insufficientSpace:
             return "Checking available space"
         }
+    }
+
+    private var isLocalQwenInstall: Bool {
+        model.selectedModelID == .qwen3_6
+    }
+
+    private var qwenSourceStatusText: String {
+        switch model.qwenSourceConfigurationState {
+        case .notConfigured:
+            return "Choose the official local Qwen source folder in the Model inspector."
+        case .checking:
+            return "Verifying the selected Qwen source folder."
+        case .ready(let url):
+            return "Verified local source: \(url.path)"
+        case .failed(let message):
+            return message
+        }
+    }
+
+    private var qwenSourceStatusColor: Color {
+        if case .failed = model.qwenSourceConfigurationState { return .red }
+        return .secondary
+    }
+
+    private var progressAccessibilityLabel: String {
+        isLocalQwenInstall ? "Model conversion" : "Model download"
+    }
+
+    private func progressAmountText(completed: UInt64, total: UInt64) -> String {
+        let verb = isLocalQwenInstall ? "Converted" : "Downloaded"
+        return "\(verb) \(MetricFormat.storage(completed)) of \(MetricFormat.storage(total))"
+    }
+
+    private func reusedAmountText(_ bytes: UInt64) -> String {
+        let source = isLocalQwenInstall ? "saved conversion" : "saved download"
+        return "Reused \(MetricFormat.storage(bytes)) from the \(source)"
+    }
+
+    private var pausedLabel: String {
+        isLocalQwenInstall ? "Conversion paused" : "Download paused"
+    }
+
+    private var installButtonLabel: String {
+        if isLocalQwenInstall {
+            return model.hasPartialModelDownload ? "Resume Conversion" : "Convert"
+        }
+        return model.hasPartialModelDownload ? "Resume" : "Download"
+    }
+
+    private var discardButtonLabel: String {
+        isLocalQwenInstall ? "Discard Conversion" : "Discard Download"
+    }
+
+    private var keepButtonLabel: String {
+        isLocalQwenInstall ? "Keep Conversion" : "Keep Download"
+    }
+
+    private var discardConfirmationTitle: String {
+        isLocalQwenInstall
+            ? "Discard the saved model conversion?"
+            : "Discard the saved model download?"
+    }
+
+    private var discardConfirmationMessage: String {
+        if isLocalQwenInstall {
+            return "Converted partial files and the conversion checkpoint will be removed. The verified installed model, if any, is preserved."
+        }
+        return "Downloaded ranges will be removed. The installed model, if any, is preserved."
     }
 
     private func accessibleProgressValue(fraction: Double) -> String {

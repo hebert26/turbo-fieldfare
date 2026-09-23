@@ -6,6 +6,59 @@ public enum MultimodalPrefillInputError: Error, Equatable {
     case featureShapeMismatch
 }
 
+struct QwenMultimodalImageSpan: Sendable {
+    let tokenRange: Range<Int>
+    let features: QwenVisionFeatures
+}
+
+struct QwenMultimodalPrefillInput: Sendable {
+    let effectiveTokenIDs: [Int32]
+    let embeddingTokenIDs: [Int32]
+    let imageSpans: [QwenMultimodalImageSpan]
+    let positionPlan: QwenMultimodalPositionPlan
+
+    init(
+        effectiveTokenIDs: [Int32],
+        embeddingTokenIDs: [Int32],
+        imageSpans: [QwenMultimodalImageSpan],
+        positionPlan: QwenMultimodalPositionPlan,
+        config: QwenVisionConfig = .official,
+        limits: QwenVisionResourceLimits = .provisional
+    ) throws {
+        guard effectiveTokenIDs.count == embeddingTokenIDs.count,
+              effectiveTokenIDs.count == positionPlan.positions.count,
+              !imageSpans.isEmpty else {
+            throw MultimodalPrefillInputError.tokenCountMismatch
+        }
+        var previousUpper = 0
+        var rows = 0
+        for span in imageSpans {
+            guard !span.tokenRange.isEmpty,
+                  span.tokenRange.lowerBound >= previousUpper,
+                  span.tokenRange.upperBound <= effectiveTokenIDs.count,
+                  span.tokenRange.count == span.features.tokenCount,
+                  span.features.hiddenSize == config.outputHiddenSize else {
+                throw MultimodalPrefillInputError.featureShapeMismatch
+            }
+            let (next, overflow) = rows.addingReportingOverflow(span.tokenRange.count)
+            guard !overflow else {
+                throw MultimodalPrefillInputError.invalidImageTokenRange
+            }
+            rows = next
+            previousUpper = span.tokenRange.upperBound
+        }
+        guard rows <= limits.maximumVisibleHistoryRows,
+              positionPlan.imageRanges == imageSpans.map(\.tokenRange),
+              positionPlan.grids == imageSpans.map(\.features.grid) else {
+            throw MultimodalPrefillInputError.invalidImageTokenRange
+        }
+        self.effectiveTokenIDs = effectiveTokenIDs
+        self.embeddingTokenIDs = embeddingTokenIDs
+        self.imageSpans = imageSpans
+        self.positionPlan = positionPlan
+    }
+}
+
 public struct MultimodalImageSpan: Sendable {
     public let tokenRange: Range<Int>
     public let features: VisionFeatures
