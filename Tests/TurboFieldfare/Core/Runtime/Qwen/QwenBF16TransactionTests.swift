@@ -13,7 +13,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes,
+            residencyBudgetBytes: source.totalResidencyBudget(expertSlotCount: 9),
             expertCacheSlots: 9,
             expertCachePolicy: .lfu)
         let session = try await QwenOfficialSourceConversationGenerationSession(
@@ -32,10 +32,48 @@ import Testing
             promptTokenIDs: prompt, config: greedyConfig(maxNewTokens: 2))
         assertResult(result, expected: expected, promptCount: prompt.count)
         let after = await session.cacheDiagnostics()
-        let pairBytes = UInt64(model.architecture.hiddenSize)
-            * UInt64(model.architecture.routedIntermediateSize) * 6
-        #expect(after.allocatedBytes == pairBytes * 9)
+        #expect(after.allocatedBytes == QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+            expertSlotCount: 9))
         #expect(after.routedExpertCount == 8)
+    }
+
+    @Test func publishedSourceExpertCacheSurvivesRollbackAndRetry() async throws {
+        let failure = QwenBF16TransactionTestSwitch()
+        let hooks = QwenOfficialSourceTransactionHooks(
+            beforeTurnCommit: {
+                if failure.consume() {
+                    throw QwenBF16TransactionInjectedFailure.precommit
+                }
+            })
+        let harness = try await makeSourceConversationHarness(hooks: hooks)
+        defer { harness.source.remove() }
+        let expectedCacheBytes = QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+            expertSlotCount: QwenBF16TextRunnerFixture.topK)
+
+        failure.arm()
+        let prompt: [Int32] = [1, 2]
+        let failed = await captureAsync {
+            try await harness.session.generatePreparedTurn(
+                promptTokenIDs: prompt, config: greedyConfig(maxNewTokens: 1))
+        }
+        #expect(failed.value == nil,
+                "a failed turn must not publish tokens even after source expert mapping")
+        #expect(failed.error != nil)
+        let afterFailure = await harness.session.cacheDiagnostics()
+        #expect(afterFailure.summary.allocatedBytes == expectedCacheBytes,
+                "mapped source expert pairs must remain published after rollback")
+        #expect(afterFailure.summary.misses > 0,
+                "the failed turn must have populated the source expert cache")
+
+        var oracle = QwenBF16TransactionOracle(source: harness.source)
+        let expected = oracle.turn(prompt: prompt, newTokenCount: 1)
+        let retried = try await harness.session.generatePreparedTurn(
+            promptTokenIDs: prompt, config: greedyConfig(maxNewTokens: 1))
+        assertResult(retried, expected: expected, promptCount: prompt.count)
+        let afterRetry = await harness.session.cacheDiagnostics()
+        #expect(afterRetry.summary.allocatedBytes == expectedCacheBytes)
+        #expect(afterRetry.summary.hits > afterFailure.summary.hits,
+                "retrying after rollback must reuse the published expert pairs")
     }
 
     @Test func sourceConversationCommitsMultipleTurnsAtOraclePositions() async throws {
@@ -70,7 +108,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: contextB,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         let contextA = try MetalContext()
         #expect(contextA.queue !== contextB.queue,
                 "the proposed factory context must not share the loaded model queue")
@@ -99,27 +137,22 @@ import Testing
         assertCommitted(snapshot, matches: expected)
     }
 
-    @Test func protectedReadFailureRestoresExactPrefixAndRetryMatchesCPUOracle() async throws {
+    @Test func protectedReadFailureRestoresExactInitialStateAndRetryMatchesCPUOracle() async throws {
         let readFailure = QwenBF16TransactionTestSwitch()
+        let readEvents = QwenBF16TransactionTestRecorder()
         let hooks = QwenOfficialSourceTransactionHooks(
             beforeProtectedExpertRead: { layer, _, _ in
                 if layer == 1 && readFailure.consume() {
+                    readEvents.append("layer:\(layer)")
                     throw QwenBF16TransactionInjectedFailure.protectedRead
                 }
             })
         let harness = try await makeSourceConversationHarness(hooks: hooks)
         defer { harness.source.remove() }
         var oracle = QwenBF16TransactionOracle(source: harness.source)
-
-        let initialPrompt: [Int32] = [1, 2]
-        let initialExpected = oracle.turn(prompt: initialPrompt, newTokenCount: 1)
-        let initial = try await harness.session.generatePreparedTurn(
-            promptTokenIDs: initialPrompt, config: greedyConfig(maxNewTokens: 1))
-        assertResult(initial, expected: initialExpected, promptCount: initialPrompt.count)
         let before = try await harness.session.diagnosticSnapshot()
-        assertCommitted(before, matches: initialExpected)
 
-        let retryPrompt: [Int32] = [3, 1]
+        let retryPrompt: [Int32] = [1, 2]
         readFailure.arm()
         let failed = await captureAsync {
             try await harness.session.generatePreparedTurn(
@@ -127,9 +160,10 @@ import Testing
         }
         #expect(failed.value == nil, "a protected expert read failure must not return a turn result")
         #expect(failed.error != nil)
+        #expect(readEvents.snapshot == ["layer:1"],
+                "the protected-read failure must come from an actual cache miss")
         let afterFailure = try await harness.session.diagnosticSnapshot()
-        #expect(afterFailure == before,
-                "read failure must restore accepted tokens, logits, positions and both KV families")
+        #expect(afterFailure == before, "read failure must restore the exact initial state")
 
         let retryExpected = oracle.turn(prompt: retryPrompt, newTokenCount: 2)
         let retried = try await harness.session.generatePreparedTurn(
@@ -137,6 +171,45 @@ import Testing
         assertResult(retried, expected: retryExpected, promptCount: retryPrompt.count)
         let afterRetry = try await harness.session.diagnosticSnapshot()
         assertCommitted(afterRetry, matches: retryExpected)
+    }
+
+    @Test func acceptedSidecarMutationDuringProtectedReadRollsBackBeforeSourceMoeSubmission() async throws {
+        let gate = QwenBF16TransactionSyncGate()
+        let armGate = QwenBF16TransactionTestSwitch()
+        let stages = QwenBF16TransactionTestRecorder()
+        let hooks = QwenOfficialSourceTransactionHooks(
+            beforeProtectedExpertRead: { _, _, _ in
+                if armGate.consume() { gate.suspend() }
+            },
+            afterActualGPUSubmission: { stage in
+                stages.append("submit:\(stage)")
+            })
+        let harness = try await makeSourceConversationHarness(hooks: hooks)
+        defer { harness.source.remove() }
+        let before = try await harness.session.diagnosticSnapshot()
+
+        armGate.arm()
+        let session = harness.session
+        let operation = Task {
+            await captureAsync {
+                try await session.generatePreparedTurn(
+                    promptTokenIDs: [1, 2], config: greedyConfig(maxNewTokens: 1))
+            }
+        }
+        await gate.waitUntilEntered()
+        defer { gate.release() }
+        try mutateAcceptedSidecar(harness.source)
+        gate.release()
+        let failed = await operation.value
+
+        #expect(failed.value == nil,
+                "a trusted sidecar mutation during protected mapping must not publish output")
+        #expect(failed.error != nil)
+        #expect(!stages.snapshot.contains("submit:source.moe"),
+                "sidecar validation must fail before the source MoE command is submitted")
+        let after = try await harness.session.diagnosticSnapshot()
+        #expect(after == before,
+                "sidecar rejection must roll back the exact pre-turn conversation state")
     }
 
     @Test func failureAfterSecondSourceMoeSubmissionSettlesBeforeRollbackAndAllowsReuse() async throws {
@@ -437,7 +510,7 @@ import Testing
                 "provisional state and events must not alter the prior committed turn")
     }
 
-    @Test func inPlaceSourceMutationBeforeTurnInvalidatesWithoutChangingAcceptedPrefix() async throws {
+    @Test func publishedSourceExpertCacheRejectsMutationBeforeAcceptedOutput() async throws {
         let harness = try await makeSourceConversationHarness()
         defer { harness.source.remove() }
         var oracle = QwenBF16TransactionOracle(source: harness.source)
@@ -448,6 +521,11 @@ import Testing
         assertResult(result, expected: expected, promptCount: prompt.count)
         let before = try await harness.session.diagnosticSnapshot()
         assertCommitted(before, matches: expected)
+        let cacheBeforeMutation = await harness.session.cacheDiagnostics()
+        let expectedCacheBytes = QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+            expertSlotCount: QwenBF16TextRunnerFixture.topK)
+        #expect(cacheBeforeMutation.summary.allocatedBytes == expectedCacheBytes,
+                "the accepted turn must leave its paired source experts published")
 
         try harness.source.mutateRoutedShardPayloadInPlace()
         let invalidated = await captureAsync {
@@ -460,6 +538,9 @@ import Testing
         let after = try await harness.session.diagnosticSnapshot()
         #expect(after == before,
                 "source invalidation must not publish or retain any partial turn state")
+        let cacheAfterMutation = await harness.session.cacheDiagnostics()
+        #expect(cacheAfterMutation.summary.hits == cacheBeforeMutation.summary.hits,
+                "a mutated source must be rejected before stale cache hits are consumed")
     }
 
     @Test func sourceReplacementDuringTurnInvalidatesAtNextConsumedToken() async throws {
@@ -561,9 +642,11 @@ import Testing
     @Test func rollbackFailurePoisonsSessionWithoutAcceptingTheFailedTurn() async throws {
         let readFailure = QwenBF16TransactionTestSwitch()
         let rollbackFailure = QwenBF16TransactionTestSwitch()
+        let readEvents = QwenBF16TransactionTestRecorder()
         let hooks = QwenOfficialSourceTransactionHooks(
             beforeProtectedExpertRead: { layer, _, _ in
                 if layer == 1 && readFailure.consume() {
+                    readEvents.append("layer:\(layer)")
                     throw QwenBF16TransactionInjectedFailure.protectedRead
                 }
             },
@@ -574,24 +657,18 @@ import Testing
             })
         let harness = try await makeSourceConversationHarness(hooks: hooks)
         defer { harness.source.remove() }
-        var oracle = QwenBF16TransactionOracle(source: harness.source)
-
-        let initialPrompt: [Int32] = [1, 2]
-        let initialExpected = oracle.turn(prompt: initialPrompt, newTokenCount: 1)
-        let initial = try await harness.session.generatePreparedTurn(
-            promptTokenIDs: initialPrompt, config: greedyConfig(maxNewTokens: 1))
-        assertResult(initial, expected: initialExpected, promptCount: initialPrompt.count)
         let before = try await harness.session.diagnosticSnapshot()
-        assertCommitted(before, matches: initialExpected)
 
         readFailure.arm()
         rollbackFailure.arm()
         let failed = await captureAsync {
             try await harness.session.generatePreparedTurn(
-                promptTokenIDs: [3, 1], config: greedyConfig(maxNewTokens: 2))
+                promptTokenIDs: [1, 2], config: greedyConfig(maxNewTokens: 2))
         }
         #expect(failed.value == nil, "rollback failure cannot produce an accepted turn result")
         #expect(failed.error != nil)
+        #expect(readEvents.snapshot == ["layer:1"],
+                "rollback poisoning must follow an actual protected-read failure")
         let poisoned = await harness.session.committedJournalSnapshot()
         assertCommittedJournal(poisoned, matches: before, expectedUnusable: true)
         #expect(poisoned.unusable,
@@ -608,6 +685,68 @@ import Testing
         let stillPoisoned = await harness.session.committedJournalSnapshot()
         assertCommittedJournal(stillPoisoned, matches: before, expectedUnusable: true)
         #expect(stillPoisoned.unusable)
+        #expect(stillPoisoned.activeTransaction == nil)
+    }
+
+    @Test func rollbackFailureAfterCommittedPrefixPreservesJournalAndPoisonsSession() async throws {
+        let precommitFailure = QwenBF16TransactionTestSwitch()
+        let rollbackFailure = QwenBF16TransactionTestSwitch()
+        let stages = QwenBF16TransactionTestRecorder()
+        let hooks = QwenOfficialSourceTransactionHooks(
+            beforeTurnCommit: {
+                stages.append("beforeCommit")
+                if precommitFailure.consume() {
+                    throw QwenBF16TransactionInjectedFailure.precommit
+                }
+            },
+            beforeRollbackRestore: {
+                stages.append("restore")
+                if rollbackFailure.consume() {
+                    throw QwenBF16TransactionInjectedFailure.rollbackRestore
+                }
+            })
+        let harness = try await makeSourceConversationHarness(hooks: hooks)
+        defer { harness.source.remove() }
+        var oracle = QwenBF16TransactionOracle(source: harness.source)
+
+        let initialPrompt: [Int32] = [1, 2]
+        let initialExpected = oracle.turn(prompt: initialPrompt, newTokenCount: 1)
+        let initial = try await harness.session.generatePreparedTurn(
+            promptTokenIDs: initialPrompt, config: greedyConfig(maxNewTokens: 1))
+        assertResult(initial, expected: initialExpected, promptCount: initialPrompt.count)
+        let before = try await harness.session.diagnosticSnapshot()
+        let beforeJournal = await harness.session.committedJournalSnapshot()
+        assertCommitted(before, matches: initialExpected)
+        assertCommittedJournal(beforeJournal, matches: before)
+
+        stages.removeAll()
+        precommitFailure.arm()
+        rollbackFailure.arm()
+        let failed = await captureAsync {
+            try await harness.session.generatePreparedTurn(
+                promptTokenIDs: [3, 1], config: greedyConfig(maxNewTokens: 2))
+        }
+        #expect(failed.value == nil,
+                "a precommit failure with failed rollback cannot publish a turn")
+        #expect(failed.error != nil)
+        #expect(stages.snapshot.contains("beforeCommit"),
+                "the poisoning must follow the actual precommit failure hook")
+        #expect(stages.snapshot.contains("restore"),
+                "the failed turn must attempt rollback before poisoning the session")
+
+        let poisoned = await harness.session.committedJournalSnapshot()
+        assertCommittedJournal(poisoned, matches: before, expectedUnusable: true)
+        #expect(poisoned.unusable)
+        #expect(poisoned.activeTransaction == nil)
+
+        let reuse = await captureAsync {
+            try await harness.session.generatePreparedTurn(
+                promptTokenIDs: [2], config: greedyConfig(maxNewTokens: 1))
+        }
+        #expect(reuse.value == nil, "a poisoned source conversation must reject reuse")
+        #expect(reuse.error != nil)
+        let stillPoisoned = await harness.session.committedJournalSnapshot()
+        assertCommittedJournal(stillPoisoned, matches: before, expectedUnusable: true)
         #expect(stillPoisoned.activeTransaction == nil)
     }
 }
@@ -627,7 +766,7 @@ private func makeSourceConversationHarness(
     let model = try QwenOfficialSourceModel.loadSyntheticFixture(
         registrationURL: source.registrationURL,
         context: context,
-        residencyBudgetBytes: source.expectedResidentBytes)
+        residencyBudgetBytes: source.totalResidencyBudget())
     let session = try await QwenOfficialSourceConversationGenerationSession(
         fixtureModel: model,
         context: context,
@@ -636,6 +775,19 @@ private func makeSourceConversationHarness(
         hooks: hooks)
     return QwenBF16SourceConversationHarness(
         source: source, context: context, model: model, session: session)
+}
+
+private func mutateAcceptedSidecar(
+    _ source: QwenBF16TextRunnerFixture.Source
+) throws {
+    let url = source.sourceRoot.appendingPathComponent("config.json")
+    var bytes = try Data(contentsOf: url)
+    guard let offset = bytes.firstIndex(of: 0x71) else {
+        throw NSError(domain: "QwenBF16TransactionTests", code: 1,
+                      userInfo: [NSLocalizedDescriptionKey: "fixture config has no mutable byte"])
+    }
+    bytes[offset] = 0x78
+    try bytes.write(to: url, options: .atomic)
 }
 
 private struct QwenBF16ExpectedTurn {

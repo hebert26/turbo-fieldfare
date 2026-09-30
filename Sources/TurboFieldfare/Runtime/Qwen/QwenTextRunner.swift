@@ -1745,9 +1745,12 @@ struct QwenBF16FullAttentionHooks: Sendable {
     }
 
     let checkpoint: @Sendable (Checkpoint) async throws -> Void
+    /// A supplied callback retains its original submission/completion boundary.
+    let requiresSeparateGPUStages: Bool
 
-    init(checkpoint: @escaping @Sendable (Checkpoint) async throws -> Void = { _ in }) {
-        self.checkpoint = checkpoint
+    init(checkpoint: (@Sendable (Checkpoint) async throws -> Void)? = nil) {
+        self.checkpoint = checkpoint ?? { _ in }
+        requiresSeparateGPUStages = checkpoint != nil
     }
 
     static let none = Self()
@@ -1933,13 +1936,18 @@ actor QwenBF16FullAttentionStep {
         try attention.encodeOutputGate(
             commandBuffer: gateCommand, attention: attentionInput,
             rawGate: gateInput, output: gated, elementCount: queryWidth)
-        try await submitAndSettle(gateCommand, stage: "gate")
+        if hooks.requiresSeparateGPUStages {
+            try await submitAndSettle(gateCommand, stage: "gate")
+        }
+        // Unobserved stages share a command, keeping the same encoder order.
         let output = try emptyBuffer(hiddenSize, label: "qwen.bf16.attention.output")
-        let outputCommand = try commandBuffer(stage: "output")
+        let outputCommand = hooks.requiresSeparateGPUStages
+            ? try commandBuffer(stage: "output") : gateCommand
         try weights.encodeProjection(commandBuffer: outputCommand,
                                      tensorName: names.output, input: gated,
                                      tokenCount: 1, output: output)
-        try await submitAndSettle(outputCommand, stage: "output")
+        try await submitAndSettle(outputCommand,
+            stage: hooks.requiresSeparateGPUStages ? "output" : "gate-output")
         let result = Self.readFloats(output, count: hiddenSize)
         guard result.allSatisfy(\.isFinite) else {
             throw QwenFullAttentionError.nonfiniteAttention
@@ -2053,13 +2061,16 @@ struct QwenBF16LinearHooks: Sendable {
     }
 
     let checkpoint: @Sendable (Checkpoint) async throws -> Void
+    /// Observations never read a stage before that stage has settled.
+    let requiresSeparateGPUStages: Bool
     /// First input position, stage, actual FP32 activations. Default nil.
     let observeActivation: (@Sendable (Int, String, [Float]) -> Void)?
 
     init(observeActivation: (@Sendable (Int, String, [Float]) -> Void)? = nil,
-         checkpoint: @escaping @Sendable (Checkpoint) async throws -> Void = { _ in }) {
-        self.checkpoint = checkpoint
+         checkpoint: (@Sendable (Checkpoint) async throws -> Void)? = nil) {
+        self.checkpoint = checkpoint ?? { _ in }
         self.observeActivation = observeActivation
+        requiresSeparateGPUStages = checkpoint != nil || observeActivation != nil
     }
 
     static let none = Self()
@@ -2207,7 +2218,9 @@ actor QwenBF16LinearStep {
                                      input: input, tokenCount: tokenCount, output: rawBeta)
         try weights.encodeProjection(commandBuffer: projection, tensorName: names.a,
                                      input: input, tokenCount: tokenCount, output: rawA)
-        try await submitAndSettle(projection, stage: "projections")
+        if hooks.requiresSeparateGPUStages {
+            try await submitAndSettle(projection, stage: "projections")
+        }
         if let observe = hooks.observeActivation {
             observe(position, "input", normalizedHidden)
             observe(position, "qkv", Self.readFloats(qkv, count: qkvCount))
@@ -2219,7 +2232,9 @@ actor QwenBF16LinearStep {
         let channelMajor = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.channelMajor")
         let convolvedMajor = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.convolvedMajor")
         let convolved = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.convolved")
-        let convolution = try commandBuffer(stage: "convolution")
+        // One deferred state reservation still owns both combined commands.
+        let convolution = hooks.requiresSeparateGPUStages
+            ? try commandBuffer(stage: "convolution") : projection
         try runtime.encodeLayout(commandBuffer: convolution, input: qkv,
                                  output: channelMajor, tokenCount: tokenCount,
                                  channelCount: channels, tokenToChannel: true)
@@ -2230,7 +2245,9 @@ actor QwenBF16LinearStep {
         try runtime.encodeLayout(commandBuffer: convolution, input: convolvedMajor,
                                  output: convolved, tokenCount: tokenCount,
                                  channelCount: channels, tokenToChannel: false)
-        try await submitAndSettle(convolution, stage: "convolution", update: update)
+        try await submitAndSettle(convolution,
+            stage: hooks.requiresSeparateGPUStages ? "convolution" : "projections-convolution",
+            update: update)
 
         let projected = Self.readFloats(convolved, count: qkvCount)
         let betaRaw = Self.readFloats(rawBeta, count: scalarCount)
@@ -2302,18 +2319,23 @@ actor QwenBF16LinearStep {
         try runtime.encodeGatedRMSNorm(
             commandBuffer: recurrence, input: recurrenceOutput, gate: gate,
             weights: normWeights, output: gated, tokenCount: tokenCount)
-        try await submitAndSettle(recurrence, stage: "recurrence", update: update)
+        if hooks.requiresSeparateGPUStages {
+            try await submitAndSettle(recurrence, stage: "recurrence", update: update)
+        }
         if let observe = hooks.observeActivation {
             observe(position, "core", Self.readFloats(recurrenceOutput, count: valueCount))
             observe(position, "gated", Self.readFloats(gated, count: valueCount))
         }
 
         let output = try emptyBuffer(inputCount, label: "qwen.bf16.linear.output")
-        let outputCommand = try commandBuffer(stage: "output")
+        let outputCommand = hooks.requiresSeparateGPUStages
+            ? try commandBuffer(stage: "output") : recurrence
         try weights.encodeProjection(commandBuffer: outputCommand,
                                      tensorName: names.output, input: gated,
                                      tokenCount: tokenCount, output: output)
-        try await submitAndSettle(outputCommand, stage: "output")
+        try await submitAndSettle(outputCommand,
+            stage: hooks.requiresSeparateGPUStages ? "output" : "recurrence-output",
+            update: hooks.requiresSeparateGPUStages ? nil : update)
         let result = Self.readFloats(output, count: inputCount)
         guard result.allSatisfy(\.isFinite) else {
             throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite output")

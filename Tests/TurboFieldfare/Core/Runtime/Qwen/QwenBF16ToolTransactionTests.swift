@@ -230,7 +230,7 @@ private func makeToolHarness(
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         let session = try await QwenOfficialSourceConversationGenerationSession(
             fixtureModel: model, context: context, maxContext: 512,
             expertSlotCount: QwenBF16TextRunnerFixture.topK, hooks: hooks)

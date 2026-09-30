@@ -9,6 +9,8 @@ struct QwenOfficialSourceTransactionHooks: Sendable {
         @Sendable (Int, Int, QwenBF16ExpertReadHooks.Stream) throws -> Void
     let afterActualGPUSubmission: @Sendable (String) async throws -> Void
     let afterActualGPUCompletion: @Sendable (String) async throws -> Void
+    /// Explicit callbacks, including no-op callbacks, retain stage boundaries.
+    let requiresSeparateGPUStages: Bool
     let betweenConsumedTokens: @Sendable (Int) async throws -> Void
     let beforeTurnCommit: @Sendable () async throws -> Void
     let beforeRollbackRestore: @Sendable () throws -> Void
@@ -26,8 +28,8 @@ struct QwenOfficialSourceTransactionHooks: Sendable {
     init(
         beforeProtectedExpertRead: @escaping @Sendable
             (Int, Int, QwenBF16ExpertReadHooks.Stream) throws -> Void = { _, _, _ in },
-        afterActualGPUSubmission: @escaping @Sendable (String) async throws -> Void = { _ in },
-        afterActualGPUCompletion: @escaping @Sendable (String) async throws -> Void = { _ in },
+        afterActualGPUSubmission: (@Sendable (String) async throws -> Void)? = nil,
+        afterActualGPUCompletion: (@Sendable (String) async throws -> Void)? = nil,
         betweenConsumedTokens: @escaping @Sendable (Int) async throws -> Void = { _ in },
         beforeTurnCommit: @escaping @Sendable () async throws -> Void = {},
         beforeRollbackRestore: @escaping @Sendable () throws -> Void = {},
@@ -38,8 +40,10 @@ struct QwenOfficialSourceTransactionHooks: Sendable {
         observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)? = nil
     ) {
         self.beforeProtectedExpertRead = beforeProtectedExpertRead
-        self.afterActualGPUSubmission = afterActualGPUSubmission
-        self.afterActualGPUCompletion = afterActualGPUCompletion
+        self.afterActualGPUSubmission = afterActualGPUSubmission ?? { _ in }
+        self.afterActualGPUCompletion = afterActualGPUCompletion ?? { _ in }
+        requiresSeparateGPUStages = afterActualGPUSubmission != nil
+            || afterActualGPUCompletion != nil || observeActivation != nil
         self.betweenConsumedTokens = betweenConsumedTokens
         self.beforeTurnCommit = beforeTurnCommit
         self.beforeRollbackRestore = beforeRollbackRestore

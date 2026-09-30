@@ -11,6 +11,7 @@ struct QwenBF16TextRunnerFixture {
     static let vocabularySize = 5
     static let expertCount = 9
     static let topK = 8
+    static let layerCount = 2
     static let routedIntermediateSize = 2
     static let sharedIntermediateSize = 2
     static let queryHeads = 2
@@ -105,7 +106,22 @@ struct QwenBF16TextRunnerFixture {
         let indexJSON: Data
         let expectedResidentBF16Bytes: UInt64
         let expectedFP32VectorBytes: UInt64
+        /// Dense BF16 matrices plus decoded FP32 vectors. Expert cache bytes
+        /// are added only by totalResidencyBudget.
         let expectedResidentBytes: UInt64
+
+        /// Dense BF16 matrices and decoded FP32 vectors only. The routed
+        /// expert cache is accounted separately by totalResidencyBudget.
+        func totalResidencyBudget(
+            expertSlotCount: Int = QwenBF16TextRunnerFixture.topK
+        ) -> UInt64 {
+            let cacheBytes = QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+                expertSlotCount: expertSlotCount,
+                layerCount: QwenBF16TextRunnerFixture.layerCount)
+            let (total, overflow) = expectedResidentBytes.addingReportingOverflow(cacheBytes)
+            precondition(!overflow, "synthetic fixture residency budget overflow")
+            return total
+        }
 
         func remove() {
             try? FileManager.default.removeItem(at: root)
@@ -645,6 +661,21 @@ struct QwenBF16TextRunnerFixture {
     let configJSON: Data
     let indexJSON: Data
     let expectedResidentBytes: UInt64
+
+    static func expectedExpertCacheBytes(
+        expertSlotCount: Int,
+        layerCount: Int = QwenBF16TextRunnerFixture.layerCount
+    ) -> UInt64 {
+        precondition(expertSlotCount > 0 && layerCount > 0)
+        let pairBytes = UInt64(hiddenSize) * UInt64(routedIntermediateSize) * 6
+        let (slotBytes, slotOverflow) = pairBytes.multipliedReportingOverflow(
+            by: UInt64(expertSlotCount))
+        let (cacheBytes, layerOverflow) = slotBytes.multipliedReportingOverflow(
+            by: UInt64(layerCount))
+        precondition(!slotOverflow && !layerOverflow,
+                     "synthetic fixture expert cache budget overflow")
+        return cacheBytes
+    }
 
     static func make(
         configJSON overrideConfig: Data? = nil,

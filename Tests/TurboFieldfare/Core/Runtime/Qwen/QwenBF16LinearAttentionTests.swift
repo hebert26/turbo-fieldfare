@@ -469,6 +469,54 @@ private func maxLinearDifference(_ lhs: [Float], _ rhs: [Float]) -> Float {
                                label: "batched versus sequential final state")
     }
 
+    @Test func unobservedBatchedPathMatchesActivationObservedPathAndPreservesTraceBoundaries() async throws {
+        let fixture = QwenBF16LinearFixture.self
+        let source = try QwenBF16SyntheticSource.make(tensors: fixture.literalTensors())
+        defer { source.remove() }
+        let context = try MetalContext()
+        let weights = try makeLinearWeights(context: context, source: source)
+        let expected = independentLinearAttention(
+            normalizedHidden: fixture.tokens, initialState: fixture.initialState)
+
+        let unobservedState = try makeLinearState(context: context)
+        let unobserved = try makeLinearStep(
+            context: context, weights: weights, state: unobservedState)
+        let unobservedOutput = try await unobserved.append(
+            normalizedHidden: fixture.tokens, tokenCount: fixture.tokenCount)
+
+        let trace = LinearActivationTraceRecorder()
+        let observedState = try makeLinearState(context: context)
+        let observed = try makeLinearStep(
+            context: context, weights: weights, state: observedState,
+            hooks: QwenBF16LinearHooks(observeActivation: { _, stage, values in
+                trace.record(stage: stage, count: values.count)
+            }))
+        let observedOutput = try await observed.append(
+            normalizedHidden: fixture.tokens, tokenCount: fixture.tokenCount)
+
+        expectLinearClose(unobservedOutput, expected.output,
+                          label: "unobserved batched output")
+        expectLinearClose(observedOutput, expected.output,
+                          label: "activation-observed output")
+        expectLinearClose(unobservedOutput, observedOutput,
+                          label: "batched versus activation-observed output")
+        let unobservedSnapshot = try await unobserved.snapshot()
+        let observedSnapshot = try await observed.snapshot()
+        expectLinearStateClose(unobservedSnapshot.state, expected.finalState,
+                               label: "unobserved batched state")
+        expectLinearStateClose(observedSnapshot.state, expected.finalState,
+                               label: "activation-observed state")
+        #expect(unobservedSnapshot == observedSnapshot)
+
+        let records = trace.snapshot()
+        #expect(records.map(\.stage) == [
+            "input", "qkv", "z", "b", "a", "convolved",
+            "query-raw", "key-raw", "value", "beta", "log-decay",
+            "core", "gated", "output",
+        ])
+        #expect(records.allSatisfy { $0.count > 0 })
+    }
+
     @Test func injectedFailureAtEverySubmissionBoundaryRollsBackAndAllowsReuse() async throws {
         let fixture = QwenBF16LinearFixture.self
         let source = try QwenBF16SyntheticSource.make(tensors: fixture.literalTensors())
@@ -876,6 +924,29 @@ private enum LinearCheckpointTarget: Sendable, CustomStringConvertible {
 }
 
 private struct InjectedLinearFailure: Error, Sendable {}
+
+private final class LinearActivationTraceRecorder: @unchecked Sendable {
+    struct Record: Equatable, Sendable {
+        let stage: String
+        let count: Int
+    }
+
+    private let lock = NSLock()
+    private var records: [Record] = []
+
+    func record(stage: String, count: Int) {
+        lock.lock()
+        records.append(Record(stage: stage, count: count))
+        lock.unlock()
+    }
+
+    func snapshot() -> [Record] {
+        lock.lock()
+        let result = records
+        lock.unlock()
+        return result
+    }
+}
 
 private actor OneShotLinearFailure {
     private let target: LinearCheckpointTarget

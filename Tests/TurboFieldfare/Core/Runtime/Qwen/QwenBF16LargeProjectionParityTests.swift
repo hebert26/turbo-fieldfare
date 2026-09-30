@@ -87,6 +87,41 @@ import Testing
                 "the qualified reduction's Inf plus negative Inf must remain NaN")
     }
 
+    @Test func multiTokenLargeProjectionMatchesIndependentOrderedOracleAcrossRowChunkBoundaries() throws {
+        let rows = 512
+        let columns = 2048
+        let tokenCount = 17
+        let (_, weights) = try fixture(rows: rows, columns: columns)
+        let baseInput = try fixture(rows: 1, columns: columns, seed: "0x913efaf1").input
+        var input: [Float] = []
+        input.reserveCapacity(tokenCount * columns)
+        for token in 0..<tokenCount {
+            for column in 0..<columns {
+                let base = baseInput[column]
+                let signedBase = (token + column).isMultiple(of: 2) ? base : -base
+                input.append(signedBase + Float(token - 8) * 0.0078125)
+            }
+        }
+        let expected = sourceLargeOrderedDots(input: input, weights: weights,
+                                              rows: rows, columns: columns,
+                                              tokenCount: tokenCount)
+
+        for chunkRows in [63, 64, 65] {
+            let expectedChunkRows = stride(from: 0, to: rows, by: chunkRows).map {
+                min(chunkRows, rows - $0)
+            }
+            let actual = try project(input: input, weights: weights,
+                                     rows: rows, columns: columns,
+                                     tokenCount: tokenCount,
+                                     expectedChunkRows: expectedChunkRows,
+                                     maximumChunkBytes: UInt64(chunkRows * columns
+                                        * MemoryLayout<UInt16>.stride))
+            #expect(actual.count == tokenCount * rows)
+            #expect(actual.map(\.bitPattern) == expected.map(\.bitPattern),
+                    "\(tokenCount) dense tokens must preserve ordered source bits at \(chunkRows)-row chunks")
+        }
+    }
+
     @Test func singleRowProjectionMatchesBothPinnedTorch69CaseSets() throws {
         let manifest = try loadManifest()
         #expect(manifest.singleRowProofs.map { $0.dataset } == ["original", "fresh"])
@@ -295,6 +330,42 @@ import Testing
         }
     }
 
+    private func sourceLargeOrderedDots(input: [Float], weights: [UInt16],
+                                        rows: Int, columns: Int,
+                                        tokenCount: Int) -> [Float] {
+        var result = [Float](repeating: 0, count: tokenCount * rows)
+        for token in 0..<tokenCount {
+            let inputBase = token * columns
+            for row in 0..<rows {
+                let rowBase = row * columns
+                var partial = [Float](repeating: 0, count: 64)
+                for column in 0..<columns {
+                    let weight = Float(bitPattern: UInt32(weights[rowBase + column]) << 16)
+                    let stream = column & 63
+                    partial[stream] = partial[stream].addingProduct(
+                        weight, input[inputBase + column])
+                }
+                var collapsed = [Float](repeating: 0, count: 16)
+                for index in 0..<16 {
+                    let first = partial[index] + partial[index + 16]
+                    let second = first + partial[index + 32]
+                    collapsed[index] = second + partial[index + 48]
+                }
+                var groups = [Float](repeating: 0, count: 4)
+                for index in 0..<4 {
+                    let base = index * 4
+                    let first = collapsed[base] + collapsed[base + 1]
+                    let second = first + collapsed[base + 2]
+                    groups[index] = second + collapsed[base + 3]
+                }
+                let first = groups[0] + groups[1]
+                let second = first + groups[2]
+                result[token * rows + row] = second + groups[3]
+            }
+        }
+        return result
+    }
+
     private func legacyStableDots(input: [Float], weights: [UInt16],
                                   rows: Int, columns: Int) -> [Float] {
         (0..<rows).map { row in
@@ -346,6 +417,8 @@ import Testing
 
     private func project(input: [Float], weights: [UInt16],
                          rows: Int, columns: Int,
+                         tokenCount: Int = 1,
+                         expectedChunkRows: [Int]? = nil,
                          maximumChunkBytes: UInt64? = nil,
                          context suppliedContext: MetalContext? = nil) throws -> [Float] {
         let source = try QwenBF16SyntheticSource.make(tensors: [
@@ -367,20 +440,33 @@ import Testing
             residencyBudget: UInt64(weights.count * MemoryLayout<UInt16>.stride),
             maximumChunkBytes: maximumChunkBytes ?? 8 * 1024 * 1024,
             checkpoint: { _ in })
+        if let expectedChunkRows {
+            let chunks = resident.inspectedChunks
+            var expectedFirstRows: [Int] = []
+            var firstRow = 0
+            for rowCount in expectedChunkRows {
+                expectedFirstRows.append(firstRow)
+                firstRow += rowCount
+            }
+            #expect(chunks.map(\.rowCount) == expectedChunkRows)
+            #expect(chunks.map(\.firstRow) == expectedFirstRows)
+        }
         let inputBuffer = try #require(input.withUnsafeBytes { bytes in
             context.device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count,
                                       options: .storageModeShared)
         })
         let output = try #require(context.device.makeBuffer(
-            length: rows * MemoryLayout<Float>.stride, options: .storageModeShared))
+            length: tokenCount * rows * MemoryLayout<Float>.stride,
+            options: .storageModeShared))
         let command = try #require(context.queue.makeCommandBuffer())
         try resident.encodeProjection(commandBuffer: command, tensorName: "projection",
-                                      input: inputBuffer, tokenCount: 1, output: output)
+                                      input: inputBuffer, tokenCount: tokenCount, output: output)
         command.commit()
         command.waitUntilCompleted()
         try #require(command.status == .completed)
         return Array(UnsafeBufferPointer(
-            start: output.contents().bindMemory(to: Float.self, capacity: rows), count: rows))
+            start: output.contents().bindMemory(to: Float.self, capacity: tokenCount * rows),
+            count: tokenCount * rows))
     }
 }
 

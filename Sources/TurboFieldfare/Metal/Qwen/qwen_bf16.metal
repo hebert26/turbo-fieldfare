@@ -206,3 +206,51 @@ kernel void qwen_bf16_project_fp32(
                     ? qwenBF16SourceSmall32Dot(row, vector, p.columns, p.firstRow + localRow)
                     : qwenBF16StableDot(row, vector, p.columns));
 }
+
+
+// One full 64-thread group owns one output row/token. Each thread replays one
+// of the existing CPU-order FMA streams. Explicit additions below preserve the
+// same 64->16->4->1 reduction without a SIMD sum or reassociation.
+kernel void qwen_bf16_project_source64_fp32(
+    constant QwenBF16Parameters& p [[buffer(0)]],
+    device const float* input [[buffer(1)]],
+    device const ushort* weightBits [[buffer(2)]],
+    device float* output [[buffer(5)]],
+    uint3 group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_threadgroup]]
+) {
+#pragma clang fp contract(off)
+    const uint localRow = group.x;
+    const uint token = group.y;
+    // This condition is uniform for the entire group, before all barriers.
+    if (token >= p.tokenCount || localRow >= p.rowsInChunk) return;
+    const device float* vector = input + ulong(token) * p.columns;
+    const device ushort* row = weightBits + ulong(localRow) * p.columns;
+    threadgroup float partial[64];
+    float sum = 0.0f;
+    for (uint column = lane; column < p.columns; column += 64u) {
+        sum = fma(qwenBF16Value(row[column]), vector[column], sum);
+    }
+    partial[lane] = sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < 16u) {
+        const float first = partial[lane] + partial[lane + 16u];
+        const float second = first + partial[lane + 32u];
+        partial[lane] = second + partial[lane + 48u];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane < 4u) {
+        const uint base = lane * 4u;
+        const float first = partial[base] + partial[base + 1u];
+        const float second = first + partial[base + 2u];
+        // Each writer changes only its own four-value input group. No other
+        // thread reads this destination until the following group barrier.
+        partial[base] = second + partial[base + 3u];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (lane == 0u) {
+        const float first = partial[0] + partial[4];
+        const float second = first + partial[8];
+        output[ulong(token) * p.rows + p.firstRow + localRow] = second + partial[12];
+    }
+}

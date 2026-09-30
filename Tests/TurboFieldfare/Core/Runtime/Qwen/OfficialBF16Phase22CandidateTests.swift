@@ -52,6 +52,7 @@ private struct P22Receipt: Codable {
     let sourceKind: String
     let registrationPath: String
     let integrityPolicy: String
+    let captureMode: String
     let promptText: String
     let promptTokenIds: [Int32]
     let temperature: Float
@@ -64,14 +65,16 @@ private struct P22Receipt: Codable {
 private final class P22Capture: @unchecked Sendable {
     private let lock = NSLock()
     private let linearCaptureLayer: Int
+    private let capturesActivations: Bool
     private var routes: [Int: [P22Route]] = [:]
     private var raw: [Int: (Int32, [Float])] = [:]
     private var sampled: [Int: ([UInt16], Int32)] = [:]
     private var activations: [Int: [P22ActivationKey: [Float]]] = [:]
     private var duplicate = false
 
-    init(linearCaptureLayer: Int = 0) {
+    init(linearCaptureLayer: Int = 0, capturesActivations: Bool = true) {
         self.linearCaptureLayer = linearCaptureLayer
+        self.capturesActivations = capturesActivations
     }
 
     func route(position: Int, layer: Int, logits: [Float], ids: [Int],
@@ -99,6 +102,7 @@ private final class P22Capture: @unchecked Sendable {
     }
 
     func activation(position: Int, layer: Int, stage: String, values: [Float]) {
+        guard capturesActivations else { return }
         // Keep the first linear-attention layer's actual inputs and outputs,
         // plus the final state and exact LM-head input.
         let isLayerBoundary = layer >= 0 && [
@@ -127,7 +131,15 @@ private final class P22Capture: @unchecked Sendable {
     }
 
     var hooks: QwenOfficialSourceTransactionHooks {
-        QwenOfficialSourceTransactionHooks(
+        let activationObserver: (@Sendable (Int, Int, String, [Float]) -> Void)?
+        if capturesActivations {
+            activationObserver = { @Sendable [self] position, layer, stage, values in
+                activation(position: position, layer: layer, stage: stage, values: values)
+            }
+        } else {
+            activationObserver = nil
+        }
+        return QwenOfficialSourceTransactionHooks(
             observeRoute: { [self] position, layer, logits, ids, weights, margin in
                 route(position: position, layer: layer, logits: logits,
                       ids: ids, weights: weights, margin: margin)
@@ -138,9 +150,11 @@ private final class P22Capture: @unchecked Sendable {
             observePublicLogitsAndSample: { [self] step, bits, token in
                 sample(step: step, bits: bits, token: token)
             },
-            observeActivation: { [self] position, layer, stage, values in
-                activation(position: position, layer: layer, stage: stage, values: values)
-            })
+            observeActivation: activationObserver)
+    }
+
+    var captureMode: String {
+        capturesActivations ? "full-activation" : "route-logit-only"
     }
 }
 
@@ -204,9 +218,11 @@ private func p22ActivationCounts(
         let source = try QwenBF16TextRunnerFixture.make()
         defer { source.remove() }
         let context = try MetalContext()
+        let twoRunnerBudget = source.totalResidencyBudget(
+            expertSlotCount: 2 * QwenBF16TextRunnerFixture.topK)
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL, context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: twoRunnerBudget)
         let linearCaptureLayer = try #require(model.architecture.layerKinds.firstIndex(
             of: .linearAttention))
         let capture = P22Capture(linearCaptureLayer: linearCaptureLayer)
@@ -291,35 +307,49 @@ private func p22ActivationCounts(
         guard model.architecture.layerKinds.first == .linearAttention else {
             throw P22CandidateError.incompleteCapture("official layer 0 is not linear attention")
         }
-        let capture = P22Capture(linearCaptureLayer: 0)
+        let capturesActivations = ProcessInfo.processInfo.environment[
+            "TURBO_P22_CAPTURE_ACTIVATIONS"] != "0"
+        let capture = P22Capture(
+            linearCaptureLayer: 0, capturesActivations: capturesActivations)
+        let hooks = capture.hooks
+        if !capturesActivations {
+            guard !hooks.requiresSeparateGPUStages else {
+                throw P22CandidateError.incompleteCapture(
+                    "route/logit-only capture unexpectedly requires separate GPU stages")
+            }
+        }
         let session = try await QwenOfficialSourceConversationGenerationSession(
             model: model, codec: codec, sourceIdentity: identity,
             context: model.context, maxContext: 4, expertSlotCount: 16,
-            modelDirectoryURL: registration, hooks: capture.hooks)
+            modelDirectoryURL: registration, hooks: hooks)
         let result = try await session.generateAuditedSourceTokenTurn(
             promptTokenIDs: [9419], config: .qwenRaw(
                 maxNewTokens: 2, temperature: 0, stopTokenIDs: []))
         let observed = capture.snapshot()
         guard !observed.duplicate, result.acceptedGeneratedTokenIDs.count == 2,
               observed.raw.count == 2, observed.sampled.count == 2,
-              observed.activations.count == 2,
               observed.routes.count == 2 else {
             throw P22CandidateError.incompleteCapture("expected exactly two complete steps")
         }
+        if capturesActivations {
+            guard observed.activations.count == 2 else {
+                throw P22CandidateError.incompleteCapture(
+                    "full activation capture did not produce two steps")
+            }
+        } else {
+            guard observed.activations.isEmpty else {
+                throw P22CandidateError.incompleteCapture(
+                    "route/logit-only capture unexpectedly observed activations")
+            }
+        }
         var steps: [P22Step] = []
-        let expectedActivationCounts = p22ActivationCounts(
-            model.architecture, linearCaptureLayer: 0)
+        let expectedActivationCounts = capturesActivations
+            ? p22ActivationCounts(model.architecture, linearCaptureLayer: 0) : [:]
         for index in 0..<2 {
             guard let (input, raw) = observed.raw[index],
                   let (publicBits, sampled) = observed.sampled[index],
-                  let activations = observed.activations[index],
                   let routes = observed.routes[index],
                   raw.count == 248_320, publicBits.count == 248_320,
-                  Set(activations.keys) == Set(expectedActivationCounts.keys),
-                  activations.allSatisfy({ key, values in
-                      values.count == (expectedActivationCounts[key] ?? -1)
-                          && values.allSatisfy(\.isFinite)
-                  }),
                   routes.count == 40,
                   routes.map(\.layer).sorted() == Array(0..<40),
                   routes.allSatisfy({ $0.routerLogitsFP32.count == 256
@@ -328,6 +358,22 @@ private func p22ActivationCounts(
                   input == (index == 0 ? 9419 : result.acceptedGeneratedTokenIDs[0]),
                   sampled == result.acceptedGeneratedTokenIDs[index] else {
                 throw P22CandidateError.incompleteCapture("step \(index) geometry or lineage")
+            }
+            let activations = observed.activations[index] ?? [:]
+            if capturesActivations {
+                guard Set(activations.keys) == Set(expectedActivationCounts.keys),
+                      activations.allSatisfy({ key, values in
+                          values.count == (expectedActivationCounts[key] ?? -1)
+                              && values.allSatisfy(\.isFinite)
+                      }) else {
+                    throw P22CandidateError.incompleteCapture(
+                        "step \(index) activation geometry")
+                }
+            } else {
+                guard activations.isEmpty else {
+                    throw P22CandidateError.incompleteCapture(
+                        "step \(index) unexpectedly contains activations")
+                }
             }
             let rawData = p22Data(raw.map(\.bitPattern))
             let publicData = p22Data(publicBits)
@@ -385,6 +431,7 @@ private func p22ActivationCounts(
             sourceKind: "official-safetensors-bf16-v1",
             registrationPath: registration.path,
             integrityPolicy: "sizeCheckTrustedReceipt",
+            captureMode: capture.captureMode,
             promptText: "Hello", promptTokenIds: [9419],
             temperature: 0, maxNewTokens: 2,
             expertCacheSlots: 16, expertCachePolicy: "lfu", steps: steps)

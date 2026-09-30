@@ -46,6 +46,10 @@ public final class QwenOfficialSourceModel: @unchecked Sendable {
     let sourceIdentity: LoadedRuntimeSourceIdentity?
     let expertCacheSlots: Int
     let expertCachePolicy: ExpertCachePolicy
+    let expertCacheBytesPerLayer: UInt64
+    let expertCacheReservationBytes: UInt64
+    let residentWeightBytes: UInt64
+    private let expertCacheQuota: ExpertCacheQuota
     let sourceIntegrityPolicy: ModelIntegrityPolicy?
     let source: OfficialSourceHandle
     private let trustReceipt: OfficialSourceTrustReceipt?
@@ -60,6 +64,61 @@ public final class QwenOfficialSourceModel: @unchecked Sendable {
     private static let headTensorName = "lm_head.weight"
     var embeddingName: String { Self.embeddingTensorName }
     var headName: String { Self.headTensorName }
+
+    /// Shared by every runner made from this model. Reservations count their
+    /// complete possible cache allocation, including layers not yet visited.
+    fileprivate final class ExpertCacheQuota: @unchecked Sendable {
+        private let lock = NSLock()
+        private let capacity: UInt64
+        private var reserved: UInt64 = 0
+
+        init(capacity: UInt64) { self.capacity = capacity }
+
+        func reserve(bytes: UInt64) throws -> ExpertCacheReservation {
+            lock.lock()
+            defer { lock.unlock() }
+            guard bytes > 0, bytes <= capacity - reserved else {
+                throw QwenBF16ExpertCacheError.budgetExceeded
+            }
+            reserved += bytes
+            return ExpertCacheReservation(quota: self, bytes: bytes)
+        }
+
+        func release(bytes: UInt64) {
+            lock.lock()
+            defer { lock.unlock() }
+            precondition(bytes <= reserved)
+            reserved -= bytes
+        }
+    }
+
+    final class ExpertCacheReservation: @unchecked Sendable {
+        let bytes: UInt64
+        private let quota: ExpertCacheQuota
+        private let lock = NSLock()
+        private var released = false
+
+        fileprivate init(quota: ExpertCacheQuota, bytes: UInt64) {
+            self.quota = quota
+            self.bytes = bytes
+        }
+
+        /// Coordinators retain this reservation independently of their runner.
+        /// Only the final owner may return its aggregate quota through ARC.
+        private func release() {
+            lock.lock()
+            let shouldRelease = !released
+            released = true
+            lock.unlock()
+            if shouldRelease { quota.release(bytes: bytes) }
+        }
+
+        deinit { release() }
+    }
+
+    func reserveExpertCache() throws -> ExpertCacheReservation {
+        try expertCacheQuota.reserve(bytes: expertCacheReservationBytes)
+    }
 
     /// Production admission: verification runs before any weight read or GPU
     /// allocation. Trusted receipt policy is explicit and still checks pinned
@@ -151,6 +210,27 @@ public final class QwenOfficialSourceModel: @unchecked Sendable {
         }
         let hidden = architecture.hiddenSize
         let vocab = architecture.vocabularySize
+        func cacheProduct(_ lhs: UInt64, _ rhs: UInt64) throws -> UInt64 {
+            let (bytes, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+            guard !overflow else { throw QwenBF16ExpertCacheError.invalidGeometry }
+            return bytes
+        }
+        guard let cacheHidden = UInt64(exactly: hidden), cacheHidden > 0,
+              let cacheIntermediate = UInt64(exactly: architecture.routedIntermediateSize),
+              cacheIntermediate > 0,
+              let cacheSlots = UInt64(exactly: expertCacheSlots), cacheSlots > 0,
+              let cacheLayers = UInt64(exactly: architecture.layers), cacheLayers > 0 else {
+            throw QwenBF16ExpertCacheError.invalidGeometry
+        }
+        let pairBytes = try cacheProduct(try cacheProduct(cacheHidden, cacheIntermediate), 6)
+        let cacheBytesPerLayer = try cacheProduct(pairBytes, cacheSlots)
+        let cacheReservationBytes = try cacheProduct(cacheBytesPerLayer, cacheLayers)
+        guard cacheReservationBytes <= residencyBudgetBytes else {
+            throw QwenBF16WeightError.budgetExceeded
+        }
+        // Admit enough remaining room for a complete runner before any
+        // resident payload read or weight/cache GPU allocation.
+        let residentWeightBudget = residencyBudgetBytes - cacheReservationBytes
         var consumed: UInt64 = 0
         func spec(_ name: String, _ role: QwenBF16TensorSpec.Role,
                   _ rows: Int, _ columns: Int) throws -> QwenBF16TensorSpec {
@@ -163,7 +243,7 @@ public final class QwenOfficialSourceModel: @unchecked Sendable {
                 throw ModelError.indexCorrupt(detail: "BF16 resident byte count overflow")
             }
             consumed += byteCount.partialValue * 2
-            guard consumed <= residencyBudgetBytes else { throw QwenBF16WeightError.budgetExceeded }
+            guard consumed <= residentWeightBudget else { throw QwenBF16WeightError.budgetExceeded }
             return QwenBF16TensorSpec(name: name, shardName: shard,
                                       role: role, rows: rows, columns: columns)
         }
@@ -182,7 +262,8 @@ public final class QwenOfficialSourceModel: @unchecked Sendable {
             guard region.shape == shape, region.storage == .bf16,
                   elements <= OfficialSourceHandle.maximumTensorReadBytes / 2,
                   region.size == elements * 2,
-                  elements <= (residencyBudgetBytes - consumed) / 4 else {
+                  consumed <= residentWeightBudget,
+                  elements <= (residentWeightBudget - consumed) / 4 else {
                 throw ModelError.indexCorrupt(detail: "invalid source vector or budget: \(name)")
             }
             // Direct protected read into the bounded BF16 vector destination.
@@ -359,6 +440,10 @@ public final class QwenOfficialSourceModel: @unchecked Sendable {
         self.sourceIdentity = sourceIdentity
         self.expertCacheSlots = expertCacheSlots
         self.expertCachePolicy = expertCachePolicy
+        self.expertCacheBytesPerLayer = cacheBytesPerLayer
+        self.expertCacheReservationBytes = cacheReservationBytes
+        self.residentWeightBytes = consumed
+        self.expertCacheQuota = ExpertCacheQuota(capacity: residencyBudgetBytes - consumed)
         self.sourceIntegrityPolicy = sourceIntegrityPolicy
         self.source = source
         self.trustReceipt = trustReceipt

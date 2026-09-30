@@ -513,18 +513,22 @@ final class QwenBF16PairedExpertCache: @unchecked Sendable {
         let down: MTLBuffer
     }
 
-    /// Only the two separate workers mutate their own disjoint destinations.
+    /// Errors are ordered by requested pair, then gate/up before down, rather
+    /// than whichever protected read happens to finish first.
     private final class ReadFailures: @unchecked Sendable {
         private let lock = NSLock()
-        private var errors: [Error?] = [nil, nil]
+        private var errors: [Error?]
+        init(count: Int) { errors = [Error?](repeating: nil, count: count) }
         func record(_ error: Error, index: Int) {
             lock.lock(); errors[index] = error; lock.unlock()
         }
         func first() -> Error? {
             lock.lock(); defer { lock.unlock() }
-            return errors[0] ?? errors[1]
+            return errors.first(where: { $0 != nil }) ?? nil
         }
     }
+
+    private static let maximumConcurrentMissPairs = 4
 
     let slotCount: Int
     let expertCount: Int
@@ -682,14 +686,22 @@ final class QwenBF16PairedExpertCache: @unchecked Sendable {
                 throw error
             }
         }
-        for index in plan.misses {
-            let slot = plan.assignedSlots[index]
-            let expert = plan.experts[index]
-            // Invalidate prior victim BEFORE either stream can overwrite it.
-            slotExpert[slot] = -1
-            let pair = buffers[slot]
-            let failures = ReadFailures()
-            DispatchQueue.concurrentPerform(iterations: 2) { stream in
+        var missOffset = 0
+        while missOffset < plan.misses.count {
+            if canceled() { throw CancellationError() }
+            let pairCount = min(Self.maximumConcurrentMissPairs, plan.misses.count - missOffset)
+            let batch = Array(plan.misses[missOffset..<(missOffset + pairCount)])
+            for index in batch {
+                // All destinations are distinct reserved victims. Invalidate
+                // them serially before any worker can overwrite either stream.
+                slotExpert[plan.assignedSlots[index]] = -1
+            }
+            let failures = ReadFailures(count: pairCount * 2)
+            DispatchQueue.concurrentPerform(iterations: pairCount * 2) { worker in
+                let index = batch[worker / 2]
+                let expert = plan.experts[index]
+                let pair = self.buffers[plan.assignedSlots[index]]
+                let stream = worker % 2
                 do {
                     let kind: QwenBF16ExpertReadHooks.Stream = stream == 0 ? .gateUp : .down
                     try hooks.checkpoint(.beforeProtectedRead(expert: expert, stream: kind))
@@ -701,10 +713,19 @@ final class QwenBF16PairedExpertCache: @unchecked Sendable {
                                       into: pair.down, sliceBytes: self.downBytes)
                     }
                     try hooks.checkpoint(.afterProtectedRead(expert: expert, stream: kind))
-                } catch { failures.record(error, index: stream) }
+                } catch { failures.record(error, index: worker) }
             }
-            // concurrentPerform joins BOTH launched reads even if one fails.
+            // Join every launched stream even on failure or cancellation.
+            // Failed/partial victims remain invalid; no pair is published yet.
             if let error = failures.first() { throw error }
+            if canceled() { throw CancellationError() }
+            missOffset += pairCount
+        }
+        // All requested miss reads have settled before publication. Keep hooks,
+        // identity checks and paired validity updates serial in request order.
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            let expert = plan.experts[index]
             if canceled() { throw CancellationError() }
             try hooks.checkpoint(.beforePairPublish(expert: expert))
             if canceled() { throw CancellationError() }

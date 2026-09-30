@@ -244,6 +244,19 @@ final class QwenMoE {
         return pipeline
     }
 
+    private func bf16RoutedPipeline(serialName: String, cooperativeName: String,
+                                    useCooperative: Bool) throws
+        -> (pipeline: MTLComputePipelineState, cooperative: Bool) {
+        if useCooperative {
+            let pipeline = try bf16Pipeline(cooperativeName)
+            if pipeline.threadExecutionWidth == 32,
+               pipeline.maxTotalThreadsPerThreadgroup >= 32 {
+                return (pipeline, true)
+            }
+        }
+        return (try bf16Pipeline(serialName), false)
+    }
+
     static func route(
         logits: [Float], configuration: QwenMoEConfiguration,
         arithmetic: QwenMoERoutingArithmetic = .packed
@@ -735,8 +748,23 @@ final class QwenMoE {
                                        columns: configuration.sharedIntermediateSize)
         try sharedWeights.requireShape(sharedNames.outputGate, role: .sharedOutputGate,
                                        rows: 1, columns: configuration.hiddenSize)
-        let gatePipeline = try bf16Pipeline("qwen_moe_routed_gate_up_bf16")
-        let downPipeline = try bf16Pipeline("qwen_moe_routed_down_add_bf16")
+        // Match the established source large-dot family exactly. Each
+        // cooperative row uses one full 32-lane group; other hardware and
+        // small/incomplete shapes retain the original per-row kernel.
+        let gateSelection = try bf16RoutedPipeline(
+            serialName: "qwen_moe_routed_gate_up_bf16",
+            cooperativeName: "qwen_moe_routed_gate_up_bf16_cooperative",
+            useCooperative: configuration.routedIntermediateSize >= 256
+                && configuration.hiddenSize >= 512
+                && configuration.hiddenSize.isMultiple(of: 64))
+        let downSelection = try bf16RoutedPipeline(
+            serialName: "qwen_moe_routed_down_add_bf16",
+            cooperativeName: "qwen_moe_routed_down_add_bf16_cooperative",
+            useCooperative: configuration.hiddenSize >= 512
+                && configuration.routedIntermediateSize >= 512
+                && configuration.routedIntermediateSize.isMultiple(of: 64))
+        let gatePipeline = gateSelection.pipeline
+        let downPipeline = downSelection.pipeline
         try requireDispatchable(gatePipeline, count: configuration.routedIntermediateSize)
         try requireDispatchable(downPipeline, count: configuration.hiddenSize)
         try requireDispatchable(clearPipeline, count: configuration.hiddenSize)
@@ -776,8 +804,9 @@ final class QwenMoE {
                 gateEncoder.setBuffer(scratch.routedActivation, offset: 0,
                                       index: QwenMetalBufferIndex.scratch.rawValue)
                 gateEncoder.useResource(mapped.gateUp, usage: .read)
-                try dispatch(gateEncoder, pipeline: gatePipeline,
-                             count: configuration.routedIntermediateSize)
+                try dispatchBF16Routed(gateEncoder, pipeline: gatePipeline,
+                                       rows: configuration.routedIntermediateSize,
+                                       cooperative: gateSelection.cooperative)
                 gateEncoder.endEncoding()
 
                 guard let downEncoder = command.makeComputeCommandEncoder() else {
@@ -796,8 +825,9 @@ final class QwenMoE {
                                       offset: rank * MemoryLayout<Float>.stride,
                                       index: QwenMetalBufferIndex.state.rawValue)
                 downEncoder.useResource(mapped.down, usage: .read)
-                try dispatch(downEncoder, pipeline: downPipeline,
-                             count: configuration.hiddenSize)
+                try dispatchBF16Routed(downEncoder, pipeline: downPipeline,
+                                       rows: configuration.hiddenSize,
+                                       cooperative: downSelection.cooperative)
                 downEncoder.endEncoding()
             }
             try encodeSharedBF16(commandBuffer: command, hidden: hidden,
@@ -1121,6 +1151,22 @@ final class QwenMoE {
         guard count > 0, pipeline.maxTotalThreadsPerThreadgroup > 0,
               pipeline.threadExecutionWidth > 0 else {
             throw QwenMoEError.invalidPipelineLimit
+        }
+    }
+
+    private func dispatchBF16Routed(_ encoder: MTLComputeCommandEncoder,
+                                    pipeline: MTLComputePipelineState,
+                                    rows: Int, cooperative: Bool) throws {
+        if cooperative {
+            guard rows > 0, pipeline.threadExecutionWidth == 32,
+                  pipeline.maxTotalThreadsPerThreadgroup >= 32 else {
+                throw QwenMoEError.invalidPipelineLimit
+            }
+            encoder.dispatchThreadgroups(
+                MTLSize(width: rows, height: 1, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+        } else {
+            try dispatch(encoder, pipeline: pipeline, count: rows)
         }
     }
 

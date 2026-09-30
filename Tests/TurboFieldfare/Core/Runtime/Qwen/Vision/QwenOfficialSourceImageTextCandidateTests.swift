@@ -23,6 +23,8 @@ import Testing
         "TURBO_FIELDFARE_P23_SAVED_TEXT_REFERENCE",
         "TURBO_FIELDFARE_P23_SAVED_TEXT_REFERENCE_SHA256",
     ]
+    private static let activationCaptureEnvironmentKey =
+        "TURBO_FIELDFARE_P23_CAPTURE_ACTIVATIONS"
 
     @Test func candidateRouteSelectionUsesCutoffMembershipWithoutTieOrder() {
         var scores = [Float](repeating: 0, count: 256)
@@ -267,6 +269,10 @@ import Testing
     }, "set all explicit P23 image-text inputs after Phase22 acceptance"))
     func productionImageTextRunnerMatchesIndependentReference() async throws {
         let environment = ProcessInfo.processInfo.environment
+        let captureActivations = environment[Self.activationCaptureEnvironmentKey] != "0"
+        let captureMode = captureActivations ? "full-activations" : "routes-raw-sample-only"
+        let omittedDiagnosticArtifacts: [String] = captureActivations
+            ? [] : ["final-hidden", "final-norm"]
         func required(_ key: String) throws -> String {
             guard let value = environment[key], !value.isEmpty else {
                 throw P23ImageTextError.invalid("missing \(key)")
@@ -367,6 +373,14 @@ import Testing
 
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
         let capture = P23ImageTextCapture()
+        let activationObserver: (@Sendable (Int, Int, String, [Float]) -> Void)?
+        if captureActivations {
+            activationObserver = { @Sendable (position: Int, layer: Int, stage: String, values: [Float]) in
+                capture.activation(position: position, layer: layer, stage: stage, values: values)
+            }
+        } else {
+            activationObserver = nil
+        }
         let hooks = QwenOfficialSourceTransactionHooks(
             observeRoute: { position, layer, logits, ids, weights, margin in
                 capture.route(position: position, layer: layer, logits: logits,
@@ -378,9 +392,7 @@ import Testing
             observePublicLogitsAndSample: { samplePosition, bits, token in
                 capture.sample(position: samplePosition, bits: bits, token: token)
             },
-            observeActivation: { position, layer, stage, values in
-                capture.activation(position: position, layer: layer, stage: stage, values: values)
-            },
+            observeActivation: activationObserver,
             observeConsumedInput: { position, token, featureRow, mropePosition in
                 capture.consumedInput(position: position, token: token,
                                       featureRow: featureRow,
@@ -390,6 +402,10 @@ import Testing
             model: model, codec: codec, sourceIdentity: identity,
             context: context, maxContext: 1024, expertSlotCount: 16,
             modelDirectoryURL: registration, visionPackURL: companion, hooks: hooks)
+        #expect(hooks.requiresSeparateGPUStages == captureActivations)
+        if !captureActivations {
+            #expect(!hooks.requiresSeparateGPUStages)
+        }
 
         var caseReceipts: [[String: Any]] = []
         let totalStarted = ContinuousClock.now
@@ -423,6 +439,9 @@ import Testing
             let result = try await session.generate(generationRequest)
             let elapsed = caseStarted.duration(to: .now)
             let observed = capture.snapshot()
+            if !captureActivations {
+                #expect(observed.activations.isEmpty)
+            }
             let consumedContinuationCount = max(0, result.acceptedGeneratedTokenIDs.count - 1)
             guard result.promptTokens == visionCase.tokenIds.count,
                   !result.acceptedGeneratedTokenIDs.isEmpty,
@@ -574,20 +593,39 @@ import Testing
                     && rawMarginPassed && publicMarginPassed
                 casePassed = casePassed && headPassed
 
-                guard let finalHidden = observed.activations[rawPosition]?["final-hidden"],
-                      let finalNorm = observed.activations[rawPosition]?["final-norm"] else {
-                    throw P23ImageTextError.invalid("candidate final activation capture missing at step \(stepIndex)")
+                var hiddenFile: String?
+                var normFile: String?
+                var hiddenSHA256: String?
+                var normSHA256: String?
+                var hiddenFailureCount: Int?
+                var normFailureCount: Int?
+                if captureActivations {
+                    guard let finalHidden = observed.activations[rawPosition]?["final-hidden"],
+                          let finalNorm = observed.activations[rawPosition]?["final-norm"] else {
+                        throw P23ImageTextError.invalid(
+                            "candidate final activation capture missing at step \(stepIndex)")
+                    }
+                    let expectedHidden = try readFloat32Tensor(
+                        referenceDirectory, record: referenceStep.finalHidden)
+                    let expectedNorm = try readFloat32Tensor(
+                        referenceDirectory, record: referenceStep.finalNorm)
+                    let hiddenComparison = stepComparable
+                        ? compareFloats(finalHidden, expectedHidden) : nil
+                    let normComparison = stepComparable
+                        ? compareFloats(finalNorm, expectedNorm) : nil
+                    hiddenFailureCount = hiddenComparison?.failureCount
+                    normFailureCount = normComparison?.failureCount
+                    let hiddenData = float32LE(finalHidden)
+                    let normData = float32LE(finalNorm)
+                    hiddenFile = "\(requestCase.id).step-\(stepIndex).candidate.final-hidden-fp32-le.bin"
+                    normFile = "\(requestCase.id).step-\(stepIndex).candidate.final-norm-fp32-le.bin"
+                    hiddenSHA256 = sha256(hiddenData)
+                    normSHA256 = sha256(normData)
+                    try hiddenData.write(
+                        to: output.appendingPathComponent(hiddenFile!), options: .atomic)
+                    try normData.write(
+                        to: output.appendingPathComponent(normFile!), options: .atomic)
                 }
-                let expectedHidden = try readFloat32Tensor(referenceDirectory, record: referenceStep.finalHidden)
-                let expectedNorm = try readFloat32Tensor(referenceDirectory, record: referenceStep.finalNorm)
-                let hiddenComparison = stepComparable ? compareFloats(finalHidden, expectedHidden) : nil
-                let normComparison = stepComparable ? compareFloats(finalNorm, expectedNorm) : nil
-                let hiddenData = float32LE(finalHidden)
-                let normData = float32LE(finalNorm)
-                let hiddenFile = "\(requestCase.id).step-\(stepIndex).candidate.final-hidden-fp32-le.bin"
-                let normFile = "\(requestCase.id).step-\(stepIndex).candidate.final-norm-fp32-le.bin"
-                try hiddenData.write(to: output.appendingPathComponent(hiddenFile), options: .atomic)
-                try normData.write(to: output.appendingPathComponent(normFile), options: .atomic)
                 let rawFile = "\(requestCase.id).step-\(stepIndex).candidate.raw-fp32-le.bin"
                 let publicFile = "\(requestCase.id).step-\(stepIndex).candidate.public-fp16-le.bin"
                 try rawData.write(to: output.appendingPathComponent(rawFile), options: .atomic)
@@ -746,12 +784,14 @@ import Testing
                     "sampledTokenId": sampled.token,
                     "rawArgmaxTokenId": rawArgmax.token,
                     "publicArgmaxTokenId": publicArgmax.token,
-                    "finalHiddenFile": hiddenFile,
-                    "finalHiddenSHA256": sha256(hiddenData),
-                    "finalHiddenDiagnosticFailureCount": hiddenComparison.map { $0.failureCount as Any } ?? NSNull(),
-                    "finalNormFile": normFile,
-                    "finalNormSHA256": sha256(normData),
-                    "finalNormDiagnosticFailureCount": normComparison.map { $0.failureCount as Any } ?? NSNull(),
+                    "finalHiddenFile": hiddenFile.map { $0 as Any } ?? NSNull(),
+                    "finalHiddenSHA256": hiddenSHA256.map { $0 as Any } ?? NSNull(),
+                    "finalHiddenDiagnosticFailureCount": hiddenFailureCount.map { $0 as Any } ?? NSNull(),
+                    "finalNormFile": normFile.map { $0 as Any } ?? NSNull(),
+                    "finalNormSHA256": normSHA256.map { $0 as Any } ?? NSNull(),
+                    "finalNormDiagnosticFailureCount": normFailureCount.map { $0 as Any } ?? NSNull(),
+                    "captureMode": captureMode,
+                    "omittedDiagnosticArtifacts": omittedDiagnosticArtifacts,
                     "routes": routeReceipts,
                 ])
             }
@@ -778,6 +818,8 @@ import Testing
                 "prefillSeconds": result.prefillSeconds,
                 "decodeSeconds": result.decodeSeconds,
                 "elapsedSeconds": seconds(elapsed),
+                "captureMode": captureMode,
+                "omittedDiagnosticArtifacts": omittedDiagnosticArtifacts,
                 "steps": stepReceipts,
                 "passed": passed,
             ]
@@ -805,6 +847,8 @@ import Testing
             "expertCachePolicy": "lfu",
             "temperature": 0,
             "maxNewTokens": 2,
+            "captureMode": captureMode,
+            "omittedDiagnosticArtifacts": omittedDiagnosticArtifacts,
             "tolerance": ["absolute": 1e-7, "relative": 1e-6, "extraULP": 0],
             "elapsedSeconds": seconds(totalStarted.duration(to: .now)),
             "cases": caseReceipts,

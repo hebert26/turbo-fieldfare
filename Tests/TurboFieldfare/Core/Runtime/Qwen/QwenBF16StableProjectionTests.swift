@@ -4,9 +4,10 @@ import Testing
 @testable import TurboFieldfare
 
 @Suite(.serialized) struct QwenBF16StableProjectionTests {
-    @Test func fullWidthMixedSignsMatchIndependentDoubleDots() throws {
+    @Test func genericFallbackFullWidthMixedSignsMatchIndependentDoubleDots() throws {
         let columns = 2048
-        let rows = 32
+        // The pinned 32x2048 suite separately qualifies that source-order family.
+        let rows = 33
         var input: [Float] = []
         for index in 0..<columns {
             let magnitude = UInt16(0x3c00 + index * 37 % 1024)

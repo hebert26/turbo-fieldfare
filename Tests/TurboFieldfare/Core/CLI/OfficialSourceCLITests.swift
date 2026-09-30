@@ -128,7 +128,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         let prepared = try await QwenOfficialSourceConversationGenerationSession(
             fixtureModel: model,
             context: context,
@@ -176,7 +176,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         let prepared = try await QwenOfficialSourceConversationGenerationSession(
             fixtureModel: model,
             context: context,

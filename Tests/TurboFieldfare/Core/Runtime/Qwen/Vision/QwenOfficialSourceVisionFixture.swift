@@ -173,7 +173,7 @@ struct QwenOfficialSourceVisionFixture {
             try QwenOfficialSourceModel.loadSyntheticFixture(
                 registrationURL: registrationURL,
                 context: context,
-                residencyBudgetBytes: textSource.expectedResidentBytes)
+                residencyBudgetBytes: textSource.totalResidencyBudget())
         }
 
         func tensor(named name: String) throws -> Tensor {

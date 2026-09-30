@@ -215,6 +215,251 @@ import Testing
         assertMappedPair(mapped, literals: literals, expert: expert)
     }
 
+    @Test func distinctMissPairsOverlapWithinBoundAndPublishExactBytes() async throws {
+        let literals = ExpertCacheLiterals()
+        let source = try literals.makeSource()
+        defer { source.remove() }
+        let context = try MetalContext()
+        let configuration = try literals.configuration()
+        let recorder = CheckpointLog()
+        let concurrency = PairReadConcurrencyTracker(initialPairCount: 2)
+        let hooks = QwenBF16ExpertReadHooks { checkpoint in
+            recorder.record(checkpoint)
+            try concurrency.record(checkpoint)
+        }
+        let slotCount = 8
+        let coordinator = try makeCoordinator(
+            source: source, configuration: configuration, device: context.device,
+            slotCount: slotCount,
+            residencyBudget: pairCacheBytes(configuration: configuration, slots: slotCount),
+            readHooks: hooks)
+
+        let lease = try await coordinator.map(expertIDs: Array(0..<slotCount))
+        defer { try? lease.cancel() }
+        #expect(lease.diagnostics.requestedExpertIDs == Array(0..<slotCount))
+        #expect(lease.diagnostics.hits == 0)
+        #expect(lease.diagnostics.misses == slotCount)
+        #expect(concurrency.initialPairCountReached)
+        #expect(concurrency.maxActivePairs >= 2,
+                "distinct miss pairs must overlap in the bounded loader")
+        #expect(concurrency.maxActivePairs <= 4,
+                "the loader must cap concurrent miss pairs at four")
+        for mapped in lease.experts {
+            assertMappedPair(mapped, literals: literals, expert: mapped.expertID)
+            #expect(recorder.count(.publish(expert: mapped.expertID)) == 1)
+        }
+        let events = recorder.snapshot()
+        let firstPublishIndex = try #require(events.firstIndex { checkpoint in
+            if case .publish(_) = checkpoint { return true }
+            return false
+        })
+        let completedReadsBeforePublish = events[..<firstPublishIndex].filter { checkpoint in
+            if case .after(_, _) = checkpoint { return true }
+            return false
+        }.count
+        #expect(completedReadsBeforePublish == slotCount * 2,
+                "all paired reads must complete before the first publication")
+        #expect(recorder.publishedExperts() == Array(0..<slotCount),
+                "published pairs must follow the requested expert order")
+    }
+
+    @Test func concurrentPairFailureJoinsReadsPublishesNothingAndRetriesWholePairs() async throws {
+        let literals = ExpertCacheLiterals()
+        let source = try literals.makeSource()
+        defer { source.remove() }
+        let context = try MetalContext()
+        let configuration = try literals.configuration()
+        let recorder = CheckpointLog()
+        let firstBatch = ConcurrentReadStartGate(participants: 4)
+        let firstBatchFinished = CompletionFlag()
+        let failure = FailOnceRead(expert: 1, stream: .gateUp)
+        let siblingAfterRead = BlockingCheckpoint()
+        let hooks = QwenBF16ExpertReadHooks { checkpoint in
+            recorder.record(checkpoint)
+            switch checkpoint {
+            case .beforeProtectedRead(_, _):
+                if !firstBatchFinished.isSet {
+                    try firstBatch.arriveAndWait()
+                }
+                if failure.consumeIfMatching(checkpoint) {
+                    throw InjectedExpertReadFailure(stream: .gateUp)
+                }
+            case .afterProtectedRead(let expert, let stream)
+                where expert == 2 && stream == .down:
+                siblingAfterRead.pause()
+            default:
+                break
+            }
+        }
+        let coordinator = try makeCoordinator(
+            source: source, configuration: configuration, device: context.device,
+            slotCount: 2,
+            residencyBudget: pairCacheBytes(configuration: configuration, slots: 2),
+            readHooks: hooks)
+
+        let returned = CompletionFlag()
+        let mapping = Task { () throws -> QwenBF16ExpertLease in
+            defer { returned.mark() }
+            return try await coordinator.map(expertIDs: [1, 2])
+        }
+        defer {
+            siblingAfterRead.open()
+            mapping.cancel()
+        }
+
+        #expect(await siblingAfterRead.waitUntilEntered(),
+                "the unaffected pair must reach its protected-read completion")
+        #expect(!returned.isSet,
+                "a sibling read still in flight must keep the failed map joined")
+        siblingAfterRead.open()
+
+        do {
+            let unexpected = try await mapping.value
+            Issue.record("a failed pair batch must not return a lease")
+            try? unexpected.cancel()
+        } catch let error {
+            #expect((error as? InjectedExpertReadFailure)
+                == InjectedExpertReadFailure(stream: .gateUp))
+        }
+        firstBatchFinished.mark()
+        #expect(firstBatch.arrivalCount == 4)
+        #expect(recorder.count(.publish(expert: 1)) == 0)
+        #expect(recorder.count(.publish(expert: 2)) == 0)
+        #expect(recorder.count(.after(expert: 1, stream: .gateUp)) == 0)
+        #expect(recorder.count(.after(expert: 1, stream: .down)) == 1)
+        #expect(recorder.count(.after(expert: 2, stream: .gateUp)) == 1)
+        #expect(recorder.count(.after(expert: 2, stream: .down)) == 1)
+
+        let retry = try await coordinator.map(expertIDs: [1, 2])
+        defer { try? retry.cancel() }
+        #expect(retry.diagnostics.hits == 0)
+        #expect(retry.diagnostics.misses == 2)
+        assertMappedPair(retry.experts[0], literals: literals, expert: 1)
+        assertMappedPair(retry.experts[1], literals: literals, expert: 2)
+        #expect(recorder.count(.before(expert: 1, stream: .gateUp)) == 2)
+        #expect(recorder.count(.before(expert: 1, stream: .down)) == 2)
+        #expect(recorder.count(.before(expert: 2, stream: .gateUp)) == 2)
+        #expect(recorder.count(.before(expert: 2, stream: .down)) == 2)
+        #expect(recorder.count(.after(expert: 1, stream: .gateUp)) == 1)
+        #expect(recorder.count(.after(expert: 1, stream: .down)) == 2)
+        #expect(recorder.count(.after(expert: 2, stream: .gateUp)) == 2)
+        #expect(recorder.count(.after(expert: 2, stream: .down)) == 2)
+        #expect(recorder.count(.publish(expert: 1)) == 1)
+        #expect(recorder.count(.publish(expert: 2)) == 1)
+    }
+
+    @Test func secondMissBatchFailurePreservesAllMissesAndRetriesInRequestOrder() async throws {
+        let literals = ExpertCacheLiterals()
+        let source = try literals.makeSource()
+        defer { source.remove() }
+        let context = try MetalContext()
+        let configuration = try literals.configuration()
+        let recorder = CheckpointLog()
+        let firstFailure = FailOnceRead(expert: 4, stream: .gateUp)
+        let secondFailure = FailOnceRead(expert: 5, stream: .down)
+        let hooks = QwenBF16ExpertReadHooks { checkpoint in
+            recorder.record(checkpoint)
+            if firstFailure.consumeIfMatching(checkpoint) {
+                throw InjectedBatchReadFailure(expert: 4, stream: .gateUp)
+            }
+            if secondFailure.consumeIfMatching(checkpoint) {
+                throw InjectedBatchReadFailure(expert: 5, stream: .down)
+            }
+        }
+        let slotCount = 8
+        let coordinator = try makeCoordinator(
+            source: source, configuration: configuration, device: context.device,
+            slotCount: slotCount,
+            residencyBudget: pairCacheBytes(configuration: configuration, slots: slotCount),
+            readHooks: hooks)
+
+        var caught: InjectedBatchReadFailure?
+        do {
+            let unexpected = try await coordinator.map(expertIDs: Array(0..<slotCount))
+            Issue.record("a second-batch read failure must reject the complete plan")
+            try? unexpected.cancel()
+        } catch let error as InjectedBatchReadFailure {
+            caught = error
+        } catch {
+            Issue.record("expected the earliest injected batch read failure, got \(error)")
+        }
+        #expect(caught == InjectedBatchReadFailure(expert: 4, stream: .gateUp))
+        #expect(recorder.publishedExperts().isEmpty,
+                "completed first-batch pairs must remain unpublished after a later failure")
+        for expert in 0..<slotCount {
+            #expect(recorder.count(.before(expert: expert, stream: .gateUp)) == 1)
+            #expect(recorder.count(.before(expert: expert, stream: .down)) == 1)
+            #expect(recorder.count(.publish(expert: expert)) == 0)
+        }
+        #expect(recorder.count(.after(expert: 4, stream: .gateUp)) == 0)
+        #expect(recorder.count(.after(expert: 5, stream: .down)) == 0)
+        #expect(recorder.count(.after(expert: 4, stream: .down)) == 1)
+        #expect(recorder.count(.after(expert: 5, stream: .gateUp)) == 1)
+
+        let retry = try await coordinator.map(expertIDs: Array(0..<slotCount))
+        defer { try? retry.cancel() }
+        #expect(retry.diagnostics.hits == 0)
+        #expect(retry.diagnostics.misses == slotCount)
+        for mapped in retry.experts {
+            assertMappedPair(mapped, literals: literals, expert: mapped.expertID)
+        }
+        #expect(recorder.publishedExperts() == Array(0..<slotCount),
+                "retry publication must follow the original request order")
+    }
+
+    @Test func cancellationBetweenMissBatchesPublishesNothingAndRetriesAllPairs() async throws {
+        let literals = ExpertCacheLiterals()
+        let source = try literals.makeSource()
+        defer { source.remove() }
+        let context = try MetalContext()
+        let configuration = try literals.configuration()
+        let recorder = CheckpointLog()
+        let secondBatchGate = BlockingCheckpoint()
+        let hooks = QwenBF16ExpertReadHooks { checkpoint in
+            recorder.record(checkpoint)
+            if case .beforeProtectedRead(let expert, let stream) = checkpoint,
+               expert == 4 && stream == .gateUp {
+                secondBatchGate.pause()
+            }
+        }
+        let slotCount = 8
+        let coordinator = try makeCoordinator(
+            source: source, configuration: configuration, device: context.device,
+            slotCount: slotCount,
+            residencyBudget: pairCacheBytes(configuration: configuration, slots: slotCount),
+            readHooks: hooks)
+        let mapping = Task { try await coordinator.map(expertIDs: Array(0..<slotCount)) }
+        defer {
+            secondBatchGate.open()
+            mapping.cancel()
+        }
+
+        #expect(await secondBatchGate.waitUntilEntered(),
+                "cancellation must be injected at the second miss batch")
+        mapping.cancel()
+        secondBatchGate.open()
+        do {
+            let unexpected = try await mapping.value
+            Issue.record("canceled miss batches must not return a lease")
+            try? unexpected.cancel()
+        } catch is CancellationError {
+            // Expected after all reads in the canceled batch have settled.
+        } catch {
+            Issue.record("expected cancellation after the second batch, got \(error)")
+        }
+        #expect(recorder.publishedExperts().isEmpty,
+                "cancellation between batches must publish no pair")
+
+        let retry = try await coordinator.map(expertIDs: Array(0..<slotCount))
+        defer { try? retry.cancel() }
+        #expect(retry.diagnostics.hits == 0)
+        #expect(retry.diagnostics.misses == slotCount)
+        for mapped in retry.experts {
+            assertMappedPair(mapped, literals: literals, expert: mapped.expertID)
+        }
+        #expect(recorder.publishedExperts() == Array(0..<slotCount))
+    }
+
     @Test func failedReplacementForcesPriorVictimToRereadBothStreams() async throws {
         for failedStream in CacheTestStream.allCases {
             let literals = ExpertCacheLiterals()
@@ -778,6 +1023,43 @@ import Testing
         #expect(reusable.diagnostics.misses == 1)
         try reusable.cancel()
     }
+
+    @Test func submittedLiveLeaseRejectsEightMissPlanWithOnlySevenUnpinnedSlots() async throws {
+        let literals = ExpertCacheLiterals()
+        let source = try literals.makeSource()
+        defer { source.remove() }
+        let context = try MetalContext()
+        let configuration = try literals.configuration()
+        let slotCount = 8
+        let coordinator = try makeCoordinator(
+            source: source, configuration: configuration, device: context.device,
+            slotCount: slotCount,
+            residencyBudget: pairCacheBytes(configuration: configuration, slots: slotCount))
+        let lease = try await coordinator.map(expertIDs: [0])
+        let event = try #require(context.device.makeSharedEvent())
+        defer { event.signaledValue = 1 }
+        let command = try lease.submit(on: context.queue) { command in
+            command.encodeWaitForEvent(event, value: 1)
+        }
+        try lease.cancel()
+        #expect(lease.snapshot().submitted)
+        #expect(lease.snapshot().canceled)
+        #expect(!lease.snapshot().completed)
+
+        do {
+            _ = try await coordinator.map(expertIDs: Array(1...8))
+            Issue.record("eight misses must be rejected while one submitted slot is live")
+        } catch let error as QwenExpertMappingError {
+            #expect(error == .insufficientUnpinnedSlots)
+        } catch {
+            Issue.record("expected insufficient unpinned slots, got \(error)")
+        }
+
+        event.signaledValue = 1
+        _ = await command.completed()
+        #expect(command.status == .completed)
+        #expect(command.error == nil)
+    }
 }
 
 private func makeCoordinator(
@@ -1193,9 +1475,27 @@ private final class CheckpointLog: @unchecked Sendable {
         defer { lock.unlock() }
         return entries.filter { $0 == checkpoint }.count
     }
+
+    func snapshot() -> [ObservedCheckpoint] {
+        lock.lock()
+        defer { lock.unlock() }
+        return entries
+    }
+
+    func publishedExperts() -> [Int] {
+        snapshot().compactMap { checkpoint in
+            guard case let .publish(expert) = checkpoint else { return nil }
+            return expert
+        }
+    }
 }
 
 private struct InjectedExpertReadFailure: Error, Equatable, Sendable {
+    let stream: CacheTestStream
+}
+
+private struct InjectedBatchReadFailure: Error, Equatable, Sendable {
+    let expert: Int
     let stream: CacheTestStream
 }
 
@@ -1314,6 +1614,89 @@ private final class BlockingCheckpoint: @unchecked Sendable {
                 continuation.resume(returning: semaphore.wait(timeout: deadline) == .success)
             }
         }
+    }
+}
+
+private struct PairReadConcurrencyTimeout: Error, Sendable {}
+
+private final class PairReadConcurrencyTracker: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let initialPairCount: Int
+    private var initialPairs: Set<Int> = []
+    private var activeStreams: [Int: Int] = [:]
+    private var released = false
+    private var timedOut = false
+    private var maximum = 0
+
+    init(initialPairCount: Int) {
+        precondition(initialPairCount > 0)
+        self.initialPairCount = initialPairCount
+    }
+
+    var initialPairCountReached: Bool {
+        condition.lock()
+        defer { condition.unlock() }
+        return initialPairs.count >= initialPairCount
+    }
+
+    var maxActivePairs: Int {
+        condition.lock()
+        defer { condition.unlock() }
+        return maximum
+    }
+
+    func record(_ checkpoint: QwenBF16ExpertReadHooks.Checkpoint) throws {
+        switch checkpoint {
+        case .beforeProtectedRead(let expert, _):
+            condition.lock()
+            activeStreams[expert, default: 0] += 1
+            initialPairs.insert(expert)
+            if initialPairs.count >= initialPairCount {
+                released = true
+                condition.broadcast()
+            }
+            if !released {
+                let deadline = Date(timeIntervalSinceNow: 8)
+                while !released {
+                    if !condition.wait(until: deadline) {
+                        timedOut = true
+                        released = true
+                        condition.broadcast()
+                    }
+                }
+            }
+            maximum = max(maximum, activeStreams.count)
+            let failed = timedOut
+            condition.unlock()
+            if failed { throw PairReadConcurrencyTimeout() }
+        case .afterProtectedRead(let expert, _):
+            condition.lock()
+            if let streams = activeStreams[expert], streams > 1 {
+                activeStreams[expert] = streams - 1
+            } else {
+                activeStreams[expert] = nil
+            }
+            condition.unlock()
+        case .beforePairPublish(_):
+            break
+        }
+    }
+}
+
+private final class CompletionFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    var isSet: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func mark() {
+        lock.lock()
+        value = true
+        lock.unlock()
     }
 }
 

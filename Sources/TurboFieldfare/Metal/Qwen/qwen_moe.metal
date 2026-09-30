@@ -361,6 +361,78 @@ kernel void qwen_moe_routed_down_add_bf16(
 }
 
 
+#ifdef QWEN_PINNED_SOURCE_EXP
+// One complete 32-lane SIMD group owns a row. Lane l owns the original
+// streams l and l+32. Gather each operand explicitly to preserve the source
+// 64 -> 16 -> 4 -> 1 reduction, including its left-to-right additions.
+static inline float qwenMoeBF16SourceCooperativeReduce(float low, float high, uint lane) {
+#pragma clang fp contract(off)
+    const uint index = lane & 15u;
+    const float first = simd_shuffle(low, index) + simd_shuffle(low, index + 16u);
+    const float second = first + simd_shuffle(high, index);
+    const float collapsed = second + simd_shuffle(high, index + 16u);
+    const uint base = (lane & 3u) * 4u;
+    const float groupFirst = simd_shuffle(collapsed, base) + simd_shuffle(collapsed, base + 1u);
+    const float groupSecond = groupFirst + simd_shuffle(collapsed, base + 2u);
+    const float group = groupSecond + simd_shuffle(collapsed, base + 3u);
+    const float totalFirst = simd_shuffle(group, 0u) + simd_shuffle(group, 1u);
+    const float totalSecond = totalFirst + simd_shuffle(group, 2u);
+    return totalSecond + simd_shuffle(group, 3u);
+}
+
+kernel void qwen_moe_routed_gate_up_bf16_cooperative(
+    constant QwenMoEBF16RoutedParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
+    device const float* hidden [[buffer(QwenMetalBufferIndexInput)]],
+    device const ushort* gateUp [[buffer(QwenMetalBufferIndexWeights)]],
+    device float* activation [[buffer(QwenMetalBufferIndexScratch)]],
+    uint3 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+#pragma clang fp contract(off)
+    const uint row = group.x;
+    if (row >= p.intermediateSize) return;
+    const uint gateBase = row * p.hiddenSize;
+    const uint upBase = (p.intermediateSize + row) * p.hiddenSize;
+    float gateLow = 0.0f, gateHigh = 0.0f, upLow = 0.0f, upHigh = 0.0f;
+    for (uint base = 0; base < p.hiddenSize; base += 64u) {
+        const uint lowColumn = base + lane, highColumn = lowColumn + 32u;
+        const float lowInput = hidden[lowColumn], highInput = hidden[highColumn];
+        gateLow = fma(qwenMoeBF16(gateUp[gateBase + lowColumn]), lowInput, gateLow);
+        gateHigh = fma(qwenMoeBF16(gateUp[gateBase + highColumn]), highInput, gateHigh);
+        upLow = fma(qwenMoeBF16(gateUp[upBase + lowColumn]), lowInput, upLow);
+        upHigh = fma(qwenMoeBF16(gateUp[upBase + highColumn]), highInput, upHigh);
+    }
+    const float gate = qwenMoeBF16SourceCooperativeReduce(gateLow, gateHigh, lane);
+    const float up = qwenMoeBF16SourceCooperativeReduce(upLow, upHigh, lane);
+    if (lane == 0u) {
+        activation[p.scratchOffset + row] = gate / (1.0f + qwenMoeBF16ActivationExp(-gate)) * up;
+    }
+}
+
+kernel void qwen_moe_routed_down_add_bf16_cooperative(
+    constant QwenMoEBF16RoutedParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
+    device const float* activation [[buffer(QwenMetalBufferIndexInput)]],
+    device const ushort* down [[buffer(QwenMetalBufferIndexWeights)]],
+    device float* output [[buffer(QwenMetalBufferIndexOutput)]],
+    device const float* routingWeight [[buffer(QwenMetalBufferIndexState)]],
+    uint3 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+#pragma clang fp contract(off)
+    const uint row = group.x;
+    if (row >= p.hiddenSize) return;
+    const uint rowBase = row * p.intermediateSize;
+    const device float* vector = activation + p.scratchOffset;
+    float low = 0.0f, high = 0.0f;
+    for (uint base = 0; base < p.intermediateSize; base += 64u) {
+        const uint lowColumn = base + lane, highColumn = lowColumn + 32u;
+        low = fma(qwenMoeBF16(down[rowBase + lowColumn]), vector[lowColumn], low);
+        high = fma(qwenMoeBF16(down[rowBase + highColumn]), vector[highColumn], high);
+    }
+    const float projected = qwenMoeBF16SourceCooperativeReduce(low, high, lane);
+    if (lane == 0u) {
+        volatile float contribution = projected * routingWeight[0];
+        output[row] = output[row] + contribution;
+    }
+}
+#endif // QWEN_PINNED_SOURCE_EXP
+
 struct QwenMoEBF16ElementParameters {
     uint elementCount;
     uint reserved0;

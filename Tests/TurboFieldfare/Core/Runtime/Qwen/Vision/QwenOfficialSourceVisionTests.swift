@@ -181,7 +181,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: textOnly.registrationURL,
             context: context,
-            residencyBudgetBytes: textOnly.expectedResidentBytes)
+            residencyBudgetBytes: textOnly.totalResidencyBudget())
         #expect(model.sourceIdentity == nil)
     }
 

@@ -8,6 +8,143 @@ import TurboFieldfareFormat
 /// The payload bytes and every expected slice are authored independently here.
 @Suite(.serialized)
 struct OfficialTensorRangeTests {
+    @Test func readsExactLiteralBytesAcrossFourMiBBoundaryWithFourMiBRequests() throws {
+        let caseFile = try makeFourMiBBoundaryFixture()
+        defer { caseFile.fixture.remove() }
+        let token = try caseFile.fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        var calls: [(count: Int, offset: off_t)] = []
+
+        let result = try caseFile.fixture.handle.preadTensorRange(
+            token, byteOffset: 0, byteCount: UInt64(caseFile.payload.count),
+            expectedByteCount: UInt64(caseFile.payload.count),
+            allocationBudget: UInt64(caseFile.payload.count),
+            readAt: { fd, buffer, count, offset in
+                calls.append((count: count, offset: offset))
+                return darwinPread(fd, buffer, count, offset)
+            }, checkpoint: { _ in }, limits: nil)
+
+        #expect(result == Data(caseFile.payload))
+        #expect(calls.map(\.count) == [FourMiBBoundaryFixture.tileBytes,
+                                       caseFile.payload.count - FourMiBBoundaryFixture.tileBytes])
+        #expect(calls[0].offset == off_t(token.admittedAbsoluteOffset))
+        #expect(calls[1].offset == off_t(
+            token.admittedAbsoluteOffset + UInt64(FourMiBBoundaryFixture.tileBytes)))
+        #expect(calls.allSatisfy { $0.count <= FourMiBBoundaryFixture.tileBytes })
+    }
+
+    @Test func boundaryMutationAfterFirstChunkAndReplacementAfterFinalChunkReject() throws {
+        let mutated = try makeFourMiBBoundaryFixture()
+        defer { mutated.fixture.remove() }
+        let mutatedToken = try mutated.fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        var mutatedDestination = [UInt8](repeating: 0xee, count: mutated.payload.count)
+        var mutationCalls = 0
+        var mutatedAtBoundary = false
+        expectReplaced {
+            try mutatedDestination.withUnsafeMutableBytes { destination in
+                try mutated.fixture.handle.preadTensorRange(
+                    mutatedToken, byteOffset: 0, byteCount: UInt64(mutated.payload.count),
+                    expectedByteCount: UInt64(mutated.payload.count),
+                    into: destination,
+                    readAt: { fd, buffer, count, offset in
+                        mutationCalls += 1
+                        return darwinPread(fd, buffer, count, offset)
+                    }, checkpoint: { point in
+                        if case .afterPayloadRead = point, !mutatedAtBoundary {
+                            mutatedAtBoundary = true
+                            try overwriteByteInPlace(
+                                at: mutated.fixture.shardURL,
+                                offset: off_t(mutatedToken.admittedAbsoluteOffset
+                                    + UInt64(FourMiBBoundaryFixture.tileBytes)),
+                                with: 0x7a)
+                        }
+                    }, limits: nil)
+            }
+        }
+        #expect(mutatedAtBoundary)
+        #expect(mutationCalls == 1)
+        #expect(Array(mutatedDestination.prefix(FourMiBBoundaryFixture.tileBytes))
+                == Array(mutated.payload.prefix(FourMiBBoundaryFixture.tileBytes)))
+        #expect(mutatedDestination.dropFirst(FourMiBBoundaryFixture.tileBytes)
+                .allSatisfy { $0 == 0xee })
+
+        let replaced = try makeFourMiBBoundaryFixture()
+        defer { replaced.fixture.remove() }
+        let replacedToken = try replaced.fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        var replacedDestination = [UInt8](repeating: 0xee, count: replaced.payload.count)
+        var replacementCalls = 0
+        var replacedAtFinalChunk = false
+        expectReplaced {
+            try replacedDestination.withUnsafeMutableBytes { destination in
+                try replaced.fixture.handle.preadTensorRange(
+                    replacedToken, byteOffset: 0, byteCount: UInt64(replaced.payload.count),
+                    expectedByteCount: UInt64(replaced.payload.count),
+                    into: destination,
+                    readAt: { fd, buffer, count, offset in
+                        replacementCalls += 1
+                        return darwinPread(fd, buffer, count, offset)
+                    }, checkpoint: { point in
+                        if case .afterPayloadRead = point,
+                           replacementCalls == 2, !replacedAtFinalChunk {
+                            replacedAtFinalChunk = true
+                            try replaceFile(at: replaced.fixture.shardURL,
+                                            with: replaced.fileBytes)
+                        }
+                    }, limits: nil)
+            }
+        }
+        #expect(replacedAtFinalChunk)
+        #expect(replacementCalls == 2)
+        #expect(replacedDestination == replaced.payload)
+    }
+
+    @Test func cancellationAfterFourMiBChunkReturnsPartialDestinationAndKeepsDescriptor() throws {
+        let caseFile = try makeFourMiBBoundaryFixture()
+        defer { caseFile.fixture.remove() }
+        let token = try caseFile.fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        let descriptorsWithToken = descriptorCount()
+        var destination = [UInt8](repeating: 0xee, count: caseFile.payload.count)
+        var calls = 0
+        var observedCancellation = false
+
+        do {
+            try destination.withUnsafeMutableBytes { raw in
+                try caseFile.fixture.handle.preadTensorRange(
+                    token, byteOffset: 0, byteCount: UInt64(caseFile.payload.count),
+                    expectedByteCount: UInt64(caseFile.payload.count),
+                    into: raw,
+                    readAt: { fd, buffer, count, offset in
+                        calls += 1
+                        return darwinPread(fd, buffer, count, offset)
+                    }, checkpoint: { point in
+                        if case .afterPayloadRead = point, calls == 1 {
+                            throw CancellationError()
+                        }
+                    }, limits: nil)
+            }
+            Issue.record("Expected cancellation after the first 4 MiB payload chunk")
+        } catch is CancellationError {
+            observedCancellation = true
+        } catch {
+            Issue.record("Expected CancellationError, got \(error)")
+        }
+
+        #expect(observedCancellation)
+        #expect(calls == 1)
+        #expect(Array(destination.prefix(FourMiBBoundaryFixture.tileBytes))
+                == Array(caseFile.payload.prefix(FourMiBBoundaryFixture.tileBytes)))
+        #expect(destination.dropFirst(FourMiBBoundaryFixture.tileBytes)
+                .allSatisfy { $0 == 0xee })
+        #expect(descriptorCount() == descriptorsWithToken)
+    }
+
     @Test func readsWholeTensorAndLiteralUnalignedOddLengthSlice() throws {
         let fixture = try TinyTensorRangeFixture.make()
         defer { fixture.remove() }
@@ -920,6 +1057,29 @@ private struct TinyTensorRangeFixture {
     }
 }
 
+private enum FourMiBBoundaryFixture {
+    static let tileBytes = 4 * 1024 * 1024
+
+    static func payload() -> [UInt8] {
+        var bytes = [UInt8](repeating: 0xa5, count: tileBytes + 32)
+        bytes.replaceSubrange(0..<16,
+                              with: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+                                     0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff])
+        bytes.replaceSubrange((tileBytes - 8)..<(tileBytes + 24),
+                              with: Array(UInt8(0x40)...UInt8(0x5f)))
+        return bytes
+    }
+}
+
+private func makeFourMiBBoundaryFixture() throws
+    -> (fixture: TinyTensorRangeFixture, payload: [UInt8], fileBytes: Data) {
+    let payload = FourMiBBoundaryFixture.payload()
+    let header = #"{"synthetic.weight":{"dtype":"BF16","shape":[\#(payload.count / 2)],"data_offsets":[0,\#(payload.count)]}}"#
+    let fileBytes = TinyTensorRangeFixture.safetensorsFile(header: header, payload: payload)
+    let fixture = try TinyTensorRangeFixture.make(fileBytes: fileBytes)
+    return (fixture: fixture, payload: payload, fileBytes: fileBytes)
+}
+
 private func darwinPread(
     _ fd: Int32,
     _ buffer: UnsafeMutableRawPointer,
@@ -973,6 +1133,23 @@ private func overwriteFirstPayloadByteInPlace(
         sameSize: before.st_size == after.st_size,
         modificationTimeChanged: before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec
             || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec)
+}
+
+private func overwriteByteInPlace(at url: URL, offset: off_t, with value: UInt8) throws {
+    let fd = open(url.path, O_WRONLY | O_CLOEXEC)
+    guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    defer { close(fd) }
+    var byte = value
+    let written = withUnsafeBytes(of: &byte) { raw -> Int in
+        guard let base = raw.baseAddress else { return -1 }
+        return Darwin.pwrite(fd, base, raw.count, offset)
+    }
+    guard written == 1 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    guard fsync(fd) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+    let timestamps = [timeval(tv_sec: 1, tv_usec: 0), timeval(tv_sec: 1, tv_usec: 0)]
+    guard timestamps.withUnsafeBufferPointer({ futimes(fd, $0.baseAddress) }) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
 }
 
 private func descriptorCount() -> Int {

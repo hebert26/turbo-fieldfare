@@ -576,7 +576,10 @@ package final class OfficialSourceHandle {
               absolute <= maximumOffset, absoluteEnd <= maximumOffset else {
             throw OfficialSourceHandleError.range("tensor/file/off_t boundary or arithmetic overflow")
         }
-        let tile = min(UInt64(512 * 1024), limits?.maximumSyscall ?? UInt64.max)
+        // Read directly into the admitted caller destination, within the
+        // unchanged 8 MiB per-call ceiling. Each actual syscall retains its
+        // before/after checks, with at most 4 MiB between those checks.
+        let tile = min(UInt64(4 * 1024 * 1024), limits?.maximumSyscall ?? UInt64.max)
         guard byteCount == 0 || tile > 0 else {
             throw OfficialSourceHandleError.range("syscall capacity is zero")
         }

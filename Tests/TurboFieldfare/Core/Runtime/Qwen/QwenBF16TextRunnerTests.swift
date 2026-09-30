@@ -81,8 +81,17 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         #expect(model.sourceIdentity == nil)
+        #expect(model.residentWeightBytes == source.expectedResidentBytes)
+        #expect(model.expertCacheBytesPerLayer
+            == QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+                expertSlotCount: QwenBF16TextRunnerFixture.topK, layerCount: 1))
+        #expect(model.expertCacheReservationBytes
+            == QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+                expertSlotCount: QwenBF16TextRunnerFixture.topK))
+        #expect(source.totalResidencyBudget()
+            == model.residentWeightBytes + model.expertCacheReservationBytes)
         #expect(model.architecture.layers == 2)
         #expect(model.architecture.vocabularySize == QwenBF16TextRunnerFixture.vocabularySize)
 
@@ -146,7 +155,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         #expect(model.sourceIdentity == nil)
 
         let chunks = model.entryWeights.inspectedChunks
@@ -179,6 +188,17 @@ import Testing
                 + QwenBF16TextRunnerFixture.hiddenSize
                     * QwenBF16TextRunnerFixture.routedIntermediateSize)
                 * MemoryLayout<UInt16>.stride)
+        let expectedPairBytes = QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+            expertSlotCount: 1, layerCount: 1)
+        let expectedLayerCacheBytes = QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+            expertSlotCount: QwenBF16TextRunnerFixture.topK, layerCount: 1)
+        let expectedAggregateCacheBytes = QwenBF16TextRunnerFixture.expectedExpertCacheBytes(
+            expertSlotCount: QwenBF16TextRunnerFixture.topK)
+        #expect(pairBytes == expectedPairBytes)
+        #expect(expectedLayerCacheBytes
+            == pairBytes * UInt64(QwenBF16TextRunnerFixture.topK))
+        #expect(expectedAggregateCacheBytes
+            == expectedLayerCacheBytes * UInt64(QwenBF16TextRunnerFixture.layerCount))
         let pairedCache = try QwenBF16PairedExpertCache(
             source: handle, names: names,
             expertCount: QwenBF16TextRunnerFixture.expertCount,
@@ -190,7 +210,7 @@ import Testing
         #expect(pairedCache.gateUpBytes == 64)
         #expect(pairedCache.downBytes == 32)
         #expect(pairedCache.allocatedCacheBytes == 768)
-        #expect(pairedCache.allocatedCacheBytes == pairBytes * UInt64(QwenBF16TextRunnerFixture.topK))
+        #expect(pairedCache.allocatedCacheBytes == expectedLayerCacheBytes)
         #expect(source.expectedResidentBytes + pairedCache.allocatedCacheBytes == 2_448)
     }
 
@@ -201,7 +221,7 @@ import Testing
         let model = try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
         let runner = try model.makeRunner(
             context: context, expertSlotCount: QwenBF16TextRunnerFixture.topK, maxContext: 3)
         var expectedOracle = source.oracle()
@@ -296,7 +316,7 @@ import Testing
             try QwenOfficialSourceModel.loadSyntheticFixture(
                 registrationURL: invalidConfiguration.registrationURL,
                 context: context,
-                residencyBudgetBytes: invalidConfiguration.expectedResidentBytes)
+                residencyBudgetBytes: invalidConfiguration.totalResidencyBudget())
         }
         let rejectsInvalidArchitecture = (error as? ModelError)
             == .indexCorrupt(detail: "invalid Qwen text architecture")
@@ -314,7 +334,7 @@ import Testing
             try QwenOfficialSourceModel.loadSyntheticFixture(
                 registrationURL: source.registrationURL,
                 context: context,
-                residencyBudgetBytes: source.expectedResidentBytes)
+                residencyBudgetBytes: source.totalResidencyBudget())
         }
         let rejectsHeaderConflict = matchesQwenBF16WeightError(error) { actual in
             actual == .invalidGeometry("header shape disagrees: \(qProjection)")
@@ -327,6 +347,29 @@ import Testing
         let context = try MetalContext()
         let source = try QwenBF16TextRunnerFixture.make()
         defer { source.remove() }
+        let denseOnlyError = capturedError {
+            try QwenOfficialSourceModel.loadSyntheticFixture(
+                registrationURL: source.registrationURL,
+                context: context,
+                residencyBudgetBytes: source.expectedResidentBytes)
+        }
+        #expect(matchesQwenBF16WeightError(denseOnlyError) {
+            $0 == .budgetExceeded
+        }, "dense-only admission must not omit the checked expert-cache reservation")
+
+        let cacheShortfallError = capturedError {
+            try QwenOfficialSourceModel.loadSyntheticFixture(
+                registrationURL: source.registrationURL,
+                context: context,
+                residencyBudgetBytes: source.totalResidencyBudget() - 1)
+        }
+        let rejectsCacheShortfall = (cacheShortfallError as? ModelError)
+            == .indexCorrupt(detail:
+                "invalid source vector or budget: "
+                    + "model.language_model.layers.1.linear_attn.dt_bias")
+        #expect(rejectsCacheShortfall,
+                "a one-byte cache shortfall must fail the bounded resident-vector budget")
+
         let error = capturedError {
             try QwenOfficialSourceModel.loadSyntheticFixture(
                 registrationURL: source.registrationURL,
@@ -349,7 +392,7 @@ import Testing
             try QwenOfficialSourceModel.loadSyntheticFixture(
                 registrationURL: source.registrationURL,
                 context: context,
-                residencyBudgetBytes: source.expectedResidentBytes)
+                residencyBudgetBytes: source.totalResidencyBudget())
         }
         let rejectsShapeConflict = matchesQwenBF16WeightError(error) { actual in
             actual == .invalidGeometry("header shape disagrees: \(qProjection)")
@@ -367,7 +410,7 @@ import Testing
             try QwenOfficialSourceModel.loadSyntheticFixture(
                 registrationURL: source.registrationURL,
                 context: context,
-                residencyBudgetBytes: source.expectedResidentBytes)
+                residencyBudgetBytes: source.totalResidencyBudget())
         }
         let rejectsProtectedRange = matchesProtectedHeaderRangeError(error, tensorName: tensorName)
         #expect(rejectsProtectedRange,
@@ -533,7 +576,7 @@ private func sourceModelLoadError(
         try QwenOfficialSourceModel.loadSyntheticFixture(
             registrationURL: source.registrationURL,
             context: context,
-            residencyBudgetBytes: source.expectedResidentBytes)
+            residencyBudgetBytes: source.totalResidencyBudget())
     }
 }
 

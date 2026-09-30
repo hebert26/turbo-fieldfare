@@ -1,3 +1,4 @@
+import Darwin
 import CryptoKit
 import Foundation
 import Metal
@@ -54,6 +55,58 @@ import Testing
         }
         #expect(abs(actual[0] - rankOrderControl[0]) > 0.05,
                 "production output must reject lease-rank accumulation")
+    }
+
+    @Test func denseBF16RoutedBranchMatchesIndependentSource64ActivationOracle() async throws {
+        let hiddenSize = 512
+        let intermediateSize = 512
+        let expertIDs = Array((0..<8).reversed())
+        let routeWeights: [Float] = [0.01, 0.02, 0.04, 0.08, 0.16, 0.20, 0.21, 0.28]
+        let hidden: [Float] = (0..<hiddenSize).map { index -> Float in
+            let magnitude: Float = 0.25 + Float((index * 19) % 97) / 128
+            let sign: Float = (index & 1) == 0 ? 1.0 : -1.0
+            return magnitude * sign
+        }
+        let gateUp = denseBF16Words(count: 8 * 2 * intermediateSize * hiddenSize,
+                                    salt: 17)
+        let down = denseBF16Words(count: 8 * hiddenSize * intermediateSize, salt: 43)
+
+        let actual = try await runDenseProductionMoE(
+            hidden: hidden, expertIDs: expertIDs, routeWeights: routeWeights,
+            gateUp: gateUp, down: down,
+            hiddenSize: hiddenSize, intermediateSize: intermediateSize)
+        let expected = denseRoutedReference(
+            hidden: hidden, expertIDs: expertIDs, routeWeights: routeWeights,
+            gateUp: gateUp, down: down,
+            hiddenSize: hiddenSize, intermediateSize: intermediateSize)
+
+        #expect(actual.count == expected.count)
+        #expect(actual.allSatisfy { $0.isFinite })
+        #expect(expected.allSatisfy { $0.isFinite })
+        for index in expected.indices {
+            #expect(actual[index].bitPattern == expected[index].bitPattern,
+                    "output \(index): cooperative \(actual[index]), source64 oracle \(expected[index])")
+        }
+    }
+
+    @Test func denseBF16RoutedBranchPreservesNonfiniteClassification() async throws {
+        let hiddenSize = 512
+        let intermediateSize = 512
+        let expertIDs = Array((0..<8).reversed())
+        let routeWeights: [Float] = [0.01, 0.02, 0.04, 0.08, 0.16, 0.20, 0.21, 0.28]
+        let hidden = [Float](repeating: 1, count: hiddenSize)
+        var gateUp = denseBF16Words(count: 8 * 2 * intermediateSize * hiddenSize,
+                                    salt: 71)
+        gateUp[0] = 0x7fc0 // NaN in expert 0's first gate row.
+        let down = denseBF16Words(count: 8 * hiddenSize * intermediateSize, salt: 89)
+
+        let actual = try await runDenseProductionMoE(
+            hidden: hidden, expertIDs: expertIDs, routeWeights: routeWeights,
+            gateUp: gateUp, down: down,
+            hiddenSize: hiddenSize, intermediateSize: intermediateSize)
+        #expect(actual.count == hiddenSize)
+        #expect(actual.allSatisfy { $0.isNaN },
+                "a nonfinite cooperative gate must remain nonfinite through routed reduction")
     }
 
     private func runProductionMoE(_ fixture: LargeMoEParityWords) async throws -> [Float] {
@@ -140,6 +193,164 @@ import Testing
         #expect(lease.snapshot().completed)
         #expect(lease.snapshot().succeeded == true)
         return readFloats(output, count: hiddenSize)
+    }
+
+    private func runDenseProductionMoE(
+        hidden: [Float], expertIDs: [Int], routeWeights: [Float],
+        gateUp: [UInt16], down: [UInt16], hiddenSize: Int, intermediateSize: Int
+    ) async throws -> [Float] {
+        let gateUpName = "dense_moe.gate_up"
+        let downName = "dense_moe.down"
+        let sharedGateName = "dense_moe.shared_gate"
+        let sharedUpName = "dense_moe.shared_up"
+        let sharedDownName = "dense_moe.shared_down"
+        let sharedOutputGateName = "dense_moe.shared_output_gate"
+        let source = try QwenBF16ExpertCacheSourceFixture.make(
+            firstShard: [
+                QwenBF16ExpertCacheLiteralTensor(
+                    name: gateUpName,
+                    shape: [8, 2 * intermediateSize, hiddenSize], words: gateUp),
+                QwenBF16ExpertCacheLiteralTensor(
+                    name: sharedGateName, shape: [1, hiddenSize],
+                    words: [UInt16](repeating: 0, count: hiddenSize)),
+                QwenBF16ExpertCacheLiteralTensor(
+                    name: sharedUpName, shape: [1, hiddenSize],
+                    words: [UInt16](repeating: 0, count: hiddenSize)),
+                QwenBF16ExpertCacheLiteralTensor(
+                    name: sharedOutputGateName, shape: [1, hiddenSize],
+                    words: [UInt16](repeating: 0, count: hiddenSize)),
+            ],
+            secondShard: [
+                QwenBF16ExpertCacheLiteralTensor(
+                    name: downName,
+                    shape: [8, hiddenSize, intermediateSize], words: down),
+                QwenBF16ExpertCacheLiteralTensor(
+                    name: sharedDownName, shape: [hiddenSize, 1],
+                    words: [UInt16](repeating: 0, count: hiddenSize)),
+            ])
+        defer { source.remove() }
+
+        let context = try MetalContext()
+        let configuration = try QwenMoEConfiguration(
+            hiddenSize: hiddenSize, expertCount: 8, topK: 8,
+            routedIntermediateSize: intermediateSize, sharedIntermediateSize: 1)
+        let sharedWeights = try QwenBF16Weights(
+            context: context, source: source.handle,
+            specifications: [
+                QwenBF16TensorSpec(name: sharedGateName,
+                                   shardName: source.gateUpShardName,
+                                   role: .sharedGate, rows: 1, columns: hiddenSize),
+                QwenBF16TensorSpec(name: sharedUpName,
+                                   shardName: source.gateUpShardName,
+                                   role: .sharedUp, rows: 1, columns: hiddenSize),
+                QwenBF16TensorSpec(name: sharedDownName,
+                                   shardName: source.downShardName,
+                                   role: .sharedDown, rows: hiddenSize, columns: 1),
+                QwenBF16TensorSpec(name: sharedOutputGateName,
+                                   shardName: source.gateUpShardName,
+                                   role: .sharedOutputGate, rows: 1, columns: hiddenSize),
+            ], residencyBudget: UInt64((3 * hiddenSize + hiddenSize) * 2))
+        let pairBytes = (2 * intermediateSize * hiddenSize
+            + hiddenSize * intermediateSize) * MemoryLayout<UInt16>.stride
+        let coordinator = try QwenBF16ExpertMappingCoordinator(
+            source: source.handle,
+            names: QwenBF16RoutedSourceNames(
+                gateUpShardName: source.gateUpShardName,
+                gateUpTensorName: gateUpName,
+                downShardName: source.downShardName,
+                downTensorName: downName),
+            layer: 0, configuration: configuration, device: context.device,
+            slotCount: 8, residencyBudget: UInt64(pairBytes * 8))
+        let lease = try await coordinator.map(expertIDs: expertIDs)
+        #expect(lease.experts.map(\.expertID) == expertIDs)
+
+        let hiddenBuffer = try floatBuffer(hidden, device: context.device)
+        let routeBuffer = try floatBuffer(routeWeights, device: context.device)
+        let output = try floatBuffer([Float](repeating: 0, count: hiddenSize),
+                                     device: context.device)
+        let moe = try QwenMoE(context: context, configuration: configuration)
+        let scratch = try moe.makeScratch()
+        let command = try moe.submitExpertsBF16(
+            hidden: hiddenBuffer, lease: lease, routingWeights: routeBuffer,
+            sharedWeights: sharedWeights,
+            sharedNames: QwenBF16SharedNames(
+                gate: sharedGateName, up: sharedUpName,
+                down: sharedDownName, outputGate: sharedOutputGateName),
+            scratch: scratch, output: output)
+        _ = await command.completed()
+        #expect(command.status == .completed)
+        #expect(command.error == nil)
+        #expect(lease.snapshot().completed)
+        #expect(lease.snapshot().succeeded == true)
+        return readFloats(output, count: hiddenSize)
+    }
+
+    private func denseRoutedReference(
+        hidden: [Float], expertIDs: [Int], routeWeights: [Float],
+        gateUp: [UInt16], down: [UInt16], hiddenSize: Int, intermediateSize: Int
+    ) -> [Float] {
+        let weightByExpert = Dictionary(uniqueKeysWithValues:
+            zip(expertIDs, routeWeights).map { ($0.0, $0.1) })
+        var result = [Float](repeating: 0, count: hiddenSize)
+        for expert in expertIDs.sorted() {
+            let gateOffset = expert * 2 * intermediateSize * hiddenSize
+            let downOffset = expert * hiddenSize * intermediateSize
+            var activation = [Float](repeating: 0, count: intermediateSize)
+            for row in 0..<intermediateSize {
+                let gate = source64Dot(
+                    vector: hidden, weights: gateUp,
+                    rowOffset: gateOffset + row * hiddenSize, columns: hiddenSize)
+                let up = source64Dot(
+                    vector: hidden, weights: gateUp,
+                    rowOffset: gateOffset + (intermediateSize + row) * hiddenSize,
+                    columns: hiddenSize)
+                activation[row] = gate / (1 + Darwin.expf(-gate)) * up
+            }
+            for row in 0..<hiddenSize {
+                let projected = source64Dot(
+                    vector: activation, weights: down,
+                    rowOffset: downOffset + row * intermediateSize,
+                    columns: intermediateSize)
+                let contribution = projected * weightByExpert[expert, default: 0]
+                result[row] += contribution
+            }
+        }
+        return result
+    }
+
+    private func source64Dot(
+        vector: [Float], weights: [UInt16], rowOffset: Int, columns: Int
+    ) -> Float {
+        var partial = [Float](repeating: 0, count: 64)
+        for column in 0..<columns {
+            let weight = Float(bitPattern: UInt32(weights[rowOffset + column]) << 16)
+            partial[column & 63] = partial[column & 63].addingProduct(
+                weight, vector[column])
+        }
+        var collapsed = [Float](repeating: 0, count: 16)
+        for index in 0..<16 {
+            let first = partial[index] + partial[index + 16]
+            let second = first + partial[index + 32]
+            collapsed[index] = second + partial[index + 48]
+        }
+        var groups = [Float](repeating: 0, count: 4)
+        for index in 0..<4 {
+            let base = index * 4
+            let first = collapsed[base] + collapsed[base + 1]
+            let second = first + collapsed[base + 2]
+            groups[index] = second + collapsed[base + 3]
+        }
+        let first = groups[0] + groups[1]
+        let second = first + groups[2]
+        return second + groups[3]
+    }
+
+    private func denseBF16Words(count: Int, salt: Int) -> [UInt16] {
+        (0..<count).map { index in
+            let magnitude = UInt16(0x3c00 + ((index * 37 + salt) % 0x180))
+            let sign: UInt16 = ((index + salt) & 1) == 0 ? 0 : 0x8000
+            return magnitude | sign
+        }
     }
 
     private func loadManifest() throws -> LargeMoEParityManifest {

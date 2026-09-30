@@ -33,6 +33,19 @@ actor QwenOfficialSourceRunner {
     private let moeConfiguration: QwenMoEConfiguration
     private let expertSlotCount: Int
     private let hooks: QwenOfficialSourceTransactionHooks
+    /// Only this actor mutates the dictionary. A GPU lease can independently
+    /// retain a coordinator, whose hooks retain the same quota reservation.
+    private final class ExpertCacheStorage: @unchecked Sendable {
+        let reservation: QwenOfficialSourceModel.ExpertCacheReservation
+        var coordinators: [Int: QwenBF16ExpertMappingCoordinator] = [:]
+
+        init(reservation: QwenOfficialSourceModel.ExpertCacheReservation) {
+            self.reservation = reservation
+        }
+
+        deinit { coordinators.removeAll() }
+    }
+    private let expertCacheStorage: ExpertCacheStorage
     private struct TurnCheckpoint {
         let linear: QwenLinearAttentionSnapshot
         var full: QwenFullAttentionKVSnapshot
@@ -42,7 +55,6 @@ actor QwenOfficialSourceRunner {
     private var committedPosition = 0
     private var inFlight = false
     private var unusable = false
-    private var lastAllocatedCacheBytes: UInt64 = 0
     private var lastRoutedExpertCount = 0
     private var allocatedCacheBytes: UInt64 = 0
     private var peakAllocatedCacheBytes: UInt64 = 0
@@ -59,7 +71,8 @@ actor QwenOfficialSourceRunner {
         let context = model.context
         guard maxContext > 0, maxContext <= Int(UInt32.max),
               expertSlotCount >= architecture.expertsPerToken,
-              expertSlotCount <= architecture.experts else {
+              expertSlotCount <= architecture.experts,
+              expertSlotCount == model.expertCacheSlots else {
             throw QwenTextRunnerError.invalidState(detail: "source context/cache geometry")
         }
         let linearConfiguration = try QwenGatedDeltaNetConfiguration(
@@ -75,6 +88,10 @@ actor QwenOfficialSourceRunner {
             valueHeadCount: architecture.linearValueHeads,
             keyHeadDimension: architecture.linearKeyDimension,
             valueHeadDimension: architecture.linearValueDimension)
+        // Reserve every possible layer cache before the runner's first GPU
+        // allocation. Failed initialization returns the quota through ARC.
+        let expertCacheStorage = ExpertCacheStorage(
+            reservation: try model.reserveExpertCache())
         let linearState = try QwenLinearAttentionState(
             device: context.device,
             linearAttentionLayerMask: architecture.fullAttentionLayerMask.map { 1 - $0 },
@@ -102,12 +119,9 @@ actor QwenOfficialSourceRunner {
             if let names = weights.fullNames,
                let queryNorm = weights.queryNorm,
                let keyNorm = weights.keyNorm {
-                fullSteps[layer] = try QwenBF16FullAttentionStep(
-                    context: context, weights: weights.weights, names: names,
-                    configuration: attentionConfiguration,
-                    hiddenSize: architecture.hiddenSize, layer: layer, kv: fullKV,
-                    queryNorm: queryNorm, keyNorm: keyNorm,
-                    hooks: QwenBF16FullAttentionHooks { checkpoint in
+                let stepHooks: QwenBF16FullAttentionHooks
+                if hooks.requiresSeparateGPUStages {
+                    stepHooks = QwenBF16FullAttentionHooks { checkpoint in
                         switch checkpoint {
                         case let .afterSubmission(stage):
                             try await hooks.afterActualGPUSubmission("full.\(stage)")
@@ -115,7 +129,16 @@ actor QwenOfficialSourceRunner {
                             try await hooks.afterActualGPUCompletion("full.commit")
                         case .beforeSubmission: break
                         }
-                    })
+                    }
+                } else {
+                    stepHooks = .none
+                }
+                fullSteps[layer] = try QwenBF16FullAttentionStep(
+                    context: context, weights: weights.weights, names: names,
+                    configuration: attentionConfiguration,
+                    hiddenSize: architecture.hiddenSize, layer: layer, kv: fullKV,
+                    queryNorm: queryNorm, keyNorm: keyNorm,
+                    hooks: stepHooks)
             } else if let names = weights.linearNames,
                       let vectors = weights.linearVectors {
                 let linearObserver: (@Sendable (Int, String, [Float]) -> Void)?
@@ -126,11 +149,9 @@ actor QwenOfficialSourceRunner {
                 } else {
                     linearObserver = nil
                 }
-                linearSteps[layer] = try QwenBF16LinearStep(
-                    context: context, weights: weights.weights, names: names,
-                    configuration: linearConfiguration, vectors: vectors,
-                    layer: layer, state: linearState,
-                    hooks: QwenBF16LinearHooks(observeActivation: linearObserver) { checkpoint in
+                let stepHooks: QwenBF16LinearHooks
+                if hooks.requiresSeparateGPUStages {
+                    stepHooks = QwenBF16LinearHooks(observeActivation: linearObserver) { checkpoint in
                         switch checkpoint {
                         case let .afterSubmission(stage):
                             try await hooks.afterActualGPUSubmission("linear.\(stage)")
@@ -138,7 +159,15 @@ actor QwenOfficialSourceRunner {
                             try await hooks.afterActualGPUCompletion("linear.commit")
                         case .beforeSubmission: break
                         }
-                    })
+                    }
+                } else {
+                    stepHooks = .none
+                }
+                linearSteps[layer] = try QwenBF16LinearStep(
+                    context: context, weights: weights.weights, names: names,
+                    configuration: linearConfiguration, vectors: vectors,
+                    layer: layer, state: linearState,
+                    hooks: stepHooks)
             } else {
                 throw QwenTextRunnerError.stateArchitectureMismatch
             }
@@ -159,13 +188,14 @@ actor QwenOfficialSourceRunner {
         self.moeConfiguration = moeConfiguration
         moe = try QwenMoE(context: context, configuration: moeConfiguration)
         self.expertSlotCount = expertSlotCount
+        self.expertCacheStorage = expertCacheStorage
     }
 
     func cacheDiagnostics() -> QwenOfficialSourceCacheDiagnostics {
         QwenOfficialSourceCacheDiagnostics(
             slotCount: expertSlotCount, policy: model.expertCachePolicy,
             integrityPolicy: model.sourceIntegrityPolicy,
-            allocatedBytes: lastAllocatedCacheBytes,
+            allocatedBytes: allocatedCacheBytes,
             routedExpertCount: lastRoutedExpertCount,
             summary: routedExpertCacheSummary())
     }
@@ -432,32 +462,8 @@ actor QwenOfficialSourceRunner {
             : 0
         hooks.observeRoute(committedPosition, layer, routeLogits,
                            experts, routeWeights, cutoff)
-        // Cache ownership ends only after this token's command completes.
-        // Keeping one layer's eight paired slots at a time bounds residency
-        // without recycling a live GPU resource or making a full expert copy.
-        let intermediate = UInt64(model.architecture.routedIntermediateSize)
-        let hidden = UInt64(model.architecture.hiddenSize)
-        let (pairElements, overflow) = intermediate.multipliedReportingOverflow(by: hidden)
-        guard !overflow, pairElements <= UInt64.max / 6 / UInt64(expertSlotCount) else {
-            throw QwenTextRunnerError.execution(detail: "source paired cache overflow")
-        }
-        let cacheBudget = pairElements * 6 * UInt64(expertSlotCount)
         try model.revalidateSource()
-        let coordinator = try QwenBF16ExpertMappingCoordinator(
-            source: model.source, names: row.routedNames, layer: layer,
-            configuration: moeConfiguration, device: context.device,
-            slotCount: expertSlotCount, residencyBudget: cacheBudget,
-            cachePolicy: model.expertCachePolicy,
-            readHooks: QwenBF16ExpertReadHooks { checkpoint in
-                guard case let .beforeProtectedRead(expert, stream) = checkpoint else { return }
-                try self.model.revalidateSource()
-                try self.hooks.beforeProtectedExpertRead(layer, expert, stream)
-                try self.model.revalidateSource()
-            })
-        lastAllocatedCacheBytes = coordinator.allocatedCacheBytes
-        allocatedCacheBytes = coordinator.allocatedCacheBytes
-        peakAllocatedCacheBytes = max(peakAllocatedCacheBytes, allocatedCacheBytes)
-        defer { allocatedCacheBytes = 0 }
+        let coordinator = try expertCoordinator(layer: layer)
         lastRoutedExpertCount = experts.count
         let lease = try await coordinator.map(expertIDs: experts)
         // Mapping has succeeded. Later GPU failure/cancellation cannot undo
@@ -465,6 +471,11 @@ actor QwenOfficialSourceRunner {
         successfulCacheHits += UInt64(lease.diagnostics.hits)
         successfulCacheMisses += UInt64(lease.diagnostics.misses)
         do {
+            // Protected reads validate their retained shard before and after
+            // every slice. Recheck the complete source once after mapping so
+            // changes to other receipt files reject this layer before GPU use.
+            // Keep this inside the lease cleanup scope if validation throws.
+            try model.revalidateSource()
             let hiddenBuffer = try floats(input, label: "source MoE input")
             let routingBuffer = try floats(routeWeights, label: "source MoE routing")
             let output = try buffer(elements: model.architecture.hiddenSize,
@@ -481,6 +492,40 @@ actor QwenOfficialSourceRunner {
             try? lease.cancel()
             throw error
         }
+    }
+
+    private func expertCoordinator(layer: Int) throws -> QwenBF16ExpertMappingCoordinator {
+        if let retained = expertCacheStorage.coordinators[layer] { return retained }
+        guard model.layers.indices.contains(layer) else {
+            throw QwenExpertMappingError.invalidLayer(layer)
+        }
+        let bytes = model.expertCacheBytesPerLayer
+        let (nextAllocated, overflow) = allocatedCacheBytes.addingReportingOverflow(bytes)
+        guard !overflow, nextAllocated <= expertCacheStorage.reservation.bytes else {
+            throw QwenBF16ExpertCacheError.budgetExceeded
+        }
+        let hooks = self.hooks
+        let reservation = expertCacheStorage.reservation
+        let coordinator = try QwenBF16ExpertMappingCoordinator(
+            source: model.source, names: model.layers[layer].routedNames, layer: layer,
+            configuration: moeConfiguration, device: context.device,
+            slotCount: expertSlotCount, residencyBudget: bytes,
+            cachePolicy: model.expertCachePolicy,
+            readHooks: QwenBF16ExpertReadHooks { checkpoint in
+                // A submitted lease can outlive the runner. Retain its full
+                // quota until this coordinator's last owner releases it.
+                try withExtendedLifetime(reservation) {
+                    guard case let .beforeProtectedRead(expert, stream) = checkpoint else { return }
+                    try hooks.beforeProtectedExpertRead(layer, expert, stream)
+                }
+            })
+        guard coordinator.allocatedCacheBytes == bytes else {
+            throw QwenBF16ExpertCacheError.invalidGeometry
+        }
+        expertCacheStorage.coordinators[layer] = coordinator
+        allocatedCacheBytes = nextAllocated
+        peakAllocatedCacheBytes = max(peakAllocatedCacheBytes, allocatedCacheBytes)
+        return coordinator
     }
 
     private func floats(_ values: [Float], label: String) throws -> MTLBuffer {

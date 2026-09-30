@@ -95,6 +95,7 @@ final class QwenBF16Weights: @unchecked Sendable {
     private let device: MTLDevice
     private let embeddingPipeline: MTLComputePipelineState
     private let projectionPipeline: MTLComputePipelineState
+    private let parallelProjectionPipeline: MTLComputePipelineState
     private let tensors: [String: Tensor]
 
     convenience init(context: MetalContext, source: OfficialSourceHandle,
@@ -131,11 +132,13 @@ final class QwenBF16Weights: @unchecked Sendable {
         let library = try MetalContext.privateLibrary(device: device, module: "qwen_bf16",
                                                       mathMode: .safe)
         guard let embeddingFunction = library.makeFunction(name: "qwen_bf16_embedding"),
-              let projectionFunction = library.makeFunction(name: "qwen_bf16_project_fp32") else {
+              let projectionFunction = library.makeFunction(name: "qwen_bf16_project_fp32"),
+              let parallelFunction = library.makeFunction(name: "qwen_bf16_project_source64_fp32") else {
             throw MetalError.missingFunction("qwen_bf16")
         }
         let embeddingPipeline = try device.makeComputePipelineState(function: embeddingFunction)
         let projectionPipeline = try device.makeComputePipelineState(function: projectionFunction)
+        let parallelProjectionPipeline = try device.makeComputePipelineState(function: parallelFunction)
         guard !specifications.isEmpty, specifications.count <= 128,
               maximumChunkBytes > 0, device.maxBufferLength > 0 else {
             throw QwenBF16WeightError.invalidGeometry("empty/oversized tensor set or chunk cap")
@@ -243,6 +246,7 @@ final class QwenBF16Weights: @unchecked Sendable {
         self.device = device
         self.embeddingPipeline = embeddingPipeline
         self.projectionPipeline = projectionPipeline
+        self.parallelProjectionPipeline = parallelProjectionPipeline
         self.tensors = staged
     }
 
@@ -291,8 +295,18 @@ final class QwenBF16Weights: @unchecked Sendable {
         try requireElements(output, count: try product(tokenCount, tensor.spec.rows),
                             stride: MemoryLayout<Float>.stride, label: "projection output")
         try requireSeparateBuffers(input: input, output: output, tensor: tensor)
-        try encode(commandBuffer: commandBuffer, tensor: tensor, pipeline: projectionPipeline,
-                   input: input, tokenCount: tokenCount, output: output)
+        // Match the existing source64-family predicate exactly. Other shapes
+        // retain their single-row, small32, stable-dot or ordered fallback.
+        let largeFamily = tensor.spec.rows >= 512 && tensor.spec.columns >= 512
+            && tensor.spec.columns.isMultiple(of: 64)
+        let routerFamily = tensor.spec.rows == 256 && tensor.spec.columns == 2048
+        let parallelStreams = (largeFamily || routerFamily)
+            && parallelProjectionPipeline.maxTotalThreadsPerThreadgroup >= 64
+            && parallelProjectionPipeline.staticThreadgroupMemoryLength <= device.maxThreadgroupMemoryLength
+        try encode(commandBuffer: commandBuffer, tensor: tensor,
+                   pipeline: parallelStreams ? parallelProjectionPipeline : projectionPipeline,
+                   input: input, tokenCount: tokenCount, output: output,
+                   parallelStreams: parallelStreams)
     }
 
     private func requireTensor(_ name: String, role: QwenBF16TensorSpec.Role) throws -> Tensor {
@@ -342,7 +356,7 @@ final class QwenBF16Weights: @unchecked Sendable {
     private func encode(commandBuffer: MTLCommandBuffer, tensor: Tensor,
                         pipeline: MTLComputePipelineState,
                         input: MTLBuffer, tokenCount: Int,
-                        output: MTLBuffer) throws {
+                        output: MTLBuffer, parallelStreams: Bool = false) throws {
         guard tokenCount > 0, tokenCount <= Int(UInt32.max),
               pipeline.maxTotalThreadsPerThreadgroup > 0,
               pipeline.threadExecutionWidth > 0 else {
@@ -371,12 +385,20 @@ final class QwenBF16Weights: @unchecked Sendable {
                               index: QwenMetalBufferIndex.weights.rawValue)
             encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
             encoder.useResource(chunk.buffer, usage: .read)
-            let width = tensor.spec.role == .embedding ? tensor.spec.columns : chunk.rowCount
-            let groupWidth = min(width, pipeline.threadExecutionWidth,
-                                 pipeline.maxTotalThreadsPerThreadgroup)
-            encoder.dispatchThreads(MTLSize(width: width, height: tokenCount, depth: 1),
-                                    threadsPerThreadgroup: MTLSize(width: groupWidth, height: 1,
-                                                                   depth: 1))
+            if parallelStreams {
+                // Full groups are required for all 64 partials and all barriers.
+                // Grid.x remains rows, so no rows*64 index multiplication occurs.
+                encoder.dispatchThreadgroups(
+                    MTLSize(width: chunk.rowCount, height: tokenCount, depth: 1),
+                    threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+            } else {
+                let width = tensor.spec.role == .embedding ? tensor.spec.columns : chunk.rowCount
+                let groupWidth = min(width, pipeline.threadExecutionWidth,
+                                     pipeline.maxTotalThreadsPerThreadgroup)
+                encoder.dispatchThreads(MTLSize(width: width, height: tokenCount, depth: 1),
+                                        threadsPerThreadgroup: MTLSize(width: groupWidth, height: 1,
+                                                                       depth: 1))
+            }
             encoder.endEncoding()
         }
     }
