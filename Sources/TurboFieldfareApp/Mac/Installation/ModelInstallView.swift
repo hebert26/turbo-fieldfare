@@ -57,7 +57,12 @@ struct ModelInstallView: View {
 
     private var storageCard: some View {
         VStack(spacing: 12) {
-            if let requirement = model.installRequirement {
+            if isLocalQwenInstall {
+                Text("Registration keeps the original BF16 files in their folder. Total memory fit has not been measured.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            } else if let requirement = model.installRequirement {
                 StorageRow(label: "Space required",
                            value: MetricFormat.storage(requirement.requiredBytes))
                 StorageRow(label: "Available on this Mac",
@@ -171,7 +176,7 @@ struct ModelInstallView: View {
                     .keyboardShortcut(.cancelAction)
                     .disabled(!model.canCancelInstall)
             } else {
-                if model.hasPartialModelDownload {
+                if model.hasPartialModelDownload && !isLocalQwenInstall {
                     Button(discardButtonLabel, role: .destructive) {
                         showingDiscardConfirmation = true
                     }
@@ -216,7 +221,7 @@ struct ModelInstallView: View {
         case .checking:
             return "Verifying the selected Qwen source folder."
         case .ready(let url):
-            return "Verified local source: \(url.path)"
+            return "Selected local source: \(url.path)"
         case .failed(let message):
             return message
         }
@@ -228,47 +233,47 @@ struct ModelInstallView: View {
     }
 
     private var progressAccessibilityLabel: String {
-        isLocalQwenInstall ? "Model conversion" : "Model download"
+        isLocalQwenInstall ? "Source verification" : "Model download"
     }
 
     private func progressAmountText(completed: UInt64, total: UInt64) -> String {
-        let verb = isLocalQwenInstall ? "Converted" : "Downloaded"
+        let verb = isLocalQwenInstall ? "Verified" : "Downloaded"
         return "\(verb) \(MetricFormat.storage(completed)) of \(MetricFormat.storage(total))"
     }
 
     private func reusedAmountText(_ bytes: UInt64) -> String {
-        let source = isLocalQwenInstall ? "saved conversion" : "saved download"
+        let source = isLocalQwenInstall ? "source verification" : "saved download"
         return "Reused \(MetricFormat.storage(bytes)) from the \(source)"
     }
 
     private var pausedLabel: String {
-        isLocalQwenInstall ? "Conversion paused" : "Download paused"
+        isLocalQwenInstall ? "Verification cancelled" : "Download paused"
     }
 
     private var installButtonLabel: String {
         if isLocalQwenInstall {
-            return model.hasPartialModelDownload ? "Resume Conversion" : "Convert"
+            return "Verify and Register"
         }
         return model.hasPartialModelDownload ? "Resume" : "Download"
     }
 
     private var discardButtonLabel: String {
-        isLocalQwenInstall ? "Discard Conversion" : "Discard Download"
+        isLocalQwenInstall ? "Clear Registration" : "Discard Download"
     }
 
     private var keepButtonLabel: String {
-        isLocalQwenInstall ? "Keep Conversion" : "Keep Download"
+        isLocalQwenInstall ? "Keep Registration" : "Keep Download"
     }
 
     private var discardConfirmationTitle: String {
         isLocalQwenInstall
-            ? "Discard the saved model conversion?"
+            ? "Clear the saved source selection?"
             : "Discard the saved model download?"
     }
 
     private var discardConfirmationMessage: String {
         if isLocalQwenInstall {
-            return "Converted partial files and the conversion checkpoint will be removed. The verified installed model, if any, is preserved."
+            return "The selected source will be cleared. Original BF16 files and verified registrations remain untouched."
         }
         return "Downloaded ranges will be removed. The installed model, if any, is preserved."
     }

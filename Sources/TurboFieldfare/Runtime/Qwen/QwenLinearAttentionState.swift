@@ -16,6 +16,8 @@ enum QwenLinearAttentionStateError: Error, Equatable, Sendable {
     case commandBufferAlreadySubmitted
     case invalidSnapshotGeometry
     case invalidSnapshotLayers
+    case invalidPosition
+    case deferredGPUUseActive
 }
 
 struct QwenLinearAttentionGeometry: Equatable, Sendable {
@@ -88,6 +90,23 @@ struct QwenLinearAttentionLayerState: Equatable, Sendable {
 struct QwenLinearAttentionSnapshot: Equatable, Sendable {
     let geometry: QwenLinearAttentionGeometry
     let layers: [Int: QwenLinearAttentionLayerState]
+    /// Positions travel with their histories and recurrent matrices on clone/restore.
+    let positions: [Int: Int]
+
+    /// Legacy callers supplying only geometry and layers retain zero positions.
+    init(geometry: QwenLinearAttentionGeometry,
+         layers: [Int: QwenLinearAttentionLayerState],
+         positions: [Int: Int]? = nil) {
+        self.geometry = geometry
+        self.layers = layers
+        self.positions = positions ?? Dictionary(
+            uniqueKeysWithValues: layers.keys.map { ($0, 0) })
+    }
+}
+
+struct QwenBF16LinearStepSnapshot: Equatable, Sendable {
+    let position: Int
+    let state: QwenLinearAttentionLayerState
 }
 
 /// Staging buffers for one transactional layer update. These buffers are never
@@ -106,6 +125,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
     private struct LayerStorage {
         var convolutionHistory: MTLBuffer
         var recurrentMatrix: MTLBuffer
+        var position: Int
         var pending: PendingUpdate?
     }
 
@@ -114,7 +134,11 @@ final class QwenLinearAttentionState: @unchecked Sendable {
         let convolutionHistory: MTLBuffer
         let recurrentMatrix: MTLBuffer
         var submitted: Bool
+        var deferred: Bool
+        var activeCommands: Int
+        var gpuSucceeded: Bool
         var discardRequested: Bool
+        var stageWaiters: [CheckedContinuation<Void, Never>]
     }
 
     let linearLayerIndices: [Int]
@@ -151,6 +175,11 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             geometry.convolutionElementCount, operation: "history bytes")
         let recurrentBytes = try Self.byteCount(
             geometry.recurrentElementCount, operation: "recurrent bytes")
+        guard historyBytes <= device.maxBufferLength,
+              recurrentBytes <= device.maxBufferLength else {
+            throw QwenLinearAttentionStateError.arithmeticOverflow(
+                operation: "state exceeds Metal maxBufferLength")
+        }
         var storage: [Int: LayerStorage] = [:]
         storage.reserveCapacity(selected.count)
         for layer in selected {
@@ -161,7 +190,8 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             history.label = "qwen.linear.history.layer\(layer).committed"
             recurrent.label = "qwen.linear.recurrent.layer\(layer).committed"
             storage[layer] = LayerStorage(
-                convolutionHistory: history, recurrentMatrix: recurrent, pending: nil)
+                convolutionHistory: history, recurrentMatrix: recurrent,
+                position: 0, pending: nil)
         }
         self.device = device
         self.geometry = geometry
@@ -195,11 +225,33 @@ final class QwenLinearAttentionState: @unchecked Sendable {
         }
     }
 
+    func layerSnapshot(_ layer: Int) throws -> QwenBF16LinearStepSnapshot {
+        try withLock {
+            let storage = try requireLayer(layer)
+            guard storage.pending == nil else { throw QwenLinearAttentionStateError.activeGPUUse }
+            return QwenBF16LinearStepSnapshot(
+                position: storage.position,
+                state: QwenLinearAttentionLayerState(
+                    convolutionHistory: Self.readFloats(
+                        storage.convolutionHistory, count: geometry.convolutionElementCount),
+                    recurrentMatrix: Self.readFloats(
+                        storage.recurrentMatrix, count: geometry.recurrentElementCount)))
+        }
+    }
+
+    func committedPosition(layer: Int) throws -> Int {
+        try withLock { try requireLayer(layer).position }
+    }
+
+    func isBound(to device: MTLDevice) -> Bool { self.device === device }
+
     func clone() throws -> QwenLinearAttentionSnapshot {
         try withLock {
             try requireNoActiveUse()
             var result: [Int: QwenLinearAttentionLayerState] = [:]
+            var positions: [Int: Int] = [:]
             result.reserveCapacity(linearLayerIndices.count)
+            positions.reserveCapacity(linearLayerIndices.count)
             for layer in linearLayerIndices {
                 let storage = try requireLayer(layer)
                 result[layer] = QwenLinearAttentionLayerState(
@@ -207,8 +259,10 @@ final class QwenLinearAttentionState: @unchecked Sendable {
                         storage.convolutionHistory, count: geometry.convolutionElementCount),
                     recurrentMatrix: Self.readFloats(
                         storage.recurrentMatrix, count: geometry.recurrentElementCount))
+                positions[layer] = storage.position
             }
-            return QwenLinearAttentionSnapshot(geometry: geometry, layers: result)
+            return QwenLinearAttentionSnapshot(
+                geometry: geometry, layers: result, positions: positions)
         }
     }
 
@@ -218,7 +272,9 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             guard snapshot.geometry == geometry else {
                 throw QwenLinearAttentionStateError.invalidSnapshotGeometry
             }
-            guard Set(snapshot.layers.keys) == Set(linearLayerIndices) else {
+            guard Set(snapshot.layers.keys) == Set(linearLayerIndices),
+                  Set(snapshot.positions.keys) == Set(linearLayerIndices),
+                  snapshot.positions.values.allSatisfy({ $0 >= 0 }) else {
                 throw QwenLinearAttentionStateError.invalidSnapshotLayers
             }
             for layer in linearLayerIndices {
@@ -232,6 +288,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
                 guard let state = snapshot.layers[layer], var storage = layers[layer] else { continue }
                 Self.write(state.convolutionHistory, to: storage.convolutionHistory)
                 Self.write(state.recurrentMatrix, to: storage.recurrentMatrix)
+                storage.position = snapshot.positions[layer] ?? 0
                 storage.pending = nil
                 layers[layer] = storage
             }
@@ -245,6 +302,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
                 guard let storage = layers[layer] else { continue }
                 memset(storage.convolutionHistory.contents(), 0, storage.convolutionHistory.length)
                 memset(storage.recurrentMatrix.contents(), 0, storage.recurrentMatrix.length)
+                layers[layer]?.position = 0
             }
         }
     }
@@ -267,7 +325,11 @@ final class QwenLinearAttentionState: @unchecked Sendable {
                 convolutionHistory: history,
                 recurrentMatrix: recurrent,
                 submitted: false,
-                discardRequested: false)
+                deferred: false,
+                activeCommands: 0,
+                gpuSucceeded: true,
+                discardRequested: false,
+                stageWaiters: [])
             layers[layer] = storage
             return QwenLinearAttentionUpdate(
                 layer: layer,
@@ -299,7 +361,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             guard var pending = storage.pending else {
                 throw QwenLinearAttentionStateError.unknownUpdate
             }
-            if pending.submitted {
+            if pending.submitted && pending.activeCommands > 0 {
                 pending.discardRequested = true
                 storage.pending = pending
             } else {
@@ -339,6 +401,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
                 throw QwenLinearAttentionStateError.updateAlreadySubmitted
             }
             pending.submitted = true
+            pending.activeCommands = 1
             storage.pending = pending
             layers[update.layer] = storage
             commandBuffer.addCompletedHandler { [self] completed in
@@ -349,6 +412,105 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             }
             commandBuffer.commit()
         }
+    }
+
+    /// Register a submitted BF16 stage without publishing staged state. The
+    /// completion callback retains this owner and scratch until Metal settles;
+    /// only `commitDeferred` can publish history, recurrence and position.
+    func submitDeferred(_ update: QwenLinearAttentionUpdate,
+                        on commandBuffer: MTLCommandBuffer) throws {
+        try withLock {
+            guard commandBuffer.status == .notEnqueued,
+                  commandBuffer.device === device else {
+                throw QwenLinearAttentionStateError.commandBufferAlreadySubmitted
+            }
+            var storage = try requireUpdate(update)
+            guard var pending = storage.pending,
+                  !pending.discardRequested,
+                  !pending.submitted || pending.deferred && pending.activeCommands == 0 else {
+                throw QwenLinearAttentionStateError.updateAlreadySubmitted
+            }
+            pending.submitted = true
+            pending.deferred = true
+            pending.activeCommands = 1
+            storage.pending = pending
+            layers[update.layer] = storage
+            commandBuffer.addCompletedHandler { [self] completed in
+                completeDeferred(layer: update.layer, identifier: update.identifier,
+                                 succeeded: completed.status == .completed && completed.error == nil)
+            }
+            commandBuffer.commit()
+        }
+    }
+
+    /// Wait for our completion callback as well as Metal's completion, so a
+    /// subsequent stage cannot observe callback scheduling as unfinished use.
+    func waitForDeferredStage(_ update: QwenLinearAttentionUpdate) async {
+        await withCheckedContinuation { continuation in
+            lock.lock()
+            if var storage = layers[update.layer], var pending = storage.pending,
+               pending.identifier == update.identifier, pending.activeCommands > 0 {
+                pending.stageWaiters.append(continuation)
+                storage.pending = pending
+                layers[update.layer] = storage
+                lock.unlock()
+            } else {
+                lock.unlock()
+                continuation.resume()
+            }
+        }
+    }
+
+    /// Non-suspending publication after all stages settle, output is checked,
+    /// and the actor's final cancellation/hook check has passed.
+    func commitDeferred(_ update: QwenLinearAttentionUpdate,
+                        tokenCount: Int) throws {
+        let waiters = try withLock { () -> [CheckedContinuation<Void, Never>] in
+            var storage = try requireUpdate(update)
+            guard let pending = storage.pending, pending.deferred,
+                  pending.submitted, pending.activeCommands == 0,
+                  !pending.discardRequested, pending.gpuSucceeded else {
+                throw QwenLinearAttentionStateError.deferredGPUUseActive
+            }
+            let (position, overflow) = storage.position.addingReportingOverflow(tokenCount)
+            guard tokenCount > 0, UInt32(exactly: tokenCount) != nil, !overflow,
+                  position >= 0,
+                  Self.allFinite(pending.convolutionHistory),
+                  Self.allFinite(pending.recurrentMatrix) else {
+                throw QwenLinearAttentionStateError.invalidPosition
+            }
+            storage.convolutionHistory = pending.convolutionHistory
+            storage.recurrentMatrix = pending.recurrentMatrix
+            storage.position = position
+            storage.pending = nil
+            layers[update.layer] = storage
+            return takeIdleWaitersIfIdle()
+        }
+        Self.resume(waiters)
+    }
+
+    private static func allFinite(_ buffer: MTLBuffer) -> Bool {
+        let values = UnsafeBufferPointer(
+            start: buffer.contents().assumingMemoryBound(to: Float.self),
+            count: buffer.length / MemoryLayout<Float>.stride)
+        return values.allSatisfy(\.isFinite)
+    }
+
+    private func completeDeferred(layer: Int, identifier: UInt64, succeeded: Bool) {
+        lock.lock()
+        guard var storage = layers[layer], var pending = storage.pending,
+              pending.identifier == identifier, pending.deferred,
+              pending.activeCommands == 1 else { lock.unlock(); return }
+        pending.activeCommands = 0
+        pending.gpuSucceeded = pending.gpuSucceeded && succeeded
+        let stageWaiters = pending.stageWaiters
+        pending.stageWaiters = []
+        storage.pending = pending.discardRequested ? nil : pending
+        layers[layer] = storage
+        let waiters = takeIdleWaitersIfIdle()
+        lock.unlock()
+        Self.resume(stageWaiters)
+        Self.resume(waiters)
     }
 
     /// Guarantees abort for every thrown pre-submit encoding path.

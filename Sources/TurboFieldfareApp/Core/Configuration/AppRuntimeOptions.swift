@@ -107,7 +107,7 @@ public struct AppRuntimeOptions: Equatable, Sendable {
     public var resultSummary: String {
         let prefill = prefillEnabled ? "prefill \(prefillChunkTokens)" : "prefill off"
         let verification = modelVerification == .fullSha256 ? "full SHA-256" : "trusted receipt"
-        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), FP16 KV, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
+        return "Cache \(expertCacheSlots) \(expertCachePolicy.label), \(prefill), conversation state varies by model, RDADVISE \(rdadvisePolicy.label.lowercased()), \(verification)"
     }
 
     public static func slotsLabel(for slots: Int) -> String {
@@ -122,6 +122,11 @@ public struct AppRuntimeOptions: Equatable, Sendable {
         case 128: "128, +11.29 GB"
         default: "\(slots)"
         }
+    }
+
+    public static func slotsLabel(for slots: Int, family: AppModelFamily) -> String {
+        family == .gemma4 ? slotsLabel(for: slots)
+            : (slots == 16 ? "16, Default" : "\(slots)")
     }
 
     public func resolvedRuntimeConfiguration(forceLogitsHead: Bool) throws -> RuntimeConfiguration {
@@ -150,8 +155,10 @@ public struct AppLoadedRuntimeKey: Equatable, Sendable {
     public init(modelDirectory: URL,
                 maxContextTokens: Int,
                 options: AppRuntimeOptions,
-                forceLogitsHead: Bool = false) {
-        self.modelDirectory = modelDirectory.standardizedFileURL
+                forceLogitsHead: Bool = false,
+                preservePhysicalPath: Bool = false) {
+        self.modelDirectory = preservePhysicalPath
+            ? modelDirectory : modelDirectory.standardizedFileURL
         self.maxContextTokens = maxContextTokens
         self.expertCacheSlots = options.expertCacheSlots
         self.expertCachePolicy = options.expertCachePolicy

@@ -122,6 +122,51 @@ public struct DecodeModelIdentity: Codable, Sendable, Equatable {
     }
 }
 
+/// Source backing is distinct from the packed model/quantization identity.
+/// This tag identifies the admitted format, not a trust decision by the wire.
+public enum DecodeSourceKind: String, Codable, Sendable, Equatable {
+    case officialSafetensorsBF16V1 = "official-safetensors-bf16-v1"
+}
+
+public struct DecodeSourceIdentity: Codable, Sendable, Equatable {
+    public enum ValidationError: Error, Sendable, Equatable {
+        case invalidContentDigest
+    }
+
+    public let kind: DecodeSourceKind
+    /// SHA-256 of the admitted source descriptor content, not a packed index.
+    public let contentDigest: String
+
+    public init(kind: DecodeSourceKind, contentDigest: String) throws {
+        guard Self.isLowercaseSHA256(contentDigest) else {
+            throw ValidationError.invalidContentDigest
+        }
+        self.kind = kind
+        self.contentDigest = contentDigest
+    }
+
+    private enum CodingKeys: String, CodingKey { case kind, contentDigest }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        let kind = try values.decode(DecodeSourceKind.self, forKey: .kind)
+        let digest = try values.decode(String.self, forKey: .contentDigest)
+        guard Self.isLowercaseSHA256(digest) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .contentDigest, in: values,
+                debugDescription: "source contentDigest must be 64 lowercase SHA-256 hex digits")
+        }
+        self.kind = kind
+        contentDigest = digest
+    }
+
+    private static func isLowercaseSHA256(_ value: String) -> Bool {
+        value.utf8.count == 64 && value.utf8.allSatisfy {
+            ($0 >= 48 && $0 <= 57) || ($0 >= 97 && $0 <= 102)
+        }
+    }
+}
+
 public struct DecodeLoadRequest: Codable, Sendable {
     public var modelPath: String
     public var maxContextTokens: Int
@@ -629,8 +674,10 @@ public struct DecodeServiceEvent: Codable, Sendable {
     public var loadedFamily: DecodeModelFamily?
     /// Service-minted successful-load incarnation.
     public var loadID: UUID?
-    /// Required for admitted Qwen events and absent for Gemma v1.
+    /// Packed Qwen identity; source BF16 events must leave this nil.
     public var modelIdentity: DecodeModelIdentity?
+    /// Source BF16 identity; absent from historical and packed event frames.
+    public var sourceIdentity: DecodeSourceIdentity?
     public var generationID: UUID
     public var sequence: UInt64
     public var textDelta: String
@@ -696,6 +743,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
                 loadedFamily: DecodeModelFamily? = nil,
                 loadID: UUID? = nil,
                 modelIdentity: DecodeModelIdentity? = nil,
+                sourceIdentity: DecodeSourceIdentity? = nil,
                 sequence: UInt64 = 0, textDelta: String = "",
                 tokenCount: Int = 0, promptTokenCount: Int? = nil,
                 computedPrefillTokens: Int? = nil,
@@ -724,6 +772,7 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.loadedFamily = loadedFamily
         self.loadID = loadID
         self.modelIdentity = modelIdentity
+        self.sourceIdentity = sourceIdentity
         self.generationID = generationID
         self.sequence = sequence
         self.textDelta = textDelta
@@ -753,6 +802,26 @@ public struct DecodeServiceEvent: Codable, Sendable {
         self.structuredProgress = structuredProgress
         self.thinkingPreview = thinkingPreview
         self.toolCallPreview = toolCallPreview
+    }
+
+    public enum BackingError: Error, Sendable, Equatable {
+        case contradictoryIdentity
+    }
+
+    /// Checks backing-field consistency only. The receiver must also match
+    /// loadID and conversationEpoch against its current binding and verify
+    /// source admission independently; a wire digest is not an inference ticket.
+    public func validateBackingIdentity() throws {
+        if let modelIdentity {
+            guard sourceIdentity == nil, loadedFamily == modelIdentity.family else {
+                throw BackingError.contradictoryIdentity
+            }
+        }
+        if sourceIdentity != nil {
+            guard modelIdentity == nil, loadedFamily == .qwen3_6 else {
+                throw BackingError.contradictoryIdentity
+            }
+        }
     }
 }
 

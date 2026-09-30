@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 public struct RoutedExpertFetchPlan: Sendable {
     public let layer: Int
@@ -532,6 +533,7 @@ extension Model {
                                                        capture: capture)
         }
         if plan.cachePlan.misses.isEmpty {
+            streamer.recordSuccessfulCachePlan(plan.cachePlan)
             return Self.makeExpertViews(
                 streamer.expertCachePlanBuffers(plan.cachePlan),
                 layer: plan.layer,
@@ -645,5 +647,313 @@ extension Model {
                 shape: (UInt32(layer), UInt32(experts[index]), 0, 0),
                 dtype: GTurboFormatV1.DType.u32.rawValue)
         }
+    }
+}
+
+
+/// One paired, token-admitted BF16 expert. These buffers are never exposed by
+/// a public source API; the coordinator pins both until GPU completion.
+struct QwenBF16MappedExpert: @unchecked Sendable {
+    let expertID: Int
+    let slot: Int
+    let gateUp: MTLBuffer
+    let down: MTLBuffer
+    let gateUpLength: Int
+    let downLength: Int
+}
+
+/// The only production owner of this layer's paired cache. Its I/O worker
+/// serializes one plan+fetch at a time; the state lock protects active GPU
+/// slots without holding a lock across reads, hooks or suspension.
+final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
+    private struct ActiveSlot {
+        var expertID: Int
+        var referenceCount: Int
+    }
+    private struct Reservation {
+        let slots: [Int]
+        var submitted: Bool
+        var canceled: Bool
+    }
+    private struct FetchResult {
+        let identifier: UInt64
+        let plan: ExpertCachePlan
+        let buffers: [QwenBF16PairedExpertCache.Buffers]
+    }
+    private final class CancellationFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        func cancel() { lock.lock(); value = true; lock.unlock() }
+        func isCanceled() -> Bool { lock.lock(); defer { lock.unlock() }; return value }
+    }
+
+    let slotCount: Int
+    let expertCount: Int
+    let allocatedCacheBytes: UInt64
+    private let device: MTLDevice
+    private let cache: QwenBF16PairedExpertCache
+    private let hooks: QwenBF16ExpertReadHooks
+    private let stateLock = NSLock()
+    private let ioLock = NSLock()
+    private var activeSlots: [Int: ActiveSlot] = [:]
+    private var reservations: [UInt64: Reservation] = [:]
+    private var nextIdentifier: UInt64 = 1
+
+    init(source: OfficialSourceHandle, names: QwenBF16RoutedSourceNames,
+         layer: Int, configuration: QwenMoEConfiguration,
+         device: MTLDevice, slotCount: Int, residencyBudget: UInt64,
+         cachePolicy: ExpertCachePolicy = .lru,
+         readHooks: QwenBF16ExpertReadHooks = .none) throws {
+        guard layer >= 0, UInt32(exactly: layer) != nil else {
+            throw QwenExpertMappingError.invalidLayer(layer)
+        }
+        let cache = try QwenBF16PairedExpertCache(
+            source: source, names: names,
+            expertCount: configuration.expertCount,
+            hiddenSize: configuration.hiddenSize,
+            intermediateSize: configuration.routedIntermediateSize,
+            device: device, slotCount: slotCount, residencyBudget: residencyBudget,
+            cachePolicy: cachePolicy)
+        self.cache = cache
+        self.slotCount = slotCount
+        expertCount = configuration.expertCount
+        allocatedCacheBytes = cache.allocatedCacheBytes
+        self.device = device
+        hooks = readHooks
+    }
+
+    func map(expertIDs: [Int]) async throws -> QwenBF16ExpertLease {
+        guard expertIDs.count <= slotCount else {
+            throw QwenExpertMappingError.insufficientUnpinnedSlots
+        }
+        var seen = Set<Int>()
+        for expert in expertIDs {
+            guard expert >= 0, expert < expertCount else {
+                throw QwenExpertMappingError.invalidExpert(expert)
+            }
+            guard seen.insert(expert).inserted else {
+                throw QwenExpertMappingError.duplicateExpertWithinToken(expert)
+            }
+        }
+        let canceled = CancellationFlag()
+        return try await withTaskCancellationHandler {
+            let outcome: Result<FetchResult, Error> = await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async { [self] in
+                    continuation.resume(returning: Result {
+                        try performFetch(expertIDs: expertIDs, canceled: canceled)
+                    })
+                }
+            }
+            let result = try outcome.get()
+            if canceled.isCanceled() || Task.isCancelled {
+                releaseUnsubmitted(identifier: result.identifier)
+                throw CancellationError()
+            }
+            let mapped = zip(result.plan.experts.indices, result.buffers).map { index, pair in
+                QwenBF16MappedExpert(
+                    expertID: result.plan.experts[index],
+                    slot: result.plan.assignedSlots[index],
+                    gateUp: pair.gateUp, down: pair.down,
+                    gateUpLength: cache.gateUpBytes,
+                    downLength: cache.downBytes)
+            }
+            return QwenBF16ExpertLease(
+                coordinator: self, identifier: result.identifier,
+                experts: mapped,
+                diagnostics: QwenExpertMappingDiagnostics(
+                    requestedExpertIDs: result.plan.experts,
+                    assignedSlots: result.plan.assignedSlots,
+                    hits: result.plan.hits, misses: result.plan.misses.count))
+        } onCancel: {
+            canceled.cancel()
+        }
+    }
+
+    private func performFetch(expertIDs: [Int], canceled: CancellationFlag) throws -> FetchResult {
+        ioLock.lock()
+        defer { ioLock.unlock() }
+        if canceled.isCanceled() { throw CancellationError() }
+        let reserved: (UInt64, ExpertCachePlan) = try withStateLock {
+            guard let plan = cache.plan(
+                expertIDs: expertIDs, avoidingSlots: Set(activeSlots.keys)) else {
+                throw QwenExpertMappingError.insufficientUnpinnedSlots
+            }
+            for index in plan.experts.indices {
+                let slot = plan.assignedSlots[index]
+                if let active = activeSlots[slot], active.expertID != plan.experts[index] {
+                    throw QwenExpertMappingError.insufficientUnpinnedSlots
+                }
+            }
+            let identifier = allocateIdentifierLocked()
+            for index in plan.experts.indices {
+                let slot = plan.assignedSlots[index]
+                if var active = activeSlots[slot] {
+                    active.referenceCount += 1
+                    activeSlots[slot] = active
+                } else {
+                    activeSlots[slot] = ActiveSlot(
+                        expertID: plan.experts[index], referenceCount: 1)
+                }
+            }
+            reservations[identifier] = Reservation(
+                slots: plan.assignedSlots, submitted: false, canceled: false)
+            return (identifier, plan)
+        }
+        do {
+            let buffers = try cache.load(reserved.1, hooks: hooks,
+                                         canceled: { canceled.isCanceled() })
+            return FetchResult(identifier: reserved.0, plan: reserved.1, buffers: buffers)
+        } catch {
+            releaseUnsubmitted(identifier: reserved.0)
+            throw error
+        }
+    }
+
+    fileprivate func trackLastUse(identifier: UInt64, on command: MTLCommandBuffer) throws {
+        try withStateLock {
+            guard command.status == .notEnqueued, command.device === device else {
+                throw QwenExpertMappingError.commandBufferAlreadySubmitted
+            }
+            guard var reservation = reservations[identifier] else {
+                throw QwenExpertMappingError.unknownLease
+            }
+            guard !reservation.canceled else { throw QwenExpertMappingError.canceled }
+            guard !reservation.submitted else { throw QwenExpertMappingError.leaseAlreadySubmitted }
+            reservation.submitted = true
+            reservations[identifier] = reservation
+        }
+    }
+
+    fileprivate func cancel(identifier: UInt64) throws -> Bool {
+        try withStateLock {
+            guard var reservation = reservations[identifier] else {
+                throw QwenExpertMappingError.unknownLease
+            }
+            if reservation.submitted {
+                reservation.canceled = true
+                reservations[identifier] = reservation
+                return false
+            }
+            releaseLocked(identifier: identifier)
+            return true
+        }
+    }
+
+    fileprivate func complete(identifier: UInt64) -> Bool {
+        withStateLock {
+            guard let reservation = reservations[identifier] else { return true }
+            let discarded = reservation.canceled
+            releaseLocked(identifier: identifier)
+            return discarded
+        }
+    }
+
+    fileprivate func isUsable(identifier: UInt64) -> Bool {
+        withStateLock { reservations[identifier]?.canceled == false }
+    }
+
+    fileprivate func releaseUnsubmitted(identifier: UInt64) {
+        withStateLock {
+            guard let reservation = reservations[identifier], !reservation.submitted else { return }
+            releaseLocked(identifier: identifier)
+        }
+    }
+
+    private func releaseLocked(identifier: UInt64) {
+        guard let reservation = reservations.removeValue(forKey: identifier) else { return }
+        for slot in reservation.slots {
+            guard var active = activeSlots[slot] else { continue }
+            active.referenceCount -= 1
+            if active.referenceCount == 0 { activeSlots[slot] = nil }
+            else { activeSlots[slot] = active }
+        }
+    }
+
+    private func allocateIdentifierLocked() -> UInt64 {
+        let identifier = nextIdentifier
+        nextIdentifier &+= 1
+        if nextIdentifier == 0 { nextIdentifier = 1 }
+        return identifier
+    }
+
+    private func withStateLock<T>(_ body: () throws -> T) rethrows -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return try body()
+    }
+}
+
+/// Single-use GPU lease. A submitted use retains BOTH slot buffers through
+/// actual completion; cancellation never hands a GPU-live slot to another map.
+final class QwenBF16ExpertLease: @unchecked Sendable {
+    let experts: [QwenBF16MappedExpert]
+    let diagnostics: QwenExpertMappingDiagnostics
+    private let coordinator: QwenBF16ExpertMappingCoordinator
+    private let identifier: UInt64
+    private let lock = NSLock()
+    private var submitted = false
+    private var canceled = false
+    private var completed = false
+    private var succeeded: Bool?
+
+    fileprivate init(coordinator: QwenBF16ExpertMappingCoordinator,
+                     identifier: UInt64, experts: [QwenBF16MappedExpert],
+                     diagnostics: QwenExpertMappingDiagnostics) {
+        self.coordinator = coordinator
+        self.identifier = identifier
+        self.experts = experts
+        self.diagnostics = diagnostics
+    }
+
+    deinit { coordinator.releaseUnsubmitted(identifier: identifier) }
+
+    func requireUsable() throws {
+        guard coordinator.isUsable(identifier: identifier) else {
+            throw QwenExpertMappingError.canceled
+        }
+    }
+
+    @discardableResult
+    func submit(on queue: MTLCommandQueue,
+                encode: (MTLCommandBuffer) throws -> Void) throws -> MTLCommandBuffer {
+        guard let command = queue.makeCommandBuffer() else {
+            throw QwenExpertMappingError.commandBufferUnavailable
+        }
+        try coordinator.trackLastUse(identifier: identifier, on: command)
+        lock.lock(); submitted = true; lock.unlock()
+        command.addCompletedHandler { [self] completedCommand in
+            let discarded = coordinator.complete(identifier: identifier)
+            lock.lock()
+            canceled = canceled || discarded
+            completed = true
+            succeeded = !canceled && completedCommand.status == .completed
+                && completedCommand.error == nil
+            lock.unlock()
+        }
+        do {
+            try encode(command)
+            command.commit()
+            return command
+        } catch {
+            try? cancel()
+            // Even partially encoded work owns both pins until completion.
+            if command.status == .notEnqueued { command.commit() }
+            throw error
+        }
+    }
+
+    func cancel() throws {
+        let released = try coordinator.cancel(identifier: identifier)
+        lock.lock()
+        canceled = true
+        if released { completed = true; succeeded = false }
+        lock.unlock()
+    }
+
+    func snapshot() -> QwenExpertLeaseSnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return QwenExpertLeaseSnapshot(
+            submitted: submitted, canceled: canceled,
+            completed: completed, succeeded: succeeded)
     }
 }

@@ -2,6 +2,7 @@ import Darwin
 import Foundation
 import Metal
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 enum QwenVisionWeightGroup: Hashable, Sendable, CustomStringConvertible {
     case patchAndPosition
@@ -37,18 +38,21 @@ struct QwenVisionWeightStoreDiagnostics: Equatable, Sendable {
 
 final class QwenVisionMappedGroupLease: @unchecked Sendable {
     let group: QwenVisionWeightGroup
-    let resident: ResidentBuffer
+    private let resident: ResidentBuffer?
+    let buffer: MTLBuffer
     let offsets: [String: Int]
     let diagnostic: QwenVisionMappedGroupDiagnostic
 
     init(
         group: QwenVisionWeightGroup,
-        resident: ResidentBuffer,
+        resident: ResidentBuffer? = nil,
+        buffer: MTLBuffer,
         offsets: [String: Int],
         diagnostic: QwenVisionMappedGroupDiagnostic
     ) {
         self.group = group
         self.resident = resident
+        self.buffer = buffer
         self.offsets = offsets
         self.diagnostic = diagnostic
     }
@@ -326,7 +330,7 @@ final class QwenVisionWeightStore {
             ($0.name, Int($0.offset - start))
         })
         return QwenVisionMappedGroupLease(
-            group: group, resident: resident,
+            group: group, resident: resident, buffer: resident.buffer,
             offsets: offsets, diagnostic: diagnostic)
     }
 
@@ -390,5 +394,280 @@ final class QwenVisionWeightStore {
             }
             return result
         }
+    }
+}
+
+/// A source companion has exactly one metadata file; its BF16 bytes are read
+/// only from the already retained protected source handle, one requested group
+/// at a time. No vision payload is written alongside the text registration.
+/// Immutable admission and retained read-only descriptors. Calls allocate
+/// independent group buffers; revalidation uses fresh directory cursors and
+/// positional reads, so an actor-to-actor commit check can share this owner.
+final class QwenOfficialSourceVisionWeightStore: @unchecked Sendable {
+    let descriptor: OfficialSourceVisionDescriptor
+    let config: QwenVisionConfig
+    private let model: QwenOfficialSourceModel
+    private let groups: [QwenVisionWeightGroup: [OfficialSourceVisionDescriptor.Tensor]]
+    private let directory: GTurboModelDirectory
+    private let directoryFD: Int32
+    private let manifestFD: Int32
+    private let directoryIdentity: VisionFileIdentity
+    private let manifestIdentity: VisionFileIdentity
+    private let manifestBytes: Data
+
+    private struct VisionFileIdentity: Equatable {
+        let device: dev_t
+        let inode: ino_t
+        let mode: mode_t
+        let links: nlink_t
+        let size: off_t
+        let mtime: timespec
+        let ctime: timespec
+
+        init(_ info: stat) {
+            device = info.st_dev
+            inode = info.st_ino
+            mode = info.st_mode
+            links = info.st_nlink
+            size = info.st_size
+            mtime = info.st_mtimespec
+            ctime = info.st_ctimespec
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.device == rhs.device && lhs.inode == rhs.inode
+                && lhs.mode == rhs.mode && lhs.links == rhs.links
+                && lhs.size == rhs.size
+                && lhs.mtime.tv_sec == rhs.mtime.tv_sec
+                && lhs.mtime.tv_nsec == rhs.mtime.tv_nsec
+                && lhs.ctime.tv_sec == rhs.ctime.tv_sec
+                && lhs.ctime.tv_nsec == rhs.ctime.tv_nsec
+        }
+    }
+
+    static func open(directoryURL: URL, model: QwenOfficialSourceModel,
+                     config: QwenVisionConfig = .official) throws -> Self {
+        try config.validate()
+        guard config.matchesOfficialWeightLayout ||
+                (model.sourceIdentity == nil && config.allowsFixtureGeometry) else {
+            throw VisionPackError.invalidMetadata("unsupported source vision geometry")
+        }
+        let directory: GTurboModelDirectory
+        do { directory = try GTurboModelDirectory(rootURL: directoryURL) }
+        catch { throw VisionPackError.packNotFound(directoryURL.path) }
+        guard try directory.basenames() == Set([OfficialSourceVisionDescriptor.filename]) else {
+            throw VisionPackError.invalidMetadata("source companion must contain metadata only")
+        }
+        let bytes = try directory.readMetadata(
+            OfficialSourceVisionDescriptor.filename,
+            maxBytes: UInt64(OfficialSourceVisionDescriptor.maximumBytes))
+        let descriptor = try OfficialSourceVisionDescriptor.decodeStrict(bytes)
+        try model.revalidateSource()
+        guard descriptor.textContentSHA256 == model.sourceContentSHA256,
+              descriptor.processorConfigSHA256 == (try model.visionProcessorSHA256()),
+              descriptor.processorProfile == GTurboQwenVisionProcessorProfileV2(
+                  processorClass: "Qwen3VLProcessor",
+                  imageProcessorType: "Qwen2VLImageProcessorFast",
+                  patchSize: config.patchSize,
+                  temporalPatchSize: config.temporalPatchSize,
+                  spatialMergeSize: config.spatialMergeSize) else {
+            throw VisionPackError.incompatibleTextArtifact
+        }
+        let contract = config.tensorContract.sorted { $0.name < $1.name }
+        guard descriptor.tensors.count == contract.count,
+              zip(descriptor.tensors, contract).allSatisfy({ tensor, expected in
+                  tensor.name == expected.name && tensor.shape == expected.shape
+                    && expected.storage == .bf16 && model.hasSourceTensor(tensor.name)
+              }) else {
+            throw VisionPackError.invalidMetadata("source vision tensor inventory mismatch")
+        }
+        var groups: [QwenVisionWeightGroup: [OfficialSourceVisionDescriptor.Tensor]] = [:]
+        for tensor in descriptor.tensors {
+            let name = tensor.name
+            let group: QwenVisionWeightGroup
+            if name.hasPrefix("model.visual.patch_embed.") || name == "model.visual.pos_embed.weight" {
+                group = .patchAndPosition
+            } else if name.hasPrefix("model.visual.merger.") {
+                group = .merger
+            } else {
+                let prefix = "model.visual.blocks."
+                guard name.hasPrefix(prefix),
+                      let number = name.dropFirst(prefix.count).split(separator: ".").first,
+                      let index = Int(number), (0..<config.depth).contains(index) else {
+                    throw VisionPackError.invalidMetadata("unclassified source vision tensor")
+                }
+                group = .block(index)
+            }
+            groups[group, default: []].append(tensor)
+        }
+        guard groups.count == config.depth + 2 else {
+            throw VisionPackError.invalidMetadata("incomplete source vision groups")
+        }
+        let directoryFD = Darwin.open(directoryURL.standardizedFileURL.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard directoryFD >= 0 else {
+            throw VisionPackError.invalidMetadata("source companion directory unavailable")
+        }
+        let manifestFD = openat(directoryFD, OfficialSourceVisionDescriptor.filename,
+                                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard manifestFD >= 0 else {
+            close(directoryFD)
+            throw VisionPackError.invalidMetadata("source companion manifest unavailable")
+        }
+        var directoryInfo = stat(), manifestInfo = stat()
+        guard fstat(directoryFD, &directoryInfo) == 0,
+              fstat(manifestFD, &manifestInfo) == 0,
+              (directoryInfo.st_mode & S_IFMT) == S_IFDIR,
+              (manifestInfo.st_mode & S_IFMT) == S_IFREG,
+              manifestInfo.st_nlink == 1,
+              manifestInfo.st_size >= 0,
+              manifestInfo.st_size <= OfficialSourceVisionDescriptor.maximumBytes else {
+            close(manifestFD)
+            close(directoryFD)
+            throw VisionPackError.invalidMetadata("source companion identity invalid")
+        }
+        let store = Self(descriptor: descriptor, config: config, model: model,
+                         groups: groups, directory: directory,
+                         directoryFD: directoryFD, manifestFD: manifestFD,
+                         directoryIdentity: VisionFileIdentity(directoryInfo),
+                         manifestIdentity: VisionFileIdentity(manifestInfo), manifestBytes: bytes)
+        try store.revalidate()
+        return store
+    }
+
+    private init(descriptor: OfficialSourceVisionDescriptor, config: QwenVisionConfig,
+                 model: QwenOfficialSourceModel,
+                 groups: [QwenVisionWeightGroup: [OfficialSourceVisionDescriptor.Tensor]],
+                 directory: GTurboModelDirectory, directoryFD: Int32, manifestFD: Int32,
+                 directoryIdentity: VisionFileIdentity,
+                 manifestIdentity: VisionFileIdentity, manifestBytes: Data) {
+        self.descriptor = descriptor
+        self.config = config
+        self.model = model
+        self.groups = groups
+        self.directory = directory
+        self.directoryFD = directoryFD
+        self.manifestFD = manifestFD
+        self.directoryIdentity = directoryIdentity
+        self.manifestIdentity = manifestIdentity
+        self.manifestBytes = manifestBytes
+    }
+
+    deinit { close(manifestFD); close(directoryFD) }
+
+    /// Check both the retained FD and current literal named entries. The
+    /// metadata cap makes the byte comparison bounded and prevents a same-size
+    /// in-place rewrite from keeping an old companion admitted.
+    func revalidate() throws {
+        try model.revalidateSource()
+        var heldDirectory = stat(), heldManifest = stat()
+        guard fstat(directoryFD, &heldDirectory) == 0,
+              fstat(manifestFD, &heldManifest) == 0,
+              VisionFileIdentity(heldDirectory) == directoryIdentity,
+              VisionFileIdentity(heldManifest) == manifestIdentity else {
+            throw VisionPackError.invalidMetadata("source companion changed")
+        }
+        let currentDirectory = Darwin.open(directory.rootURL.path,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard currentDirectory >= 0 else {
+            throw VisionPackError.invalidMetadata("source companion directory replaced")
+        }
+        defer { close(currentDirectory) }
+        var namedDirectory = stat()
+        guard fstat(currentDirectory, &namedDirectory) == 0,
+              VisionFileIdentity(namedDirectory) == directoryIdentity,
+              try GTurboModelDirectory(rootURL: directory.rootURL).basenames()
+                  == Set([OfficialSourceVisionDescriptor.filename]) else {
+            throw VisionPackError.invalidMetadata("source companion directory changed")
+        }
+        let currentManifest = openat(currentDirectory, OfficialSourceVisionDescriptor.filename,
+                                     O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+        guard currentManifest >= 0 else {
+            throw VisionPackError.invalidMetadata("source companion manifest replaced")
+        }
+        defer { close(currentManifest) }
+        var namedManifest = stat()
+        guard fstat(currentManifest, &namedManifest) == 0,
+              VisionFileIdentity(namedManifest) == manifestIdentity,
+              manifestBytes.count == Int(manifestIdentity.size) else {
+            throw VisionPackError.invalidMetadata("source companion manifest changed")
+        }
+        let current = try directory.readMetadata(
+            fileDescriptor: currentManifest, relativePath: OfficialSourceVisionDescriptor.filename,
+            maxBytes: UInt64(OfficialSourceVisionDescriptor.maximumBytes))
+        guard current == manifestBytes,
+              fstat(manifestFD, &heldManifest) == 0,
+              VisionFileIdentity(heldManifest) == manifestIdentity,
+              fstat(currentDirectory, &namedDirectory) == 0,
+              VisionFileIdentity(namedDirectory) == directoryIdentity else {
+            throw VisionPackError.invalidMetadata("source companion metadata changed")
+        }
+        try model.revalidateSource()
+    }
+
+    /// O(group BF16 bytes), with a single shared Metal allocation and at most
+    /// one 8 MiB protected read tile. The returned lease owns the buffer until
+    /// the caller has observed command completion, including cancellation.
+    func mapGroup(_ group: QwenVisionWeightGroup, device: MTLDevice)
+        throws -> QwenVisionMappedGroupLease {
+        guard device === model.context.device, let tensors = groups[group], !tensors.isEmpty else {
+            throw VisionPackError.invalidMetadata("source group/device unavailable: \(group)")
+        }
+        try revalidate()
+        let alignment = 256
+        var offsets: [String: Int] = [:]
+        var count = 0
+        for tensor in tensors {
+            guard count <= Int.max - (alignment - 1) else {
+                throw VisionPackError.invalidMetadata("vision group offset overflow")
+            }
+            count = (count + alignment - 1) & ~(alignment - 1)
+            let elements = tensor.shape.reduce(UInt64(1)) { partial, dimension in
+                let (next, overflow) = partial.multipliedReportingOverflow(by: dimension)
+                return overflow ? UInt64.max : next
+            }
+            guard elements <= UInt64((Int.max - count) / 2) else {
+                throw VisionPackError.invalidMetadata("vision group size overflow")
+            }
+            offsets[tensor.name] = count
+            count += Int(elements) * 2
+        }
+        let maximum = min(UInt64(device.maxBufferLength), 200 * 1024 * 1024)
+        guard count > 0, UInt64(count) <= maximum else {
+            throw VisionPackError.regionExceedsDevice(
+                name: group.description, bytes: UInt64(count), maximum: maximum)
+        }
+        guard let buffer = device.makeBuffer(length: count, options: .storageModeShared) else {
+            throw VisionPackError.invalidMetadata("source vision group allocation failed")
+        }
+        buffer.label = "qwen.source.vision.\(group)"
+        // On a failed read the partially filled buffer is discarded, never
+        // submitted to Metal. Each token is admitted from the retained header.
+        for tensor in tensors {
+            try Task.checkCancellation()
+            let token = try model.admitVisionTensor(tensor.name)
+            let expected = tensor.shape.reduce(UInt64(1), *) * 2
+            guard token.shape == tensor.shape, token.admittedByteCount == expected,
+                  let offset = offsets[tensor.name] else {
+                throw VisionPackError.invalidMetadata("source vision header mismatch: \(tensor.name)")
+            }
+            var position: UInt64 = 0
+            while position < expected {
+                let length = min(expected - position, OfficialSourceHandle.maximumTensorReadBytes)
+                let start = offset + Int(position)
+                try model.source.preadTensorRange(
+                    token, byteOffset: position, byteCount: length,
+                    expectedByteCount: length,
+                    into: UnsafeMutableRawBufferPointer(
+                        start: buffer.contents().advanced(by: start), count: Int(length)))
+                position += length
+            }
+        }
+        try revalidate()
+        return QwenVisionMappedGroupLease(
+            group: group, buffer: buffer, offsets: offsets,
+            diagnostic: QwenVisionMappedGroupDiagnostic(
+                group: group, residentBytes: UInt64(count),
+                pageAlignedMappedBytes: UInt64(count)))
     }
 }

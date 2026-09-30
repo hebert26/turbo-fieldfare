@@ -62,7 +62,7 @@ import TurboFieldfareDecodeProtocol
         #expect(!vision.supportsVideo)
     }
 
-    @Test func admittedTinyQwenBundleInstallsCodecAndIdentity() async throws {
+    @Test func tinyFixtureCannotClaimUnrelatedPackedIdentityAndRetainsLifecycle() async throws {
         let fileManager = FileManager.default
         let root = fileManager.temporaryDirectory
             .appendingPathComponent("p17-qwen-bundle-\(UUID().uuidString)", isDirectory: true)
@@ -100,23 +100,25 @@ import TurboFieldfareDecodeProtocol
             runtime: .qwen(model), family: .qwen3_6,
             verifiedIdentity: LoadedRuntimeIdentity(descriptor: admitted.descriptor),
             qwenCodec: codec)
-        let session = RealInferenceSession()
+        let claimedSession = RealInferenceSession()
         let key = SessionLoadKey(
             directory: root, maxContext: 128,
             options: AppRuntimeOptions(), forceLogitsHead: false)
+        // The tiny fixture's mapping digest is not this synthetic manifest's
+        // digest. It cannot become a verified packed runtime by assertion.
+        await #expect(throws: ModelFamilyGenerationError.modelIdentityChanged) {
+            try await claimedSession.installLoadedFamily(
+                bundle, key: key, context: context)
+        }
+        let fixtureRuntime = ModelFamilyRuntime.qwen(model)
+        let session = RealInferenceSession()
         let states = Mutex<[AppModelLoadState]>([])
         try await session.installLoadedFamily(
-            bundle, key: key, context: context) { state in
+            fixtureRuntime, key: key, context: context) { state in
                 states.withLock { $0.append(state) }
             }
 
-        let expectedIdentity = DecodeModelIdentity(
-            runtimeIdentity: LoadedRuntimeIdentity(descriptor: admitted.descriptor))
-        guard case let .qwen(identity) = await session.loadedModelReadiness else {
-            Issue.record("installed Qwen bundle did not expose Qwen readiness")
-            return
-        }
-        #expect(identity == expectedIdentity)
+        #expect(await session.loadedModelReadiness == nil)
         #expect(states.withLock { states in
             states.contains { state in
                 if case .loading(.preparingRunner) = state { return true }
@@ -144,7 +146,7 @@ import TurboFieldfareDecodeProtocol
                 }))
         let install = Task {
             try await lifecycleSession.installLoadedFamily(
-                bundle, key: key, context: context) { state in
+                fixtureRuntime, key: key, context: context) { state in
                     lifecycleStates.withLock { $0.append(state) }
                 }
         }
@@ -153,7 +155,7 @@ import TurboFieldfareDecodeProtocol
         #expect(retiredOwnedCount == 0)
         await #expect(throws: RealInferenceLifecycleError.lifecycleInProgress) {
             try await lifecycleSession.installLoadedFamily(
-                bundle, key: key, context: context)
+                fixtureRuntime, key: key, context: context)
         }
         releaseRetirement.signal()
         await preparationEntered.wait()
@@ -161,7 +163,7 @@ import TurboFieldfareDecodeProtocol
         #expect(preparedOwnedCount == 1)
         await #expect(throws: RealInferenceLifecycleError.lifecycleInProgress) {
             try await lifecycleSession.installLoadedFamily(
-                bundle, key: key, context: context)
+                fixtureRuntime, key: key, context: context)
         }
 
         let firstUnload = Task { await lifecycleSession.unload() }

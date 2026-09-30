@@ -5,6 +5,7 @@ import TurboFieldfareDecodeProtocol
 public enum AppLoadedModelReadiness: Sendable, Equatable {
     case gemma(toolThinkingEnabled: Bool)
     case qwen(identity: DecodeModelIdentity)
+    case qwenSource(identity: DecodeSourceIdentity)
 }
 
 extension DecodeModelIdentity {

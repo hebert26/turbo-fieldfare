@@ -44,12 +44,41 @@ public enum ModelFamilyGenerationEvent: Sendable, Equatable {
     case toolCall(ParsedToolCall)
 }
 
+/// Routed-expert cache observations for the lifetime of one loaded model or
+/// source runner. Hits and misses count expert requests in successfully mapped
+/// plans, even if later inference fails or is cancelled. Failed mappings and
+/// planning alone do not count. Bytes exclude attention and activation buffers.
+public struct RoutedExpertCacheSummary: Sendable, Equatable {
+    public let configuredSlots: Int
+    public let effectiveSlots: Int
+    public let policy: String
+    /// Cache bytes still owned when this snapshot was taken.
+    public let allocatedBytes: UInt64
+    /// Largest simultaneous cache allocation observed during this lifetime.
+    public let peakAllocatedBytes: UInt64
+    public let hits: UInt64
+    public let misses: UInt64
+
+    public init(configuredSlots: Int, effectiveSlots: Int, policy: String,
+                allocatedBytes: UInt64, peakAllocatedBytes: UInt64,
+                hits: UInt64, misses: UInt64) {
+        self.configuredSlots = configuredSlots
+        self.effectiveSlots = effectiveSlots
+        self.policy = policy
+        self.allocatedBytes = allocatedBytes
+        self.peakAllocatedBytes = peakAllocatedBytes
+        self.hits = hits
+        self.misses = misses
+    }
+}
+
 public struct ModelFamilyGenerationResult: Sendable, Equatable {
     public let reason: StopReason
     public let promptTokens: Int
     public let newTokens: Int
     public let prefillSeconds: Double
     public let decodeSeconds: Double
+    public let cacheSummary: RoutedExpertCacheSummary?
 
     public init(
         reason: StopReason,
@@ -58,11 +87,26 @@ public struct ModelFamilyGenerationResult: Sendable, Equatable {
         prefillSeconds: Double,
         decodeSeconds: Double
     ) {
+        self.init(
+            reason: reason, promptTokens: promptTokens, newTokens: newTokens,
+            prefillSeconds: prefillSeconds, decodeSeconds: decodeSeconds,
+            cacheSummary: nil)
+    }
+
+    public init(
+        reason: StopReason,
+        promptTokens: Int,
+        newTokens: Int,
+        prefillSeconds: Double,
+        decodeSeconds: Double,
+        cacheSummary: RoutedExpertCacheSummary?
+    ) {
         self.reason = reason
         self.promptTokens = promptTokens
         self.newTokens = newTokens
         self.prefillSeconds = prefillSeconds
         self.decodeSeconds = decodeSeconds
+        self.cacheSummary = cacheSummary
     }
 }
 
@@ -76,6 +120,7 @@ public enum ModelFamilyGenerationError: Error, Equatable, CustomStringConvertibl
     case busy
     case modelIdentityChanged
     case verifiedVisionUnavailable
+    case sourceVisionUnavailable
     case incompatibleVisionPack
 
     public var description: String {
@@ -92,6 +137,8 @@ public enum ModelFamilyGenerationError: Error, Equatable, CustomStringConvertibl
             "model identity changed after the generation session loaded"
         case .verifiedVisionUnavailable:
             "this verified model installation does not support still images"
+        case .sourceVisionUnavailable:
+            "image support is unavailable: original BF16 source has no valid vision companion"
         case .incompatibleVisionPack:
             "the vision companion does not match the verified text model"
         }
@@ -139,6 +186,7 @@ struct VerifiedQwenVisionCompanion {
 public actor ModelFamilyGenerationSession {
     public nonisolated let family: LoadedRuntimeFamily
     public nonisolated let verifiedIdentity: LoadedRuntimeIdentity?
+    public nonisolated let sourceIdentity: LoadedRuntimeSourceIdentity?
 
     private let bundle: LoadedModelFamilyBundle
     private let context: MetalContext
@@ -164,6 +212,10 @@ public actor ModelFamilyGenerationSession {
                 family: .qwen3_6,
                 verifiedIdentity: LoadedRuntimeIdentity(
                     descriptor: manifest.descriptor))
+        case .qwenOfficialSource:
+            // Classification is metadata-only, never an inference ticket.
+            return ModelFamilyGenerationAdmission(
+                family: .qwen3_6, verifiedIdentity: nil)
         }
     }
 
@@ -348,7 +400,8 @@ public actor ModelFamilyGenerationSession {
         directoryURL: URL,
         maxContext: Int,
         runtimeConfiguration: RuntimeConfiguration = .production,
-        visionPackURL: URL? = nil
+        visionPackURL: URL? = nil,
+        integrityPolicy: ModelIntegrityPolicy = .fullSha256
     ) throws -> ModelFamilyGenerationSession {
         let context = try MetalContext()
         let bundle = try ModelFamilyRuntime.loadBundle(
@@ -356,16 +409,130 @@ public actor ModelFamilyGenerationSession {
             device: context.device,
             streamingMode: .pread(slotCount: runtimeConfiguration.expertCacheSlots),
             expertCachePolicy: runtimeConfiguration.modelExpertCachePolicy,
-            integrityPolicy: .fullSha256)
+            integrityPolicy: integrityPolicy)
         return ModelFamilyGenerationSession(
             bundle: bundle,
-            context: context,
+            context: contextForLoadedRuntime(bundle.runtime, proposedContext: context),
             modelDirectoryURL: directoryURL,
             maxContext: maxContext,
             runtimeConfiguration: runtimeConfiguration,
             visionPackURL: visionPackURL,
             fixturePromptTokenIDs: nil,
             fixtureAfterBusyAcquired: nil)
+    }
+
+    /// Size a CLI request only after the original BF16 source and pinned codec
+    /// have passed the selected source integrity gate in `load`. This does not
+    /// create a second source model or an inference identity from metadata.
+    public func preflightLoadedSource(
+        prompt: ModelFamilyGenerationPrompt,
+        imagesByID: [String: URL],
+        visionResidency: VisionResidencyPolicy
+    ) throws -> ModelFamilyGenerationPreflight {
+        guard case .qwenOfficialSource(let model) = bundle.runtime,
+              let identity = model.sourceIdentity,
+              bundle.sourceIdentity == identity,
+              let codec = bundle.qwenCodec else {
+            throw ModelFamilyGenerationError.modelIdentityChanged
+        }
+        try model.revalidateSource()
+        let tokens: [Int32]
+        let imageIDs: [String]
+        switch prompt {
+        case .raw(let text):
+            guard imagesByID.isEmpty else {
+                throw ModelFamilyGenerationError.unsupportedInput(
+                    "raw completion does not accept images")
+            }
+            tokens = codec.tokenizer.encode(text)
+            imageIDs = []
+        case .chat(let messages, let tools, let thinking):
+            tokens = try codec.encodePrompt(messages: messages, tools: tools,
+                options: .init(enableThinking: thinking != .disabled))
+            imageIDs = try orderedImageIDs(in: messages)
+        }
+        guard !tokens.isEmpty else { throw ModelFamilyGenerationError.emptyPrompt }
+        if let missing = imageIDs.first(where: { imagesByID[$0] == nil }) {
+            throw ModelFamilyGenerationError.missingImage(missing)
+        }
+        if let extra = imagesByID.keys.sorted().first(where: { !imageIDs.contains($0) }) {
+            throw ModelFamilyGenerationError.unexpectedImage(extra)
+        }
+        var count = tokens.count
+        if !imageIDs.isEmpty {
+            guard visionResidency == .onDemand else {
+                throw ModelFamilyGenerationError.unsupportedInput(
+                    "source vision supports --vision-residency on-demand only")
+            }
+            let companion = try visionPackURL
+                ?? VisionPackLocation.companionURL(forTextModel: modelDirectoryURL)
+            do {
+                _ = try QwenOfficialSourceVisionWeightStore.open(
+                    directoryURL: companion, model: model)
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw ModelFamilyGenerationError.sourceVisionUnavailable
+            }
+            try VisionRuntime.requireSupportedDevice(context.device)
+            let preprocessor = QwenImagePreprocessor(device: context.device)
+            let plans = try imageIDs.map { try preprocessor.plan(fileURL: imagesByID[$0]!) }
+            try QwenImagePreprocessor.preflight(plans.map(\.geometry))
+            let normalized = try normalizeQwenCodecImageFrames(
+                tokens, architecture: model.visionArchitecture)
+            count = try qwenExpandedPromptTokenCount(
+                normalizedTokenIDs: normalized,
+                imageMergedRows: plans.map(\.geometry.mergedRows),
+                imageTokenID: Int32(model.visionArchitecture.imageTokenID))
+        }
+        try model.revalidateSource()
+        guard count < maxContext else {
+            throw ModelFamilyGenerationError.contextOverflow(
+                prompt: count, maxNew: 0, maximum: maxContext)
+        }
+        return .init(promptTokens: count, imageCount: imageIDs.count)
+    }
+
+    /// Inspect an adjacent source vision companion against the retained source
+    /// model. No marker-only metadata can advertise image readiness.
+    public func inspectLoadedSourceVisionCompanion() throws
+        -> ModelFamilyVisionCompanionStatus {
+        guard case .qwenOfficialSource(let model) = bundle.runtime,
+              let identity = model.sourceIdentity,
+              bundle.sourceIdentity == identity else {
+            throw ModelFamilyGenerationError.modelIdentityChanged
+        }
+        try model.revalidateSource()
+        let companion = try visionPackURL
+            ?? VisionPackLocation.companionURL(forTextModel: modelDirectoryURL)
+        guard FileManager.default.fileExists(atPath: companion.path) else {
+            try model.revalidateSource()
+            return .missing
+        }
+        let status: ModelFamilyVisionCompanionStatus
+        do {
+            _ = try QwenOfficialSourceVisionWeightStore.open(
+                directoryURL: companion, model: model)
+            status = VisionRuntime.isSupportedOnDefaultDevice ? .ready : .unsupported
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            status = .invalid
+        }
+        try model.revalidateSource()
+        return status
+    }
+
+    /// The source bundle owns the context that staged its resident buffers.
+    /// Packed/Gemma retain the context originally passed to loadBundle. This
+    /// internal selector grants no source identity, codec, or runtime admission.
+    package nonisolated static func contextForLoadedRuntime(
+        _ runtime: ModelFamilyRuntime, proposedContext: MetalContext
+    ) -> MetalContext {
+        if case .qwenOfficialSource(let model) = runtime {
+            return model.context
+        }
+        return proposedContext
     }
 
     /// Internal production-path fixture seam. Tests supply the existing tiny
@@ -390,11 +557,55 @@ public actor ModelFamilyGenerationSession {
         self.fixtureAfterBusyAcquired = fixtureAfterBusyAcquired
         family = bundle.family
         verifiedIdentity = bundle.verifiedIdentity
+        sourceIdentity = bundle.sourceIdentity
+    }
+
+    /// Build a conversation from the already admitted service bundle. This
+    /// never loads a second model and never converts nil-trust fixtures into
+    /// public readiness. The source model's owning Metal context is retained.
+    package static func makeSourceConversationSession(
+        admittedBundle: LoadedModelFamilyBundle,
+        proposedContext: MetalContext,
+        directoryURL: URL,
+        maxContext: Int,
+        runtimeConfiguration: RuntimeConfiguration
+    ) async throws -> QwenOfficialSourceConversationGenerationSession {
+        guard admittedBundle.sourceIdentity != nil else {
+            throw ModelFamilyGenerationError.modelIdentityChanged
+        }
+        let family = ModelFamilyGenerationSession(
+            bundle: admittedBundle,
+            context: contextForLoadedRuntime(
+                admittedBundle.runtime, proposedContext: proposedContext),
+            modelDirectoryURL: directoryURL,
+            maxContext: maxContext,
+            runtimeConfiguration: runtimeConfiguration)
+        return try await family.makeSourceConversationSession()
+    }
+
+    /// Production-only original-BF16 conversation. A synthetic source has no
+    /// trust identity and cannot mint this public generation entry point.
+    public func makeSourceConversationSession() async throws
+        -> QwenOfficialSourceConversationGenerationSession {
+        guard !generating else { throw ModelFamilyGenerationError.busy }
+        guard case .qwenOfficialSource(let model) = bundle.runtime,
+              let identity = model.sourceIdentity,
+              bundle.sourceIdentity == identity,
+              let codec = bundle.qwenCodec,
+              fixturePromptTokenIDs == nil else {
+            throw ModelFamilyGenerationError.modelIdentityChanged
+        }
+        try model.revalidateSource()
+        return try await QwenOfficialSourceConversationGenerationSession(
+            model: model, codec: codec, sourceIdentity: identity,
+            context: context, maxContext: maxContext,
+            expertSlotCount: runtimeConfiguration.expertCacheSlots,
+            modelDirectoryURL: modelDirectoryURL, visionPackURL: visionPackURL)
     }
 
     public func generate(
         _ request: ModelFamilyGenerationRequest,
-        onEvent: @Sendable (ModelFamilyGenerationEvent) -> Void
+        onEvent: @escaping @Sendable (ModelFamilyGenerationEvent) -> Void
     ) async throws -> ModelFamilyGenerationResult {
         guard !generating else { throw ModelFamilyGenerationError.busy }
         generating = true
@@ -415,11 +626,20 @@ public actor ModelFamilyGenerationSession {
             }
             return try await generateQwen(
                 model: model, codec: codec, request: request, onEvent: onEvent)
+        case .qwenOfficialSource(let model):
+            guard let codec = bundle.qwenCodec,
+                  (model.sourceIdentity != nil && bundle.sourceIdentity == model.sourceIdentity
+                    || model.sourceIdentity == nil && bundle.sourceIdentity == nil
+                       && fixturePromptTokenIDs != nil) else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+            return try await generateQwenOfficialSource(
+                model: model, codec: codec, request: request, onEvent: onEvent)
         }
     }
 }
 
-private func orderedImageIDs(
+func orderedImageIDs(
     in messages: [ModelChatMessage]
 ) throws -> [String] {
     var result: [String] = []
@@ -691,7 +911,8 @@ private extension ModelFamilyGenerationSession {
             promptTokens: stats.prefillTokens,
             newTokens: stats.newTokens,
             prefillSeconds: stats.prefillSeconds,
-            decodeSeconds: stats.decodeSeconds)
+            decodeSeconds: stats.decodeSeconds,
+            cacheSummary: model.routedExpertCacheSummary)
     }
 
     func gemmaMultimodalMessages(
@@ -908,6 +1129,238 @@ private extension ModelFamilyGenerationSession {
             decodeSeconds: Date().timeIntervalSince(decodeStarted))
     }
 
+    /// Source images take the actual protected conversation transaction and
+    /// never enter the packed renderer or the raw text-only runner branch.
+    func generateQwenOfficialSource(
+        model: QwenOfficialSourceModel,
+        codec: QwenChatCodec,
+        request: ModelFamilyGenerationRequest,
+        onEvent: @escaping @Sendable (ModelFamilyGenerationEvent) -> Void
+    ) async throws -> ModelFamilyGenerationResult {
+        if case .chat(let messages, let tools, let thinking) = request.prompt,
+           !(try orderedImageIDs(in: messages)).isEmpty || !request.imagesByID.isEmpty {
+            guard let identity = model.sourceIdentity,
+                  bundle.sourceIdentity == identity else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+            let systemPrompt: String?
+            let user: ModelChatMessage
+            if messages.count == 1, let first = messages.first,
+               first.role == .user {
+                systemPrompt = nil
+                user = first
+            } else if messages.count == 2, messages[0].role == .system,
+                      case .text(let text)? = messages[0].content,
+                      messages[1].role == .user {
+                systemPrompt = text
+                user = messages[1]
+            } else {
+                throw ModelFamilyGenerationError.unsupportedInput(
+                    "source image request requires one user turn and optional system guidance")
+            }
+            let session = try await QwenOfficialSourceConversationGenerationSession(
+                model: model, codec: codec, sourceIdentity: identity,
+                context: context, maxContext: maxContext,
+                expertSlotCount: runtimeConfiguration.expertCacheSlots,
+                modelDirectoryURL: modelDirectoryURL, visionPackURL: visionPackURL)
+            let result = try await session.generate(
+                QwenConversationGenerationRequest(
+                    turn: .user(user), systemPrompt: systemPrompt,
+                    tools: tools, imagesByID: request.imagesByID,
+                    thinking: thinking, visionResidency: request.visionResidency,
+                    config: request.config),
+                onEvent: { event in
+                    switch event {
+                    case .prefill(let done, let total): onEvent(.prefill(done: done, total: total))
+                    case .text(let value): onEvent(.text(value))
+                    case .toolCall(let value): onEvent(.toolCall(value))
+                    case .structuredProgress: break
+                    }
+                })
+            let cacheSummary = await session.cacheDiagnostics().summary
+            return ModelFamilyGenerationResult(
+                reason: result.reason, promptTokens: result.promptTokens,
+                newTokens: result.newTokens, prefillSeconds: result.prefillSeconds,
+                decodeSeconds: result.decodeSeconds,
+                cacheSummary: cacheSummary)
+        }
+        guard request.imagesByID.isEmpty else {
+            throw ModelFamilyGenerationError.verifiedVisionUnavailable
+        }
+        let prompt: QwenPrompt
+        switch request.prompt {
+        case .raw(let text):
+            prompt = QwenPrompt(
+                tokenIDs: fixturePromptTokenIDs ?? codec.tokenizer.encode(text), prepared: nil,
+                tokenizer: codec.tokenizer, tools: [],
+                startsInThoughtChannel: false, isChat: false, textRoPEDelta: 0)
+        case .chat(let messages, let tools, let thinking):
+            guard try orderedImageIDs(in: messages).isEmpty else {
+                throw ModelFamilyGenerationError.verifiedVisionUnavailable
+            }
+            let options = ModelChatRenderOptions(enableThinking: thinking != .disabled)
+            let encoded: [Int32]
+            if let fixturePromptTokenIDs {
+                encoded = fixturePromptTokenIDs
+            } else {
+                encoded = try codec.encodePrompt(
+                    messages: messages, tools: tools, options: options)
+            }
+            prompt = QwenPrompt(
+                tokenIDs: encoded, prepared: nil,
+                tokenizer: codec.tokenizer, tools: tools,
+                startsInThoughtChannel: options.enableThinking,
+                isChat: true, textRoPEDelta: 0)
+        }
+        guard !prompt.tokenIDs.isEmpty else { throw ModelFamilyGenerationError.emptyPrompt }
+        let vocab = model.architecture.vocabularySize
+        guard prompt.tokenIDs.allSatisfy({ $0 >= 0 && Int($0) < vocab }) else {
+            throw ModelFamilyGenerationError.unsupportedInput("source prompt token outside vocabulary")
+        }
+        let mediaMarkers: Set<Int32> = Set(codec.tokenizer.addedTokens.compactMap { token in
+            ["<|image_pad|>", "<|video_pad|>", "<|vision_start|>", "<|vision_end|>"].contains(token.content)
+                ? token.id : nil
+        })
+        guard prompt.tokenIDs.allSatisfy({ !mediaMarkers.contains($0) }) else {
+            throw ModelFamilyGenerationError.verifiedVisionUnavailable
+        }
+        guard prompt.tokenIDs.count < maxContext else {
+            throw ModelFamilyGenerationError.contextOverflow(
+                prompt: prompt.tokenIDs.count, maxNew: 0, maximum: maxContext)
+        }
+        guard vocab > 0, vocab <= Int.max / MemoryLayout<Float16>.stride,
+              vocab * MemoryLayout<Float16>.stride <= context.device.maxBufferLength else {
+            throw ModelFamilyGenerationError.unsupportedInput("source vocabulary exceeds Metal limit")
+        }
+        let producer = try model.makeRunner(
+            context: context,
+            expertSlotCount: runtimeConfiguration.expertCacheSlots,
+            maxContext: maxContext)
+        let scratch = try RawCompletionScratch(context: context, vocab: vocab)
+        let prefillStarted = Date()
+        for (position, token) in prompt.tokenIDs.enumerated() {
+            try Task.checkCancellation()
+            let raw = try await producer.produce(token: token, position: position)
+            try QwenSourceSamplerBoundary.publishFP32Logits(raw, into: scratch.logits, vocabularySize: vocab)
+            onEvent(.prefill(done: position + 1, total: prompt.tokenIDs.count))
+        }
+        let decodeStarted = Date()
+        let prefillSeconds = decodeStarted.timeIntervalSince(prefillStarted)
+        var config = request.config
+        config.maxNewTokens = min(config.maxNewTokens, maxContext - prompt.tokenIDs.count)
+        config.logitTransform = .raw
+        config.extraStopTokens.insert(prompt.tokenizer.eosID)
+        var detokenizer = prompt.tokenizer.makeIncrementalDecoder()
+        var structured = QwenStructuredAssistantDecoder(
+            tools: prompt.tools,
+            startsInThoughtChannel: prompt.startsInThoughtChannel)
+        var stopMatcher = StreamingStopMatcher(stops: config.stopStrings)
+        var history = prompt.tokenIDs
+        history.reserveCapacity(prompt.tokenIDs.count + config.maxNewTokens)
+        var generated = 0
+        var reason: StopReason = .maxTokens
+        var termination: QwenGenerationTermination = .maxTokens
+
+        func publish(_ text: String) throws {
+            guard !text.isEmpty else { return }
+            if prompt.isChat {
+                for event in try structured.consume(text) {
+                    if case .content(let content) = event {
+                        let visible = stopMatcher.push(content)
+                        if !visible.isEmpty { onEvent(.text(visible)) }
+                    }
+                }
+            } else {
+                let visible = stopMatcher.push(text)
+                if !visible.isEmpty { onEvent(.text(visible)) }
+            }
+        }
+        do {
+            while generated < config.maxNewTokens {
+                try Task.checkCancellation()
+                let token = try await sampleQwenSource(
+                    scratch: scratch, history: history, config: config,
+                    samplePosition: generated)
+                try Task.checkCancellation()
+                generated += 1
+                if config.extraStopTokens.contains(token) {
+                    reason = .eos
+                    termination = token == prompt.tokenizer.eosID ? .modelEOS : .tokenStop
+                    break
+                }
+                try publish(detokenizer.push(token))
+                if stopMatcher.isStopped {
+                    reason = .stopString
+                    termination = .stopString
+                    break
+                }
+                history.append(token)
+                let raw = try await producer.produce(
+                    token: token, position: prompt.tokenIDs.count + generated - 1)
+                try QwenSourceSamplerBoundary.publishFP32Logits(raw, into: scratch.logits, vocabularySize: vocab)
+            }
+        } catch is CancellationError {
+            try finalizeQwenStructuredTurn(
+                decoder: &structured, tokenizerTail: "", termination: .cancelled,
+                publish: { _ in })
+            throw CancellationError()
+        }
+        let tokenizerTail = detokenizer.finish()
+        if prompt.isChat {
+            try finalizeQwenStructuredTurn(
+                decoder: &structured, tokenizerTail: tokenizerTail,
+                termination: termination
+            ) { event in
+                switch event {
+                case .content(let content):
+                    let visible = stopMatcher.push(content)
+                    if !visible.isEmpty { onEvent(.text(visible)) }
+                case .toolCall(let call):
+                    onEvent(.toolCall(call))
+                    reason = .toolCalls
+                }
+            }
+        } else {
+            let visible = stopMatcher.push(tokenizerTail)
+            if !visible.isEmpty { onEvent(.text(visible)) }
+        }
+        let final = stopMatcher.finish()
+        if !final.isEmpty { onEvent(.text(final)) }
+        let decodeSeconds = Date().timeIntervalSince(decodeStarted)
+        let cacheSummary = await producer.routedExpertCacheSummary()
+        return ModelFamilyGenerationResult(
+            reason: reason,
+            promptTokens: prompt.tokenIDs.count,
+            newTokens: generated,
+            prefillSeconds: prefillSeconds,
+            decodeSeconds: decodeSeconds,
+            cacheSummary: cacheSummary)
+    }
+
+    func sampleQwenSource(
+        scratch: RawCompletionScratch,
+        history: [Int32], config: GenerationConfig,
+        samplePosition: Int
+    ) async throws -> Int32 {
+        try Task.checkCancellation()
+        guard let command = context.queue.makeCommandBuffer() else {
+            throw QwenTextRunnerError.execution(detail: "source sampler command unavailable")
+        }
+        scratch.sampler.sample(
+            commandBuffer: command, logits: scratch.logits, probs: scratch.probs,
+            history: history, config: config, position: samplePosition,
+            outToken: scratch.outToken)
+        command.commit()
+        await withTaskCancellationHandler {
+            await command.completed()
+        } onCancel: {
+            // The GPU command must complete before scratch is reused or freed.
+        }
+        try checkCommandBufferError(command)
+        try Task.checkCancellation()
+        return Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
+    }
+
     func sampleQwen(
         scratch: RawCompletionScratch,
         history: [Int32],
@@ -1026,4 +1479,44 @@ private extension ModelFamilyGenerationSession {
         }
     }
 
+}
+
+/// Internal, format-only seam used by the production source generation path.
+/// It grants neither source admission nor tokenizer access. Tests may call the
+/// identical checked FP32 -> FP16 publication before the existing sampler.
+enum QwenSourceSamplerBoundary {
+    static func publishFP32Logits(_ logits: [Float], into buffer: MTLBuffer,
+                                  vocabularySize: Int) throws {
+        guard vocabularySize > 0,
+              vocabularySize <= Int.max / MemoryLayout<Float16>.stride else {
+            throw QwenTextRunnerError.invalidState(detail: "source vocabulary size overflow")
+        }
+        guard logits.count == vocabularySize,
+              buffer.length >= vocabularySize * MemoryLayout<Float16>.stride,
+              buffer.storageMode == .shared else {
+            throw QwenTextRunnerError.logitsBufferTooSmall(
+                expected: vocabularySize * MemoryLayout<Float16>.stride,
+                actual: buffer.length)
+        }
+        let destination = buffer.contents().assumingMemoryBound(to: Float16.self)
+        // Convert into a local value first; a rejected row never publishes an
+        // incomplete FP16 buffer to the sampler.
+        var converted: [Float16] = []
+        converted.reserveCapacity(vocabularySize)
+        for value in logits {
+            guard value.isFinite else {
+                throw QwenTextRunnerError.execution(detail: "nonfinite raw source logit")
+            }
+            let half = Float16(value)
+            guard half.isFinite else {
+                throw QwenTextRunnerError.execution(detail: "source logit overflows FP16 sampler")
+            }
+            converted.append(half)
+        }
+        converted.withUnsafeBufferPointer { source in
+            if let base = source.baseAddress {
+                destination.update(from: base, count: vocabularySize)
+            }
+        }
+    }
 }

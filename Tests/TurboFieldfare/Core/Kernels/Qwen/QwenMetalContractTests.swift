@@ -92,7 +92,7 @@ import Testing
             "logit", "utility", "fused", "prefill", "vision",
         ]
         #expect(MetalContext.shaderModules == existingModules + [
-            "qwen_common", "qwen_full_attention", "qwen_linear_attention", "qwen_moe",
+            "qwen_common", "qwen_bf16", "qwen_full_attention", "qwen_linear_attention", "qwen_moe",
             "qwen_vision",
         ])
         #expect(MetalContext.shaderModules.filter { $0 == "qwen_common" }.count == 1)

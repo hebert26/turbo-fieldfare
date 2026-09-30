@@ -1,0 +1,35 @@
+{
+  "build": "Scripts/build-libjpeg-turbo.sh",
+  "commit": "289df647c0f208dad7db63f24830361257812b1b",
+  "decodeSettings": {
+    "blockSmoothing": true,
+    "dct": "JDCT_ISLOW",
+    "fancyUpsampling": true,
+    "iccTransform": false,
+    "scale": "1/1"
+  },
+  "licenses": [
+    "3.0.2/LICENSE.md",
+    "3.0.2/README.ijg"
+  ],
+  "name": "libjpeg-turbo",
+  "pillowCMYKSemantics": {
+    "license": "Pillow-10.3.0-LICENSE",
+    "sources": [
+      "https://github.com/python-pillow/Pillow/blob/10.3.0/src/PIL/JpegImagePlugin.py#L373-L377",
+      "https://github.com/python-pillow/Pillow/blob/10.3.0/src/libImaging/Unpack.c#L1031-L1042",
+      "https://github.com/python-pillow/Pillow/blob/10.3.0/src/libImaging/Convert.c#L554-L566"
+    ],
+    "version": "10.3.0"
+  },
+  "runtimeDependencies": [
+    "local statically linked libjpeg archive"
+  ],
+  "sourceArchiveSHA256": "c2ce515a78d91b09023773ef2770d6b0df77d674e144de80d63e0389b3a15ca6",
+  "sourceFileCount": 537,
+  "sourceFilesModified": false,
+  "sourceManifest": "source-sha256.txt",
+  "sourceURL": "https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.0.2/libjpeg-turbo-3.0.2.tar.gz",
+  "upstream": "https://github.com/libjpeg-turbo/libjpeg-turbo",
+  "version": "3.0.2"
+}

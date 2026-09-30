@@ -1,0 +1,4 @@
+module TurboFieldfareLibJPEG {
+    umbrella header "TurboFieldfareLibJPEG.h"
+    export *
+}

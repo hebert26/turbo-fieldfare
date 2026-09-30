@@ -2,6 +2,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import Metal
+import TurboFieldfareOfficialQwenSource
 
 /// Runtime geometry used by the Qwen text mapper and runner. The internal tiny
 /// fixture can supply smaller dimensions, but it never creates an installed
@@ -98,8 +99,23 @@ struct QwenTextArchitecture: Equatable, Sendable {
         hiddenActivation = configuration.hiddenActivation
     }
 
-    fileprivate func validate() throws {
-        guard hiddenSize > 0, !layerKinds.isEmpty,
+    func validate() throws {
+        // Bound untrusted source JSON before any dimension product or Metal
+        // allocation. These ceilings are above the pinned source geometry.
+        guard hiddenSize > 0, hiddenSize <= 1_048_576,
+              !layerKinds.isEmpty, layerKinds.count <= 128,
+              queryHeads > 0, queryHeads <= 4096,
+              keyValueHeads > 0, keyValueHeads <= 4096,
+              headDimension > 0, headDimension <= 4096,
+              linearKeyHeads > 0, linearKeyHeads <= 4096,
+              linearValueHeads > 0, linearValueHeads <= 4096,
+              linearKeyDimension > 0, linearKeyDimension <= 4096,
+              linearValueDimension > 0, linearValueDimension <= 4096,
+              experts > 0, experts <= 4096,
+              routedIntermediateSize > 0, routedIntermediateSize <= 1_048_576,
+              sharedIntermediateSize > 0, sharedIntermediateSize <= 1_048_576,
+              vocabularySize > 0, vocabularySize <= 1_048_576,
+              mropeSections.count <= 8,
               queryHeads > 0, keyValueHeads > 0,
               queryHeads.isMultiple(of: keyValueHeads), headDimension > 0,
               convolutionWidth == 4,
@@ -109,7 +125,8 @@ struct QwenTextArchitecture: Equatable, Sendable {
               partialRotaryFactor.isFinite, partialRotaryFactor > 0,
               partialRotaryFactor <= 1,
               ropeTheta.isFinite, ropeTheta > 0,
-              !mropeSections.isEmpty, mropeSections.allSatisfy({ $0 > 0 }),
+              !mropeSections.isEmpty,
+              mropeSections.allSatisfy({ $0 > 0 && $0 <= headDimension }),
               2 * mropeSections.reduce(0, +)
                 == Int(Double(headDimension) * partialRotaryFactor),
               experts >= 8, expertsPerToken == 8,
@@ -633,6 +650,17 @@ public final class QwenTextModel: @unchecked Sendable {
             expertDirectoryURL: temporaryDirectory.url,
             temporaryDirectoryOwner: temporaryDirectory,
             expertSourceSchema: .fixtureRedundantEnd)
+    }
+
+    /// Additive BF16 weight entrypoint. This does not create a QwenTextModel,
+    /// invoke the packed mapper, or make an official source runtime-admissible.
+    static func makeBF16Weights(
+        context: MetalContext, source: OfficialSourceHandle,
+        specifications: [QwenBF16TensorSpec], residencyBudget: UInt64
+    ) throws -> QwenBF16Weights {
+        try QwenBF16Weights(context: context, source: source,
+                            specifications: specifications,
+                            residencyBudget: residencyBudget)
     }
 
     static func loadOfficial(

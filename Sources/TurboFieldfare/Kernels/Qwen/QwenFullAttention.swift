@@ -1,3 +1,5 @@
+import Accelerate
+import Darwin
 import Foundation
 import Metal
 
@@ -13,6 +15,8 @@ enum QwenFullAttentionError: Error, Equatable, Sendable {
     case commandBufferAlreadySubmitted
     case commandEncoderUnavailable
     case invalidPipelineLimit
+    case bufferAllocationFailed(name: String)
+    case nonfiniteAttention
 }
 
 /// Geometry and numerical constants for Qwen full attention.
@@ -142,16 +146,59 @@ final class QwenFullAttention {
 
     let configuration: QwenFullAttentionConfiguration
     private let device: MTLDevice
+    private let useOfficialSourceMath: Bool
+    private let officialInverseFrequencyBuffer: MTLBuffer?
     private let normRoPEPipeline: MTLComputePipelineState
     private let normMRoPEPipeline: MTLComputePipelineState
     private let gatePipeline: MTLComputePipelineState
 
-    init(context: MetalContext, configuration: QwenFullAttentionConfiguration) throws {
+    init(context: MetalContext, configuration: QwenFullAttentionConfiguration,
+         useOfficialSourceMath: Bool = false) throws {
         self.configuration = configuration
         device = context.device
-        normRoPEPipeline = try context.pipeline("qwen_qk_norm_partial_rope")
-        normMRoPEPipeline = try context.pipeline("qwen_qk_norm_partial_mrope")
-        gatePipeline = try context.pipeline("qwen_full_attention_sigmoid_gate")
+        self.useOfficialSourceMath = useOfficialSourceMath
+        if useOfficialSourceMath {
+            // Pinned CPU RoPE rounds positive powf before a Float reciprocal.
+            // Computing these configuration constants once preserves that
+            // ordering while token rotation remains in the Metal pipeline.
+            let frequencyCount = configuration.rotaryDimension / 2
+            let frequencyBytes = try Self.checkedMultiply(
+                frequencyCount, MemoryLayout<Float>.stride,
+                operation: "source rotary frequency bytes")
+            let frequencies: [Float] = (0..<frequencyCount).map { index in
+                let exponent = Float(index * 2) / Float(configuration.rotaryDimension)
+                let positivePower = powf(configuration.theta, exponent)
+                return Float(1) / positivePower
+            }
+            guard frequencies.allSatisfy({ $0.isFinite && $0 > 0 }) else {
+                throw QwenFullAttentionError.invalidFloatingPointConfiguration(
+                    field: "source rotary inverse frequencies")
+            }
+            guard let frequencyBuffer = context.device.makeBuffer(
+                bytes: frequencies, length: frequencyBytes, options: .storageModeShared) else {
+                throw QwenFullAttentionError.bufferAllocationFailed(
+                    name: "source rotary inverse frequencies")
+            }
+            officialInverseFrequencyBuffer = frequencyBuffer
+            let library = try MetalContext.privateLibrary(
+                device: context.device, module: "qwen_full_attention",
+                mathMode: .safe, mathFloatingPointFunctions: .precise,
+                includeQwenSourceMath: true)
+            func sourcePipeline(_ name: String) throws -> MTLComputePipelineState {
+                guard let function = library.makeFunction(name: name) else {
+                    throw MetalError.missingFunction(name)
+                }
+                return try context.device.makeComputePipelineState(function: function)
+            }
+            normRoPEPipeline = try sourcePipeline("qwen_qk_norm_partial_rope")
+            normMRoPEPipeline = try sourcePipeline("qwen_qk_norm_partial_mrope")
+            gatePipeline = try sourcePipeline("qwen_source_full_attention_sigmoid_gate")
+        } else {
+            officialInverseFrequencyBuffer = nil
+            normRoPEPipeline = try context.pipeline("qwen_qk_norm_partial_rope")
+            normMRoPEPipeline = try context.pipeline("qwen_qk_norm_partial_mrope")
+            gatePipeline = try context.pipeline("qwen_full_attention_sigmoid_gate")
+        }
     }
 
     /// Encodes one Q or K tensor. Input/output are token-major FP32 tensors;
@@ -211,6 +258,10 @@ final class QwenFullAttention {
             index: QwenMetalBufferIndex.parameters.rawValue)
         encoder.setBuffer(input, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
         encoder.setBuffer(weight, offset: 0, index: QwenMetalBufferIndex.weights.rawValue)
+        if let officialInverseFrequencyBuffer {
+            encoder.setBuffer(officialInverseFrequencyBuffer, offset: 0,
+                              index: QwenMetalBufferIndex.scales.rawValue)
+        }
         encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
         try dispatch(encoder: encoder, pipeline: normRoPEPipeline, count: itemCount)
         encoder.endEncoding()
@@ -229,8 +280,13 @@ final class QwenFullAttention {
         sections: [Int]
     ) throws {
         guard input !== output else { throw QwenFullAttentionError.aliasedNormRoPEBuffers }
+        // The internal rotary-span-2 source fixture has only one frequency
+        // pair. It cannot populate three positive axes; [1,0,0] observes its
+        // temporal axis while production remains three strictly positive axes.
+        let tinyTemporalOnly = configuration.rotaryDimension == 2
+            && sections == [1, 0, 0]
         guard tokenCount > 0, sections.count == 3,
-              sections.allSatisfy({ $0 > 0 }),
+              (sections.allSatisfy({ $0 > 0 }) || tinyTemporalOnly),
               sections.reduce(0, +) == configuration.rotaryDimension / 2 else {
             throw QwenFullAttentionError.invalidConfiguration(
                 field: "mropeSections", value: sections.reduce(0, +))
@@ -276,6 +332,10 @@ final class QwenFullAttention {
             index: QwenMetalBufferIndex.parameters.rawValue)
         encoder.setBuffer(input, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
         encoder.setBuffer(weight, offset: 0, index: QwenMetalBufferIndex.weights.rawValue)
+        if let officialInverseFrequencyBuffer {
+            encoder.setBuffer(officialInverseFrequencyBuffer, offset: 0,
+                              index: QwenMetalBufferIndex.scales.rawValue)
+        }
         encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
         encoder.setBuffer(positions, offset: 0, index: QwenMetalBufferIndex.scratch.rawValue)
         try dispatch(encoder: encoder, pipeline: normMRoPEPipeline, count: itemCount)
@@ -317,6 +377,186 @@ final class QwenFullAttention {
         encoder.setBuffer(rawGate, offset: 0, index: QwenMetalBufferIndex.scratch.rawValue)
         try dispatch(encoder: encoder, pipeline: gatePipeline, count: elementCount)
         encoder.endEncoding()
+    }
+
+    /// One sequential token against committed FP32 K/V plus an uncommitted
+    /// candidate row. Reads the cache in place; no full cached matrix copy or
+    /// state mutation. The caller must complete GPU norm/RoPE first.
+    func attentionStep(rotatedQuery: [Float], rotatedKey: [Float],
+                       value: [Float], cache: QwenFullAttentionKVView) throws -> [Float] {
+        let queryWidth = try Self.checkedMultiply(
+            configuration.queryHeadCount, configuration.headDimension,
+            operation: "query head elements")
+        let keyValueWidth = try Self.checkedMultiply(
+            configuration.keyValueHeadCount, configuration.headDimension,
+            operation: "key/value head elements")
+        try Self.requireCount(rotatedQuery, field: "rotatedQuery", expected: queryWidth)
+        try Self.requireCount(rotatedKey, field: "rotatedKey", expected: keyValueWidth)
+        try Self.requireCount(value, field: "value", expected: keyValueWidth)
+        let stride = try Self.checkedMultiply(
+            keyValueWidth, MemoryLayout<Float>.stride, operation: "cache stride")
+        guard cache.validTokenCount >= 0, cache.validTokenCount < Int(UInt32.max),
+              cache.strideBytes == stride, cache.keyOffset == 0,
+              cache.valueOffset == 0, cache.key.storageMode == .shared,
+              cache.value.storageMode == .shared,
+              cache.key.device === device, cache.value.device === device else {
+            throw QwenFullAttentionError.invalidConfiguration(
+                field: "cache geometry", value: cache.validTokenCount)
+        }
+        let required = try Self.checkedMultiply(
+            cache.validTokenCount, stride, operation: "committed cache bytes")
+        try Self.requireBuffer(cache.key, named: "cached key", bytes: required)
+        try Self.requireBuffer(cache.value, named: "cached value", bytes: required)
+        guard rotatedQuery.allSatisfy(\.isFinite), rotatedKey.allSatisfy(\.isFinite),
+              value.allSatisfy(\.isFinite) else {
+            throw QwenFullAttentionError.nonfiniteAttention
+        }
+        let keys = cache.key.contents().assumingMemoryBound(to: Float.self)
+        let values = cache.value.contents().assumingMemoryBound(to: Float.self)
+        let group = configuration.queryHeadCount / configuration.keyValueHeadCount
+        let scale = 1 / Float(configuration.headDimension).squareRoot()
+        let sourceScoreElements = useOfficialSourceMath
+            ? try Self.checkedMultiply(
+                cache.validTokenCount + 1, configuration.headDimension,
+                operation: "source attention score elements") : 0
+        // Pinned ATen bmm uses its direct loop below 400 multiply-adds,
+        // otherwise the CPU addmm/SGEMM path for each attention head.
+        let useSourceScoreBLAS = sourceScoreElements >= 400
+        var sourceDimension: Int32 = 0
+        var sourceKeyCount: Int32 = 0
+        if useSourceScoreBLAS {
+            guard let dimension = Int32(exactly: configuration.headDimension),
+                  let keyCount = Int32(exactly: cache.validTokenCount + 1) else {
+                throw QwenFullAttentionError.invalidConfiguration(
+                    field: "source score BLAS dimensions",
+                    value: max(configuration.headDimension, cache.validTokenCount + 1))
+            }
+            sourceDimension = dimension
+            sourceKeyCount = keyCount
+        }
+        func allocateSourceFloats(count: Int, name: String) throws -> UnsafeMutablePointer<Float> {
+            let bytes = try Self.checkedMultiply(
+                count, MemoryLayout<Float>.stride, operation: name + " bytes")
+            var allocation: UnsafeMutableRawPointer?
+            guard posix_memalign(&allocation, 64, bytes) == 0, let storage = allocation else {
+                throw QwenFullAttentionError.bufferAllocationFailed(name: name)
+            }
+            let pointer = storage.bindMemory(to: Float.self, capacity: count)
+            pointer.initialize(repeating: 0, count: count)
+            return pointer
+        }
+        // Accelerate may select a different accumulation order for unaligned
+        // matrices. The pinned source uses 64-byte aligned tensor allocations.
+        // Reuse one head's three aligned buffers for every source SGEMM call.
+        let sourceQuery = useSourceScoreBLAS
+            ? try allocateSourceFloats(count: configuration.headDimension, name: "source score query") : nil
+        defer {
+            if let sourceQuery {
+                sourceQuery.deinitialize(count: configuration.headDimension)
+                free(sourceQuery)
+            }
+        }
+        let sourcePackedKeys = useSourceScoreBLAS
+            ? try allocateSourceFloats(count: sourceScoreElements, name: "source score keys") : nil
+        defer {
+            if let sourcePackedKeys {
+                sourcePackedKeys.deinitialize(count: sourceScoreElements)
+                free(sourcePackedKeys)
+            }
+        }
+        let sourceScores = useSourceScoreBLAS
+            ? try allocateSourceFloats(count: cache.validTokenCount + 1, name: "source scores") : nil
+        defer {
+            if let sourceScores {
+                sourceScores.deinitialize(count: cache.validTokenCount + 1)
+                free(sourceScores)
+            }
+        }
+        var output = [Float](repeating: 0, count: queryWidth)
+        for head in 0..<configuration.queryHeadCount {
+            let keyHead = head / group
+            let queryBase = head * configuration.headDimension
+            var scores = [Float](repeating: 0, count: cache.validTokenCount + 1)
+            if useSourceScoreBLAS {
+                let alignedQuery = sourceQuery!
+                let packedKeys = sourcePackedKeys!
+                let alignedScores = sourceScores!
+                for column in 0..<configuration.headDimension {
+                    alignedQuery[column] = rotatedQuery[queryBase + column]
+                }
+                // Match the source matmul's contiguous repeated-KV head,
+                // including the candidate row, without changing the cache.
+                for token in scores.indices {
+                    let keyBase = (token * configuration.keyValueHeadCount + keyHead)
+                        * configuration.headDimension
+                    for column in 0..<configuration.headDimension {
+                        packedKeys[token * configuration.headDimension + column] =
+                            token == cache.validTokenCount
+                            ? rotatedKey[keyHead * configuration.headDimension + column]
+                            : keys[keyBase + column]
+                    }
+                }
+                cblas_sgemm(
+                    CblasRowMajor, CblasNoTrans, CblasTrans,
+                    1, sourceKeyCount, sourceDimension, 1,
+                    alignedQuery, sourceDimension, packedKeys, sourceDimension, 0,
+                    alignedScores, sourceKeyCount)
+                for token in scores.indices { scores[token] = alignedScores[token] * scale }
+            } else {
+                for token in scores.indices {
+                    let keyBase = (token * configuration.keyValueHeadCount + keyHead)
+                        * configuration.headDimension
+                    var dot: Float = 0
+                    for column in 0..<configuration.headDimension {
+                        let key = token == cache.validTokenCount
+                            ? rotatedKey[keyHead * configuration.headDimension + column]
+                            : keys[keyBase + column]
+                        dot += rotatedQuery[queryBase + column] * key
+                    }
+                    scores[token] = dot * scale
+                }
+            }
+            guard scores.allSatisfy(\.isFinite), let maximum = scores.max() else {
+                throw QwenFullAttentionError.nonfiniteAttention
+            }
+            var denominator: Float = 0
+            for token in scores.indices {
+                scores[token] = useOfficialSourceMath
+                    ? QwenOfficialSourceRouterArithmetic.exponential(scores[token] - maximum)
+                    : Float(Foundation.exp(Double(scores[token] - maximum)))
+                denominator += scores[token]
+            }
+            if useOfficialSourceMath {
+                denominator = QwenOfficialSourceRouterArithmetic.softmaxSum(scores)
+            }
+            guard denominator.isFinite, denominator > 0 else {
+                throw QwenFullAttentionError.nonfiniteAttention
+            }
+            // The source softmax multiplies by one rounded reciprocal.
+            let sourceReciprocal: Float = useOfficialSourceMath ? 1 / denominator : 0
+            for token in scores.indices {
+                let probability = useOfficialSourceMath
+                    ? scores[token] * sourceReciprocal : scores[token] / denominator
+                let valueBase = (token * configuration.keyValueHeadCount + keyHead)
+                    * configuration.headDimension
+                for column in 0..<configuration.headDimension {
+                    let current = token == cache.validTokenCount
+                        ? value[keyHead * configuration.headDimension + column]
+                        : values[valueBase + column]
+                    if useOfficialSourceMath {
+                        // The source value matmul accumulates ordered FP32 FMA.
+                        output[queryBase + column] = output[queryBase + column]
+                            .addingProduct(probability, current)
+                    } else {
+                        output[queryBase + column] += probability * current
+                    }
+                }
+            }
+        }
+        guard output.allSatisfy(\.isFinite) else {
+            throw QwenFullAttentionError.nonfiniteAttention
+        }
+        return output
     }
 
     /// Evaluates prefill or decode from already projected Q+gate, K, and V.

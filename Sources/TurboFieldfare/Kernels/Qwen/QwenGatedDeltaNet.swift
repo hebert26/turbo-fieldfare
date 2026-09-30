@@ -54,8 +54,15 @@ struct QwenGatedDeltaNetConfiguration: Equatable, Sendable {
         guard epsilon.isFinite, epsilon > 0 else {
             throw QwenGatedDeltaNetError.invalidFloatingPointConfiguration(field: "epsilon")
         }
-        _ = try Self.checkedMultiply(keyHeadCount, keyHeadDimension, operation: "key dimension")
-        _ = try Self.checkedMultiply(valueHeadCount, valueHeadDimension, operation: "value dimension")
+        let keySize = try Self.checkedMultiply(
+            keyHeadCount, keyHeadDimension, operation: "key dimension")
+        let valueSize = try Self.checkedMultiply(
+            valueHeadCount, valueHeadDimension, operation: "value dimension")
+        let twiceKey = try Self.checkedMultiply(2, keySize, operation: "convolution channels")
+        let (channels, overflow) = twiceKey.addingReportingOverflow(valueSize)
+        guard !overflow, UInt32(exactly: channels) != nil else {
+            throw QwenGatedDeltaNetError.arithmeticOverflow(operation: "convolution channels")
+        }
         self.hiddenSize = hiddenSize
         self.keyHeadCount = keyHeadCount
         self.valueHeadCount = valueHeadCount
@@ -157,6 +164,17 @@ final class QwenGatedDeltaNet {
         var reserved2: UInt32 = 0
     }
 
+    private struct SourceRecurrenceParameters {
+        var tokenCount: UInt32
+        var headCount: UInt32
+        var keyDimension: UInt32
+        var valueDimension: UInt32
+        var epsilon: Float
+        var initialToken: UInt32
+        var queryScale: Float
+        var queryDivisor: Float
+    }
+
     private struct GatedNormParameters {
         var tokenCount: UInt32
         var headCount: UInt32
@@ -173,13 +191,32 @@ final class QwenGatedDeltaNet {
     private let convolutionPipeline: MTLComputePipelineState
     private let recurrencePipeline: MTLComputePipelineState
     private let gatedNormPipeline: MTLComputePipelineState
+    private let useOfficialSourceMath: Bool
 
-    init(context: MetalContext, configuration: QwenGatedDeltaNetConfiguration) throws {
+    init(context: MetalContext, configuration: QwenGatedDeltaNetConfiguration,
+         useOfficialSourceMath: Bool = false) throws {
         self.configuration = configuration
-        layoutPipeline = try context.pipeline("qwen_linear_layout")
-        convolutionPipeline = try context.pipeline("qwen_linear_causal_conv")
-        recurrencePipeline = try context.pipeline("qwen_linear_recurrence_fp32")
-        gatedNormPipeline = try context.pipeline("qwen_linear_gated_rmsnorm")
+        self.useOfficialSourceMath = useOfficialSourceMath
+        if useOfficialSourceMath {
+            let library = try MetalContext.privateLibrary(
+                device: context.device, module: "qwen_linear_attention", mathMode: .safe,
+                mathFloatingPointFunctions: .precise, includeQwenSourceMath: true)
+            func pipeline(_ name: String) throws -> MTLComputePipelineState {
+                guard let function = library.makeFunction(name: name) else {
+                    throw MetalError.missingFunction(name)
+                }
+                return try context.device.makeComputePipelineState(function: function)
+            }
+            layoutPipeline = try pipeline("qwen_linear_layout")
+            convolutionPipeline = try pipeline("qwen_linear_causal_conv")
+            recurrencePipeline = try pipeline("qwen_source_linear_recurrence_fp32")
+            gatedNormPipeline = try pipeline("qwen_source_linear_gated_rmsnorm")
+        } else {
+            layoutPipeline = try context.pipeline("qwen_linear_layout")
+            convolutionPipeline = try context.pipeline("qwen_linear_causal_conv")
+            recurrencePipeline = try context.pipeline("qwen_linear_recurrence_fp32")
+            gatedNormPipeline = try context.pipeline("qwen_linear_gated_rmsnorm")
+        }
     }
 
     static func evaluate(
@@ -505,7 +542,8 @@ final class QwenGatedDeltaNet {
         beta: MTLBuffer,
         update: QwenLinearAttentionUpdate,
         output: MTLBuffer,
-        tokenCount: Int
+        tokenCount: Int,
+        initialToken: Bool = false
     ) throws {
         let heads = configuration.valueHeadCount
         let qCount = tokenCount * heads * configuration.keyHeadDimension
@@ -521,6 +559,30 @@ final class QwenGatedDeltaNet {
         try requireFloatBuffer(
             update.recurrentMatrix, name: "recurrent state",
             count: heads * configuration.keyHeadDimension * configuration.valueHeadDimension)
+        let buffers = [
+            (query, QwenMetalBufferIndex.input.rawValue),
+            (key, QwenMetalBufferIndex.weights.rawValue),
+            (value, QwenMetalBufferIndex.scales.rawValue),
+            (logDecay, QwenMetalBufferIndex.biases.rawValue),
+            (output, QwenMetalBufferIndex.output.rawValue),
+            (beta, QwenMetalBufferIndex.scratch.rawValue),
+            (update.recurrentMatrix, QwenMetalBufferIndex.state.rawValue),
+        ]
+        if useOfficialSourceMath {
+            let dimension = Double(configuration.keyHeadDimension)
+            var parameters = SourceRecurrenceParameters(
+                tokenCount: try uint32(tokenCount, field: "tokenCount"),
+                headCount: try uint32(heads, field: "headCount"),
+                keyDimension: try uint32(configuration.keyHeadDimension, field: "keyHeadDimension"),
+                valueDimension: try uint32(configuration.valueHeadDimension, field: "valueHeadDimension"),
+                epsilon: configuration.epsilon,
+                initialToken: initialToken ? 1 : 0,
+                queryScale: Float(pow(dimension, -0.5)),
+                queryDivisor: Float(sqrt(dimension)))
+            try encode(commandBuffer: commandBuffer, pipeline: recurrencePipeline, count: heads,
+                       parameters: &parameters, buffers: buffers)
+            return
+        }
         var parameters = RecurrenceParameters(
             tokenCount: try uint32(tokenCount, field: "tokenCount"),
             headCount: try uint32(heads, field: "headCount"),
@@ -530,13 +592,7 @@ final class QwenGatedDeltaNet {
         try encode(
             commandBuffer: commandBuffer, pipeline: recurrencePipeline, count: heads,
             parameters: &parameters,
-            buffers: [(query, QwenMetalBufferIndex.input.rawValue),
-                      (key, QwenMetalBufferIndex.weights.rawValue),
-                      (value, QwenMetalBufferIndex.scales.rawValue),
-                      (logDecay, QwenMetalBufferIndex.biases.rawValue),
-                      (output, QwenMetalBufferIndex.output.rawValue),
-                      (beta, QwenMetalBufferIndex.scratch.rawValue),
-                      (update.recurrentMatrix, QwenMetalBufferIndex.state.rawValue)])
+            buffers: buffers)
     }
 
     func encodeGatedRMSNorm(

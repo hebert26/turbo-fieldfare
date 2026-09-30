@@ -26,6 +26,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private let loadedFamily: DecodeModelFamily
     private let loadID: UUID
     private let modelIdentity: DecodeModelIdentity?
+    private let sourceIdentity: DecodeSourceIdentity?
     private let conversationEpoch: UUID?
     private let memorySampler = AppMemorySampler()
     private let measurementRequest: DecodeRuntimeMeasurementRequest?
@@ -54,6 +55,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
          loadedFamily: DecodeModelFamily,
          loadID: UUID,
          modelIdentity: DecodeModelIdentity?,
+         sourceIdentity: DecodeSourceIdentity? = nil,
          conversationEpoch: UUID? = nil,
          towerBytes: @escaping @Sendable () -> UInt64? = { nil },
          conversationTokens: @escaping @Sendable () -> Int? = { nil },
@@ -68,6 +70,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         self.loadedFamily = loadedFamily
         self.loadID = loadID
         self.modelIdentity = modelIdentity
+        self.sourceIdentity = sourceIdentity
         self.conversationEpoch = conversationEpoch
         self.towerBytes = towerBytes
         self.measurementRequest = measurementRequest
@@ -134,7 +137,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         if !state.terminalCommitted, let error {
             state.terminal = DecodeServiceEvent(
                 kind: .failed, generationID: generationID,
-                loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+                loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                 error: "\(error)",
                 conversationLogicalStateBytes: conversationLogicalStateBytes(),
                 expertCacheBytes: expertCacheBytes(),
@@ -213,7 +216,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                terminal == nil, !done {
                 let snapshot = DecodeServiceEvent(
                     kind: .memory, generationID: generationID,
-                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes(),
@@ -226,7 +229,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             if let prefill, let prefillSequence {
                 let snapshot = DecodeServiceEvent(
                     kind: .prefill, generationID: generationID,
-                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     sequence: prefillSequence,
                     prefillDone: prefill.done, prefillTotal: prefill.total,
                     currentMemoryBytes: memorySampler.sample(),
@@ -242,7 +245,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 let count = (token?.index ?? -1) + 1
                 let snapshot = DecodeServiceEvent(
                     kind: .snapshot, generationID: generationID,
-                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     sequence: tokenSequence ?? 0, textDelta: text, tokenCount: count,
                     decodeSeconds: elapsed,
                     tokensPerSecond: elapsed > 0 ? Double(count) / elapsed : 0,
@@ -261,7 +264,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 let event = DecodeServiceEvent(
                     kind: .toolCall,
                     generationID: generationID,
-                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     conversationEpoch: conversationEpoch,
                     toolCall: DecodeToolCall(
                         id: call.id,
@@ -299,7 +302,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             let encodeStart = DispatchTime.now().uptimeNanoseconds
             var event = DecodeServiceEvent(
                 kind: .measurement, generationID: generationID,
-                loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+                loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                 conversationEpoch: conversationEpoch)
             event.measurementCaptureID = measurementRequest.stepID
             event.measurementBatchJSON = json
@@ -331,7 +334,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         let data = try JSONEncoder().encode(totals)
         var event = DecodeServiceEvent(
             kind: .measurement, generationID: generationID,
-            loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+            loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
             conversationEpoch: conversationEpoch)
         event.measurementCaptureID = measurementRequest.stepID
         event.measurementBatchJSON = String(decoding: data, as: UTF8.self)
@@ -344,7 +347,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                           error: String? = nil) -> DecodeServiceEvent {
         DecodeServiceEvent(
             kind: kind, generationID: generationID,
-            loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity,
+            loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
             tokenCount: diagnostics?.generatedTokens ?? 0,
             promptTokenCount: diagnostics?.promptTokenCount,
             computedPrefillTokens: diagnostics?.computedPrefillTokens,

@@ -1,0 +1,222 @@
+import CryptoKit
+import Darwin
+import Foundation
+import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
+
+/// Synthetic local source tree for Task 6.8 policy tests. The manifest is
+/// pinned metadata only; every tensor shard below contains a few synthetic
+/// bytes. The handcrafted persisted receipt exercises trusted reopen and is
+/// not evidence that the full-verification writer produced it.
+struct Task68SyntheticTrustFixture {
+    let registration: Task68SyntheticRegistrationFixture
+
+    static let checksumManifest = """
+    50cbab8a892c5f2993b8c7351a99182507472def3b1374558308605d99b86b32  LICENSE
+    c4ddaa065649ff6352648f64747a16eda31726f3e34add94ce04abb461c77b75  README.md
+    e84f32a23fdda27689f868aa4a1a5621f41133e51a48d7f3efcbea2839574259  chat_template.jinja
+    93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99  config.json
+    c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb  configuration.json
+    e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e  generation_config.json
+    a9d356d7bdf1ef4949e3e748e95b8e10ad9d4e2e838eddc38a0a7b6b94d1db8d  merges.txt
+    41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83  model.safetensors.index.json
+    27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516  preprocessor_config.json
+    5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42  tokenizer.json
+    5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b  tokenizer_config.json
+    ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003  vocab.json
+    adee7bcb930aed22e0677e58d4873b48dadb1ed8001cb5c6a0487286eadb3478  model-00001-of-00026.safetensors
+    88f2dfd2b9e73e4b70be533dbf61bcfa3c9a0003758900fcbc9d9b96f5751d4b  model-00002-of-00026.safetensors
+    8f7d72178d3f4431864978e5bcfa4c6cb1c204bc00590644d90bb19d6d522eeb  model-00003-of-00026.safetensors
+    12d7db38689ba3c8af74b23ef8523eca41e0cd95db870583d0663a3ee8a6bd60  model-00004-of-00026.safetensors
+    a836047305d0f7a7b50f0815d09d5c03ec03d59ec2c763fcdc4bf7e9936bf902  model-00005-of-00026.safetensors
+    c9080d718e9c5f9e337443225aa417d4c24d00ae7995d76ee3f1cc296b557d15  model-00006-of-00026.safetensors
+    e8c05e23131b1dd45a455ec38cfac7db14667358268623c3938d00cf3e959a68  model-00007-of-00026.safetensors
+    4b6a6d495053089f4a80e7cbc82e848fba44e2c0c60122233d8fdff79fa7b296  model-00008-of-00026.safetensors
+    a31a954bb72d1c714e751bf0aabf2ff533f5a509693ebf7dd22ad6e90be46f67  model-00009-of-00026.safetensors
+    246560e66570fe746653b8443e245dc334c9b8b831ea43d2d9f1b7d98623994e  model-00010-of-00026.safetensors
+    7180392817fe3ecb3a27a1da43b7ff22c1a94806bac49975f9f122c3126df675  model-00011-of-00026.safetensors
+    043fb525f6625c2f2acb75e65a9959ee3fa7b6e3fdd2034b5cfe1859b01d3cfb  model-00012-of-00026.safetensors
+    33a20fb20a21379bf43c84a43105f9c0cc35bd50d740b1c302dcbe4b700f5425  model-00013-of-00026.safetensors
+    be823e33c5cb6120ad3769d081f34a2449dc2358041fca7c29d636c1ba19130d  model-00014-of-00026.safetensors
+    a89d547c6f9d0b535ee5ea2f2478f163089539f3f0dd330cb23d278a19d76123  model-00015-of-00026.safetensors
+    69fc3ae0316482288afdcdd0b9eb7d626703ae26f7567e89aa3fc8d1ffd4ff5b  model-00016-of-00026.safetensors
+    e356e3943cf3852b76bb8992e674f3256013e27d54b78e8250514151cdc29637  model-00017-of-00026.safetensors
+    9e5e63fd1cc7d6848330c1fa363dfcb661bbc2ac87e672d0e28b71c9cb7f3c7f  model-00018-of-00026.safetensors
+    708644ad34f1de727bf484f396944d8ec628645d52c183e9a992e65671685e21  model-00019-of-00026.safetensors
+    ca083a1d1aa64f8e8a785998f543a43374f13436dc85d396eee4e72c7a84e1ae  model-00020-of-00026.safetensors
+    ada4ae48f3d48fe01b4c53f2f82bce25e798a9631fd33959c881156fef2ccbce  model-00021-of-00026.safetensors
+    def207fb42d7db31efb512755557763c23233c6e4d4c433027cb5102a7bce2f7  model-00022-of-00026.safetensors
+    864d52ca7768a36f514069222e8de8626264ae124097ba8fcce5b5da2c6e2ed7  model-00023-of-00026.safetensors
+    391acd27420cdce5935ff18152423c70620d19dac3c39a5ef1a81d369f82d737  model-00024-of-00026.safetensors
+    778e7f76602f05042b69ba7f3ec91f1fdffef390540b16074041c258fb81d154  model-00025-of-00026.safetensors
+    1a97404220077ed3d4182e10385b152004cab608377f50cec9f54a6b8d28b613  model-00026-of-00026.safetensors
+    """
+
+    static let tinyABCExpectedSHA256 =
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    static let tinyABDAfterMutationExpectedSHA256 =
+        "a52d159f262b2c6ddb724a61840befc36eb30c88877a4030b65cbe86298449c9"
+
+    static func make() throws -> Self {
+        let registration = try Task68SyntheticRegistrationFixture.make()
+        let checksumManifestURL = registration.sourceRoot.appendingPathComponent(
+            OfficialQwenPayloadVerifier.checksumManifestFile)
+        try Data((checksumManifest + "\n").utf8).write(to: checksumManifestURL)
+        let entries = independentManifestEntries()
+        for name in entries.keys.sorted() {
+            let data: Data
+            if name == "model-00001-of-00026.safetensors" {
+                data = Data("abc".utf8)
+            } else if name.hasSuffix(".safetensors") {
+                data = Data("tiny synthetic payload for \(name)".utf8)
+            } else {
+                data = Data("synthetic sidecar \(name)".utf8)
+            }
+            try data.write(to: registration.sourceRoot.appendingPathComponent(name))
+        }
+        return Self(registration: registration)
+    }
+
+    var logicalModelURL: URL { registration.modelDirectory }
+    var sourceRootURL: URL { registration.sourceRoot }
+    var receiptURL: URL {
+        logicalModelURL.appendingPathComponent(OfficialSourceTrust.receiptFilename)
+    }
+    var firstShardURL: URL {
+        sourceRootURL.appendingPathComponent("model-00001-of-00026.safetensors")
+    }
+    var sidecarURL: URL { sourceRootURL.appendingPathComponent("config.json") }
+
+    func remove() { registration.remove() }
+
+    func receiptObject() throws -> [String: Any] {
+        let manifestEntries = Self.independentManifestEntries()
+        let names = (Array(manifestEntries.keys)
+            + [OfficialQwenPayloadVerifier.checksumManifestFile]).sorted()
+        let fileObjects: [[String: Any]] = try names.map { name in
+            let digest: String
+            if name == OfficialQwenPayloadVerifier.checksumManifestFile {
+                let manifestURL = sourceRootURL.appendingPathComponent(name)
+                digest = Self.sha256(try Data(contentsOf: manifestURL))
+            } else if let pinnedDigest = manifestEntries[name] {
+                digest = pinnedDigest
+            } else {
+                throw FixtureError.missingManifestEntry(name)
+            }
+            return [
+                "filename": name,
+                "sha256": digest,
+                "fingerprint": try Self.fingerprintObject(
+                    at: sourceRootURL.appendingPathComponent(name), expectedType: S_IFREG),
+            ]
+        }
+        let shards = try registration.descriptor.shards
+            .sorted { $0.filename < $1.filename }
+            .map { shard -> (String, UInt64, String) in
+                let fingerprint = try Self.fingerprintObject(
+                    at: sourceRootURL.appendingPathComponent(shard.filename),
+                    expectedType: S_IFREG)
+                guard let size = fingerprint["size"] as? UInt64 else {
+                    throw FixtureError.invalidFixturePath(shard.filename)
+                }
+                return (shard.filename, size, shard.sha256)
+            }
+        var totalShardBytes: UInt64 = 0
+        var aggregate = SHA256()
+        aggregate.update(data: Data((OfficialQwenPayloadVerifier.checksumManifestSHA256 + "\n").utf8))
+        for (filename, size, digest) in shards {
+            let next = totalShardBytes.addingReportingOverflow(size)
+            guard !next.overflow else { throw FixtureError.shardBytesOverflow }
+            totalShardBytes = next.partialValue
+            aggregate.update(data: Data(("\(filename)\t\(size)\t\(digest)\n").utf8))
+        }
+        let shardSetSHA256 = aggregate.finalize()
+            .map { String(format: "%02x", $0) }.joined()
+        let markerURL = logicalModelURL.appendingPathComponent(
+            OfficialSourceDescriptor.markerFilename)
+        return [
+            "version": OfficialSourceTrustReceipt.schemaVersion,
+            "descriptorContentSHA256": registration.descriptor.contentSHA256,
+            "markerSHA256": Self.sha256(try Data(contentsOf: markerURL)),
+            "logicalModelPath": logicalModelURL.path,
+            "sourceRoot": sourceRootURL.path,
+            "checksumManifestSHA256": OfficialQwenPayloadVerifier.checksumManifestSHA256,
+            "shardSetSHA256": shardSetSHA256,
+            "shardBytes": totalShardBytes,
+            "rootFingerprint": try Self.fingerprintObject(
+                at: sourceRootURL, expectedType: S_IFDIR),
+            "files": fileObjects,
+        ]
+    }
+
+    func totalShardBytes() throws -> UInt64 {
+        var total: UInt64 = 0
+        for shard in registration.descriptor.shards {
+            let fingerprint = try Self.fingerprintObject(
+                at: sourceRootURL.appendingPathComponent(shard.filename),
+                expectedType: S_IFREG)
+            guard let size = fingerprint["size"] as? UInt64 else {
+                throw FixtureError.invalidFixturePath(shard.filename)
+            }
+            let next = total.addingReportingOverflow(size)
+            guard !next.overflow else { throw FixtureError.shardBytesOverflow }
+            total = next.partialValue
+        }
+        return total
+    }
+
+    func receiptData(
+        mutate: ((inout [String: Any]) -> Void)? = nil
+    ) throws -> Data {
+        var object = try receiptObject()
+        mutate?(&object)
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    @discardableResult
+    func installReceipt(_ data: Data? = nil) throws -> Data {
+        let bytes = try data ?? receiptData()
+        try bytes.write(to: receiptURL)
+        return bytes
+    }
+
+    static func independentManifestEntries() -> [String: String] {
+        var result: [String: String] = [:]
+        for line in checksumManifest.split(separator: "\n") {
+            result[String(line.dropFirst(66))] = String(line.prefix(64))
+        }
+        return result
+    }
+
+    static func sha256(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func fingerprintObject(at url: URL, expectedType: mode_t) throws
+        -> [String: Any] {
+        var info = stat()
+        guard lstat(url.path, &info) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        guard (info.st_mode & S_IFMT) == expectedType,
+              info.st_mtimespec.tv_sec >= 0, info.st_ctimespec.tv_sec >= 0 else {
+            throw FixtureError.invalidFixturePath(url.path)
+        }
+        return [
+            "device": UInt64(info.st_dev),
+            "inode": UInt64(info.st_ino),
+            "mode": UInt32(info.st_mode),
+            "size": UInt64(info.st_size),
+            "modifiedSeconds": UInt64(info.st_mtimespec.tv_sec),
+            "modifiedNanoseconds": UInt32(info.st_mtimespec.tv_nsec),
+            "changedSeconds": UInt64(info.st_ctimespec.tv_sec),
+            "changedNanoseconds": UInt32(info.st_ctimespec.tv_nsec),
+        ]
+    }
+
+    enum FixtureError: Error {
+        case missingManifestEntry(String)
+        case invalidFixturePath(String)
+        case shardBytesOverflow
+    }
+}

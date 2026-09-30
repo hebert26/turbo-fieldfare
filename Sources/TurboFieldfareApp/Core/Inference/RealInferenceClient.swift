@@ -125,7 +125,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                              forceLogitsHead: Bool,
                              onState: @escaping @Sendable (AppModelLoadState) -> Void) async throws {
         try await session.ensureLoaded(
-            key: SessionLoadKey(directory: modelDirectory.standardizedFileURL,
+            key: SessionLoadKey(directory: modelDirectory,
                                 maxContext: maxContextTokens,
                                 options: options,
                                 forceLogitsHead: forceLogitsHead),
@@ -142,6 +142,13 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
 
     public var loadedModelReadiness: AppLoadedModelReadiness? {
         get async { await session.loadedModelReadiness }
+    }
+
+    /// Called by the service at its ready-publication boundary. The only
+    /// authority is the runtime's retained source model and trust receipt;
+    /// matching wire metadata alone does not establish source availability.
+    public func validateSourceReadiness(_ identity: DecodeSourceIdentity) async throws {
+        try await session.validateSourceReadiness(identity)
     }
 
     /// Drops the KV so the next turn starts a fresh lineage. The model stays
@@ -357,7 +364,10 @@ struct SessionLoadKey: Equatable, Sendable {
          maxContext: Int,
          options: AppRuntimeOptions,
          forceLogitsHead: Bool = false) {
-        self.directory = directory.standardizedFileURL
+        let marker = directory.appendingPathComponent("official-source.json")
+        self.directory = FileManager.default.fileExists(atPath: marker.path)
+            ? AppModelLocation.qwenRegistrationResolved(logicalURL: directory).textModelURL
+            : directory.standardizedFileURL
         self.maxContext = maxContext
         self.options = options
         self.forceLogitsHead = forceLogitsHead
@@ -451,6 +461,39 @@ actor RealInferenceSession {
     private enum LoadedFamily: @unchecked Sendable {
         case gemma
         case qwen(QwenTextModel)
+        case qwenSource(QwenOfficialSourceModel)
+    }
+
+    private enum QwenTurnGenerator: Sendable {
+        case packed(QwenConversationGenerationSession)
+        case source(QwenOfficialSourceConversationGenerationSession)
+
+        var supportsCheckpoint: Bool {
+            if case .packed = self { return true }
+            return false
+        }
+
+        func reset() async throws {
+            switch self {
+            case .packed(let session): try await session.reset()
+            case .source(let session): try await session.reset()
+            }
+        }
+
+        func generate(
+            _ request: QwenConversationGenerationRequest,
+            shouldStop: @escaping @Sendable () -> Bool,
+            onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void
+        ) async throws -> QwenConversationGenerationResult {
+            switch self {
+            case .packed(let session):
+                return try await session.generate(
+                    request, shouldStop: shouldStop, onEvent: onEvent)
+            case .source(let session):
+                return try await session.generate(
+                    request, shouldStop: shouldStop, onEvent: onEvent)
+            }
+        }
     }
 
     private final class RetiredInstallation {
@@ -458,6 +501,7 @@ actor RealInferenceSession {
         var identity: LoadedRuntimeIdentity?
         var codec: QwenChatCodec?
         var qwenGeneration: QwenConversationGenerationSession?
+        var sourceGeneration: QwenOfficialSourceConversationGenerationSession?
         var runner: RealForwardRunner?
         var scratch: RawCompletionScratch?
         var model: Model?
@@ -467,6 +511,7 @@ actor RealInferenceSession {
 
         init(family: LoadedFamily?, identity: LoadedRuntimeIdentity?, codec: QwenChatCodec?,
              qwenGeneration: QwenConversationGenerationSession?,
+             sourceGeneration: QwenOfficialSourceConversationGenerationSession?,
              runner: RealForwardRunner?, scratch: RawCompletionScratch?, model: Model?,
              conversation: MultimodalConversation?, visionRuntime: VisionRuntime?,
              visionError: Error?) {
@@ -474,6 +519,7 @@ actor RealInferenceSession {
             self.identity = identity
             self.codec = codec
             self.qwenGeneration = qwenGeneration
+            self.sourceGeneration = sourceGeneration
             self.runner = runner
             self.scratch = scratch
             self.model = model
@@ -484,6 +530,7 @@ actor RealInferenceSession {
 
         var hasResources: Bool {
             family != nil || identity != nil || codec != nil || qwenGeneration != nil
+                || sourceGeneration != nil
                 || runner != nil
                 || scratch != nil || model != nil || conversation != nil
                 || visionRuntime != nil || visionError != nil
@@ -494,6 +541,7 @@ actor RealInferenceSession {
             identity = nil
             codec = nil
             qwenGeneration = nil
+            sourceGeneration = nil
             runner = nil
             scratch = nil
             model = nil
@@ -510,6 +558,8 @@ actor RealInferenceSession {
         let identity: LoadedRuntimeIdentity?
         let codec: QwenChatCodec?
         let qwenGeneration: QwenConversationGenerationSession?
+        let sourceGeneration: QwenOfficialSourceConversationGenerationSession?
+        let sourceIdentity: DecodeSourceIdentity?
         let tokenizer: GFTokenizer?
         let runner: RealForwardRunner?
         let scratch: RawCompletionScratch?
@@ -523,6 +573,8 @@ actor RealInferenceSession {
         init(key: SessionLoadKey, context: MetalContext, family: LoadedFamily,
              identity: LoadedRuntimeIdentity?, codec: QwenChatCodec?,
              qwenGeneration: QwenConversationGenerationSession?, tokenizer: GFTokenizer?,
+             sourceGeneration: QwenOfficialSourceConversationGenerationSession? = nil,
+             sourceIdentity: DecodeSourceIdentity? = nil,
              runner: RealForwardRunner?, scratch: RawCompletionScratch?, model: Model?,
              conversation: MultimodalConversation?, visionRuntime: VisionRuntime?,
              visionError: Error?, logicalStateBytes: UInt64?, expertCacheBytes: UInt64) {
@@ -532,7 +584,9 @@ actor RealInferenceSession {
             self.identity = identity
             self.codec = codec
             self.qwenGeneration = qwenGeneration
+            self.sourceGeneration = sourceGeneration
             self.tokenizer = tokenizer
+            self.sourceIdentity = sourceIdentity
             self.runner = runner
             self.scratch = scratch
             self.model = model
@@ -560,6 +614,8 @@ actor RealInferenceSession {
     private var verifiedIdentity: LoadedRuntimeIdentity?
     private var qwenCodec: QwenChatCodec?
     private var qwenGeneration: QwenConversationGenerationSession?
+    private var sourceGeneration: QwenOfficialSourceConversationGenerationSession?
+    private var loadedSourceIdentity: DecodeSourceIdentity?
     private var qwenOrdinaryGenerationInFlight = false
     private var qwenOrdinaryGenerationWaiters: [CheckedContinuation<Void, Never>] = []
     private var qwenTools: [ModelChatToolDefinition] = []
@@ -643,6 +699,16 @@ actor RealInferenceSession {
         return qwenGeneration
     }
 
+    private func beginSourceOrdinaryGeneration() throws
+        -> QwenOfficialSourceConversationGenerationSession {
+        guard !qwenOrdinaryGenerationInFlight else {
+            throw AppInferenceError.generationInFlight
+        }
+        guard let sourceGeneration else { throw AppInferenceError.modelNotLoaded }
+        qwenOrdinaryGenerationInFlight = true
+        return sourceGeneration
+    }
+
     private func finishQwenOrdinaryGeneration() {
         guard qwenOrdinaryGenerationInFlight else { return }
         qwenOrdinaryGenerationInFlight = false
@@ -659,7 +725,9 @@ actor RealInferenceSession {
     }
 
     private func publishQwenConversationStatus() async {
-        let status = try? await conversation?.conversationStateStatus()
+        let status: ConversationStateStatus?
+        if let sourceGeneration { status = await sourceGeneration.status() }
+        else { status = try? await conversation?.conversationStateStatus() }
         conversationTokens.withLock {
             $0 = status?.committed.retainedTokenIDs.count ?? 0
         }
@@ -682,6 +750,15 @@ actor RealInferenceSession {
 
     func resetConversationThrowing() async throws {
         switch loadedFamily {
+        case .qwenSource:
+            await waitForQwenOrdinaryGeneration()
+            let generation = try beginSourceOrdinaryGeneration()
+            defer { finishQwenOrdinaryGeneration() }
+            try await generation.reset()
+            qwenTools.removeAll(keepingCapacity: true)
+            qwenSystemPrompt = nil
+            qwenPendingToolCalls.removeAll(keepingCapacity: true)
+            await publishQwenConversationStatus()
         case .qwen:
             await waitForQwenOrdinaryGeneration()
             if let qwenGeneration {
@@ -710,7 +787,7 @@ actor RealInferenceSession {
         conversationLifecycleError = nil
     }
 
-    var hasConversation: Bool { conversation != nil }
+    var hasConversation: Bool { conversation != nil || sourceGeneration != nil }
 
     var lifecycleOwnedInstallationCount: Int {
         var count = loadedFamily != nil || conversation != nil ? 1 : 0
@@ -727,6 +804,9 @@ actor RealInferenceSession {
 
     func contextCheckpoint(_ request: DecodeContextCheckpointRequest,
                            stop: AppGenerationStop?) async throws -> DecodeContextCheckpointReceipt {
+        if case .qwenSource = loadedFamily {
+            throw ConversationStateTransactionError.unsupportedFamily
+        }
         if case .qwen = loadedFamily {
             guard qwenGeneration != nil else {
                 throw AppInferenceError.invalidRequest(
@@ -1019,14 +1099,36 @@ actor RealInferenceSession {
         case .qwen:
             guard qwenCodec != nil, let verifiedIdentity else { return nil }
             return .qwen(identity: DecodeModelIdentity(runtimeIdentity: verifiedIdentity))
+        case .qwenSource:
+            guard qwenCodec != nil, sourceGeneration != nil,
+                  let loadedSourceIdentity else { return nil }
+            return .qwenSource(identity: loadedSourceIdentity)
         case nil:
             return nil
         }
     }
 
+    func validateSourceReadiness(_ identity: DecodeSourceIdentity) throws {
+        guard identity.kind == .officialSafetensorsBF16V1,
+              activeLifecycle == nil, loadedKey != nil,
+              case .qwenSource(let sourceModel)? = loadedFamily,
+              sourceGeneration != nil, qwenCodec != nil,
+              loadedSourceIdentity == identity else {
+            throw AppInferenceError.modelLoadFailed(
+                "loaded BF16 source no longer matches service readiness")
+        }
+        try sourceModel.revalidateLoadedSource(contentDigest: identity.contentDigest)
+    }
+
     var currentConversationTokens: Int {
         get async {
-            let count = await conversation?.kvTokenCount ?? 0
+            let count: Int
+            if let sourceGeneration {
+                let status = await sourceGeneration.status()
+                count = status.committed.retainedTokenIDs.count
+            } else {
+                count = await conversation?.kvTokenCount ?? 0
+            }
             conversationTokens.withLock { $0 = count }
             return count
         }
@@ -1096,7 +1198,7 @@ actor RealInferenceSession {
     ) async throws {
         try await performInstall(
             runtime: runtime, qwenCodec: nil, verifiedIdentity: nil,
-            key: key, context: context, onState: onState)
+            admittedBundle: nil, key: key, context: context, onState: onState)
     }
 
     func installLoadedFamily(
@@ -1109,7 +1211,7 @@ actor RealInferenceSession {
         try await performInstall(
             runtime: bundle.runtime, qwenCodec: bundle.qwenCodec,
             verifiedIdentity: bundle.verifiedIdentity,
-            key: key, context: context, onState: onState)
+            admittedBundle: bundle, key: key, context: context, onState: onState)
     }
 
     /// Test seam for AppCore's ordinary Qwen routing. The test constructs the
@@ -1149,11 +1251,14 @@ actor RealInferenceSession {
     }
 
     private static func validate(_ bundle: LoadedModelFamilyBundle) throws {
-        switch (bundle.family, bundle.runtime, bundle.verifiedIdentity, bundle.qwenCodec) {
-        case (.gemma4, .gemma, nil, nil):
+        switch (bundle.family, bundle.runtime, bundle.verifiedIdentity,
+                bundle.qwenCodec, bundle.sourceIdentity) {
+        case (.gemma4, .gemma, nil, nil, nil):
             return
-        case (.qwen3_6, .qwen, .some(let identity), .some(_))
+        case (.qwen3_6, .qwen, .some(let identity), .some(_), nil)
             where identity.family == .qwen3_6:
+            return
+        case (.qwen3_6, .qwenOfficialSource, nil, .some(_), .some(_)):
             return
         default:
             throw AppInferenceError.modelLoadFailed("loaded family bundle is inconsistent")
@@ -1167,7 +1272,7 @@ actor RealInferenceSession {
         let transition = LifecycleTransition()
         transition.retired = RetiredInstallation(
             family: loadedFamily, identity: verifiedIdentity, codec: qwenCodec,
-            qwenGeneration: qwenGeneration, runner: runner, scratch: scratch, model: model,
+            qwenGeneration: qwenGeneration, sourceGeneration: sourceGeneration, runner: runner, scratch: scratch, model: model,
             conversation: conversation, visionRuntime: visionRuntime,
             visionError: visionRuntimeError)
         activeLifecycle = transition
@@ -1182,6 +1287,8 @@ actor RealInferenceSession {
         loadedFamily = nil
         qwenCodec = nil
         qwenGeneration = nil
+        sourceGeneration = nil
+        loadedSourceIdentity = nil
         qwenTools.removeAll(keepingCapacity: true)
         qwenSystemPrompt = nil
         qwenPendingToolCalls.removeAll(keepingCapacity: true)
@@ -1226,6 +1333,7 @@ actor RealInferenceSession {
         runtime: ModelFamilyRuntime,
         qwenCodec admittedQwenCodec: QwenChatCodec?,
         verifiedIdentity admittedIdentity: LoadedRuntimeIdentity?,
+        admittedBundle: LoadedModelFamilyBundle?,
         key: SessionLoadKey,
         context: MetalContext,
         transition: LifecycleTransition,
@@ -1316,6 +1424,37 @@ actor RealInferenceSession {
                 visionRuntime: nil, visionError: nil,
                 logicalStateBytes: status.committed.logicalStateBytes,
                 expertCacheBytes: await state.expertCacheAllocatedBytes)
+        case .qwenOfficialSource(let sourceModel):
+            guard let admittedBundle,
+                  case .qwenOfficialSource(let admittedModel) = admittedBundle.runtime,
+                  admittedModel === sourceModel,
+                  let sourceIdentity = admittedBundle.sourceIdentity,
+                  admittedIdentity == nil, admittedQwenCodec != nil else {
+                throw AppInferenceError.modelLoadFailed(
+                    "source model requires its verified bundle and codec")
+            }
+            try requireActive(transition)
+            onState(.loading(.preparingRunner))
+            let sourceGeneration = try await ModelFamilyGenerationSession
+                .makeSourceConversationSession(
+                    admittedBundle: admittedBundle, proposedContext: context,
+                    directoryURL: key.directory, maxContext: key.maxContext,
+                    runtimeConfiguration: runtimeConfiguration)
+            try requireActive(transition)
+            let wireIdentity = try DecodeSourceIdentity(
+                kind: .officialSafetensorsBF16V1,
+                contentDigest: sourceIdentity.descriptorContentSHA256)
+            let status = await sourceGeneration.status()
+            return PreparedInstallation(
+                key: key, context: ModelFamilyGenerationSession.contextForLoadedRuntime(
+                    runtime, proposedContext: context), family: .qwenSource(sourceModel),
+                identity: nil, codec: admittedQwenCodec, qwenGeneration: nil,
+                tokenizer: nil, sourceGeneration: sourceGeneration,
+                sourceIdentity: wireIdentity, runner: nil, scratch: nil,
+                model: nil, conversation: nil, visionRuntime: nil,
+                visionError: nil,
+                logicalStateBytes: status.committed.logicalStateBytes,
+                expertCacheBytes: 0)
         }
     }
 
@@ -1329,6 +1468,8 @@ actor RealInferenceSession {
         verifiedIdentity = prepared.identity
         qwenCodec = prepared.codec
         qwenGeneration = prepared.qwenGeneration
+        sourceGeneration = prepared.sourceGeneration
+        loadedSourceIdentity = prepared.sourceIdentity
         qwenTools.removeAll(keepingCapacity: true)
         qwenSystemPrompt = nil
         qwenPendingToolCalls.removeAll(keepingCapacity: true)
@@ -1380,6 +1521,7 @@ actor RealInferenceSession {
         runtime: ModelFamilyRuntime,
         qwenCodec: QwenChatCodec?,
         verifiedIdentity: LoadedRuntimeIdentity?,
+        admittedBundle: LoadedModelFamilyBundle?,
         key: SessionLoadKey,
         context: MetalContext,
         onState: @Sendable (AppModelLoadState) -> Void
@@ -1390,8 +1532,8 @@ actor RealInferenceSession {
             try await drainRetired(transition)
             prepared = try await prepare(
                 runtime: runtime, qwenCodec: qwenCodec,
-                verifiedIdentity: verifiedIdentity, key: key,
-                context: context, transition: transition, onState: onState)
+                verifiedIdentity: verifiedIdentity, admittedBundle: admittedBundle,
+                key: key, context: context, transition: transition, onState: onState)
             transition.prepared = prepared
             await lifecycleCheckpoints.afterPreparation()
             try requireActive(transition)
@@ -1411,7 +1553,11 @@ actor RealInferenceSession {
     func ensureLoaded(key: SessionLoadKey,
                       onState: @Sendable (AppModelLoadState) -> Void) async throws {
         if activeLifecycle != nil { throw RealInferenceLifecycleError.lifecycleInProgress }
-        if loadedKey == key, loadedModelReadiness != nil { return }
+        if loadedKey == key, loadedModelReadiness != nil {
+            // An explicit source load must reopen the registration and trust
+            // payload rather than accept a stale same-path session.
+            guard case .qwenSource = loadedFamily else { return }
+        }
 
         let start = Date()
         let transition: LifecycleTransition
@@ -1427,7 +1573,9 @@ actor RealInferenceSession {
             try requireActive(transition)
             onState(.loading(.validatingDirectory))
             let manifest = key.directory.appendingPathComponent("manifest.json")
-            guard FileManager.default.fileExists(atPath: manifest.path) else {
+            let sourceMarker = key.directory.appendingPathComponent("official-source.json")
+            guard FileManager.default.fileExists(atPath: manifest.path)
+                    || FileManager.default.fileExists(atPath: sourceMarker.path) else {
                 throw AppInferenceError.modelNotFound(key.directory.path)
             }
             let context = try (ctx ?? MetalContext())
@@ -1444,8 +1592,8 @@ actor RealInferenceSession {
             try Self.validate(bundle!)
             prepared = try await prepare(
                 runtime: bundle!.runtime, qwenCodec: bundle!.qwenCodec,
-                verifiedIdentity: bundle!.verifiedIdentity, key: key,
-                context: context, transition: transition, onState: onState)
+                verifiedIdentity: bundle!.verifiedIdentity, admittedBundle: bundle,
+                key: key, context: context, transition: transition, onState: onState)
             transition.prepared = prepared
             bundle = nil
             await lifecycleCheckpoints.afterPreparation()
@@ -1588,7 +1736,8 @@ actor RealInferenceSession {
             case .modelIdentityChanged:
                 return .reloadRequired
             case .emptyPrompt, .unsupportedInput, .missingImage, .unexpectedImage,
-                    .duplicateImageID, .verifiedVisionUnavailable, .incompatibleVisionPack:
+                    .duplicateImageID, .verifiedVisionUnavailable,
+                    .sourceVisionUnavailable, .incompatibleVisionPack:
                 return .invalidRequest(error.description)
             }
         }
@@ -1967,13 +2116,21 @@ actor RealInferenceSession {
         continuation: AsyncThrowingStream<AppInferenceEvent, Error>.Continuation
     ) async throws -> TurnOutcome {
         let expectedKey = SessionLoadKey(
-            directory: request.modelDirectory.standardizedFileURL,
+            directory: request.modelDirectory,
             maxContext: request.maxContextTokens,
             options: request.runtimeOptions,
             forceLogitsHead: Self.forceLogitsHead(for: request))
         guard loadedKey == expectedKey else { throw AppInferenceError.reloadRequired }
         if let conversationLifecycleError { throw conversationLifecycleError }
-        let generation = try beginQwenOrdinaryGeneration()
+        let generation: QwenTurnGenerator
+        switch loadedFamily {
+        case .qwen:
+            generation = .packed(try beginQwenOrdinaryGeneration())
+        case .qwenSource:
+            generation = .source(try beginSourceOrdinaryGeneration())
+        default:
+            throw AppInferenceError.modelNotLoaded
+        }
         defer { finishQwenOrdinaryGeneration() }
 
         if !request.continuesConversation {
@@ -2009,6 +2166,9 @@ actor RealInferenceSession {
             systemPrompt = nil
             turn = .toolResults(Self.qwenToolResultMessages(results))
         case .checkpoint(let id):
+            guard generation.supportsCheckpoint else {
+                throw ConversationStateTransactionError.unsupportedFamily
+            }
             guard qwenPendingToolCalls.isEmpty, request.imageAttachments.isEmpty else {
                 throw AppInferenceError.invalidRequest(
                     "Qwen checkpoint resume does not accept another image.")
@@ -2132,14 +2292,14 @@ actor RealInferenceSession {
         do {
             try request.validate()
             let requestKey = SessionLoadKey(
-                directory: request.modelDirectory.standardizedFileURL,
+                directory: request.modelDirectory,
                 maxContext: request.maxContextTokens,
                 options: request.runtimeOptions,
                 forceLogitsHead: Self.forceLogitsHead(for: request))
             guard let loadedKey else { throw AppInferenceError.modelNotLoaded }
             switch loadedFamily {
-            case .qwen:
-                guard qwenGeneration != nil else {
+            case .qwen, .qwenSource:
+                guard qwenGeneration != nil || sourceGeneration != nil else {
                     throw AppInferenceError.invalidRequest(
                         "Qwen string, tool, and image generation requires the Phase 14 chat codec; use the prepared-token boundary.")
                 }

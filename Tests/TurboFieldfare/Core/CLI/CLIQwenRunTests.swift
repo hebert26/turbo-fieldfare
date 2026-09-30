@@ -53,7 +53,7 @@ import TurboFieldfare
                 #expect(members.map(\.name) == ["type", "properties", "required"])
                 return .init(promptTokens: 3, imageCount: 0)
             },
-            loadSession: { _, maxContext, runtime, _ in
+            loadSession: { _, maxContext, runtime, _, _ in
                 counters.loaded()
                 #expect(maxContext == 8)
                 #expect(runtime.headPath == .logits)
@@ -93,7 +93,7 @@ import TurboFieldfare
     }
 
     @Test func streamedTextAndToolEventsRemainInPublishedOrder() async throws {
-        let session = RecordingCLISession(identity: nil, events: [
+        let session = RecordingCLISession(identity: try QwenP18FixtureSupport.identity(), events: [
             .text("A"),
             .text("B"),
             .toolCall(.init(
@@ -124,12 +124,12 @@ import TurboFieldfare
         ]}]
         """#.utf8).write(to: messagesURL)
 
-        let session = RecordingCLISession(identity: nil)
+        let session = RecordingCLISession(identity: try QwenP18FixtureSupport.identity())
         let counters = CLITestCounters()
         let dependencies = CLIRunDependencies(
             inspect: { _ in
                 counters.inspected()
-                return .init(family: .qwen3_6, verifiedIdentity: nil)
+                return .init(family: .qwen3_6, verifiedIdentity: session.verifiedIdentity)
             },
             preflightQwen: { _, prompt, images, _, residency, _ in
                 counters.preflighted()
@@ -148,7 +148,7 @@ import TurboFieldfare
                 #expect(images["messages-image-2"] == directory.appendingPathComponent("second.png"))
                 return .init(promptTokens: 3, imageCount: 2)
             },
-            loadSession: { _, _, _, _ in
+            loadSession: { _, _, _, _, _ in
                 counters.loaded()
                 return session
             })
@@ -171,12 +171,12 @@ import TurboFieldfare
     func chatImagesRetainRepeatedFlagOrderResidencyAndRequestMapping() async throws {
         let first = URL(fileURLWithPath: "/tmp/first.png")
         let second = URL(fileURLWithPath: "/tmp/second.png")
-        let session = RecordingCLISession(identity: nil)
+        let session = RecordingCLISession(identity: try QwenP18FixtureSupport.identity())
         let counters = CLITestCounters()
         let dependencies = CLIRunDependencies(
             inspect: { _ in
                 counters.inspected()
-                return .init(family: .qwen3_6, verifiedIdentity: nil)
+                return .init(family: .qwen3_6, verifiedIdentity: session.verifiedIdentity)
             },
             preflightQwen: { _, prompt, images, _, residency, maximum in
                 counters.preflighted()
@@ -196,7 +196,7 @@ import TurboFieldfare
                 #expect(ids == ["cli-image-1", "cli-image-2"])
                 return .init(promptTokens: 3, imageCount: 2)
             },
-            loadSession: { _, maxContext, _, _ in
+            loadSession: { _, maxContext, _, _, _ in
                 counters.loaded()
                 #expect(maxContext == 12)
                 return session
@@ -234,7 +234,7 @@ import TurboFieldfare
                 counters.preflighted()
                 throw UnexpectedCLITestCall.preflight
             },
-            loadSession: { _, _, _, _ in
+            loadSession: { _, _, _, _, _ in
                 counters.loaded()
                 throw UnexpectedCLITestCall.load
             })
@@ -310,18 +310,18 @@ import TurboFieldfare
 
     @Test func preflightContextOverflowFailsBeforeSessionLoad() async throws {
         let counters = CLITestCounters()
-        let session = RecordingCLISession(identity: nil)
+        let session = RecordingCLISession(identity: try QwenP18FixtureSupport.identity())
         let dependencies = CLIRunDependencies(
             inspect: { _ in
                 counters.inspected()
-                return .init(family: .qwen3_6, verifiedIdentity: nil)
+                return .init(family: .qwen3_6, verifiedIdentity: session.verifiedIdentity)
             },
             preflightQwen: { _, _, _, _, _, _ in
                 counters.preflighted()
                 throw ModelFamilyGenerationError.contextOverflow(
                     prompt: 8, maxNew: 100, maximum: 8)
             },
-            loadSession: { _, _, _, _ in
+            loadSession: { _, _, _, _, _ in
                 counters.loaded()
                 return session
             })
@@ -350,7 +350,7 @@ import TurboFieldfare
                 #expect(images.isEmpty)
                 return .init(promptTokens: min(3, maximum - 1), imageCount: 0)
             },
-            loadSession: { _, _, _, _ in
+            loadSession: { _, _, _, _, _ in
                 counters.loaded()
                 return session
             })
@@ -366,7 +366,7 @@ import TurboFieldfare
                 counters.preflighted()
                 throw UnexpectedCLITestCall.preflight
             },
-            loadSession: { _, _, _, _ in
+            loadSession: { _, _, _, _, _ in
                 counters.loaded()
                 throw UnexpectedCLITestCall.load
             })
@@ -421,6 +421,7 @@ private final class CLITestCounters: @unchecked Sendable {
 private final class RecordingCLISession: CLIGenerationSession, @unchecked Sendable {
     let family: LoadedRuntimeFamily = .qwen3_6
     let verifiedIdentity: LoadedRuntimeIdentity?
+    let sourceIdentity: LoadedRuntimeSourceIdentity? = nil
     private let lock = NSLock()
     private(set) var request: ModelFamilyGenerationRequest?
     private let events: [ModelFamilyGenerationEvent]
@@ -431,6 +432,13 @@ private final class RecordingCLISession: CLIGenerationSession, @unchecked Sendab
     ) {
         verifiedIdentity = identity
         self.events = events
+    }
+
+    func preflightLoadedSource(
+        prompt: ModelFamilyGenerationPrompt, imagesByID: [String: URL],
+        visionResidency: VisionResidencyPolicy
+    ) async throws -> ModelFamilyGenerationPreflight {
+        throw UnexpectedCLITestCall.preflight
     }
 
     func generate(

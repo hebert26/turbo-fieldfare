@@ -26,14 +26,37 @@ let package = Package(
             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
     ],
     targets: [
+        .binaryTarget(
+            name: "TurboFieldfareLibJPEG",
+            path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+        ),
+        .target(
+            name: "TurboFieldfareJPEGBridge",
+            dependencies: ["TurboFieldfareLibJPEG"],
+            path: "Sources/TurboFieldfareJPEGBridge",
+            publicHeadersPath: "include"
+        ),
+        .target(
+            name: "TurboFieldfareSourceTopK",
+            path: "Sources/TurboFieldfareSourceTopK",
+            publicHeadersPath: "include"
+        ),
         .target(
             name: "TurboFieldfareFormat",
             path: "Sources/TurboFieldfareFormat"
         ),
         .target(
+            name: "TurboFieldfareOfficialQwenSource",
+            dependencies: ["TurboFieldfareFormat"],
+            path: "Sources/TurboFieldfareOfficialQwenSource"
+        ),
+        .target(
             name: "TurboFieldfare",
             dependencies: [
                 "TurboFieldfareFormat",
+                "TurboFieldfareOfficialQwenSource",
+                "TurboFieldfareJPEGBridge",
+                "TurboFieldfareSourceTopK",
                 .product(name: "Tokenizers", package: "swift-transformers"),
                 .product(name: "Hub", package: "swift-transformers"),
             ],
@@ -44,7 +67,7 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareRepackCore",
-            dependencies: ["TurboFieldfareFormat"],
+            dependencies: ["TurboFieldfareFormat", "TurboFieldfareOfficialQwenSource"],
             path: "Sources/TurboFieldfareRepack/Core"
         ),
         .executableTarget(
@@ -65,7 +88,10 @@ let package = Package(
         ),
         .target(
             name: "TurboFieldfareAppCore",
-            dependencies: ["TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
+            dependencies: [
+                "TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol",
+                "TurboFieldfareOfficialQwenSource", "TurboFieldfareFormat",
+            ],
             path: "Sources/TurboFieldfareApp/Core",
             resources: [
                 .copy("Resources/app-prompts.json"),
@@ -88,13 +114,17 @@ let package = Package(
         ),
         .executableTarget(
             name: "TurboFieldfareDecodeService",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol"],
+            dependencies: [
+                "TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol",
+                "TurboFieldfareFormat", "TurboFieldfareOfficialQwenSource",
+            ],
             path: "Sources/TurboFieldfareDecodeService"
         ),
         .target(
             name: "TurboFieldfareServerCore",
             dependencies: [
                 "TurboFieldfare",
+                "TurboFieldfareOfficialQwenSource",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
@@ -118,6 +148,11 @@ let package = Package(
             name: "TurboFieldfareValidationSupport",
             dependencies: ["TurboFieldfare"],
             path: "Sources/TurboFieldfareValidation/Support"
+        ),
+        .testTarget(
+            name: "TurboFieldfareOfficialQwenSourceTests",
+            dependencies: ["TurboFieldfareOfficialQwenSource"],
+            path: "Tests/TurboFieldfareOfficialQwenSource"
         ),
         .testTarget(
             name: "TurboFieldfareFormatTests",
@@ -144,6 +179,17 @@ let package = Package(
                 .copy("Runtime/Vision/Fixtures/images"),
                 .copy("QwenFixtures/qwen36-tiny-fixtures.json"),
                 .copy("QwenFixtures/qwen36-tiny-text-model-fixtures.json"),
+                .copy("QwenFixtures/official-bf16-reference-cases.json"),
+                .copy("QwenFixtures/BF16ProjectionOracle"),
+                .copy("QwenFixtures/full-attention-source"),
+                .copy("QwenFixtures/attention-cached-128"),
+                .copy("QwenFixtures/large-moe-parity"),
+                .copy("QwenFixtures/vision-jpeg-decode"),
+                .copy("QwenFixtures/vision-source-layernorm"),
+                .copy("QwenFixtures/vision-patch-projection"),
+                .copy("QwenFixtures/vision-source-rotary"),
+                .copy("QwenFixtures/vision-source-attention"),
+                .copy("QwenFixtures/source-topk"),
             ]
         ),
         .testTarget(
@@ -153,12 +199,19 @@ let package = Package(
         ),
         .testTarget(
             name: "TurboFieldfareAppCoreTests",
-            dependencies: ["TurboFieldfareAppCore", "TurboFieldfare", "TurboFieldfareRepackCore", "TurboFieldfareDecodeProtocol"],
+            dependencies: [
+                "TurboFieldfareAppCore", "TurboFieldfare", "TurboFieldfareRepackCore",
+                "TurboFieldfareDecodeProtocol", "TurboFieldfareOfficialQwenSource",
+            ],
             path: "Tests/TurboFieldfareApp/Core"
         ),
         .testTarget(
             name: "TurboFieldfareDecodeServiceTests",
-            dependencies: ["TurboFieldfareDecodeService", "TurboFieldfareAppCore", "TurboFieldfareDecodeProtocol"],
+            dependencies: [
+                "TurboFieldfareDecodeService", "TurboFieldfareAppCore",
+                "TurboFieldfareDecodeProtocol", "TurboFieldfareFormat",
+                "TurboFieldfareOfficialQwenSource",
+            ],
             path: "Tests/TurboFieldfareDecodeService"
         ),
         .testTarget(
@@ -171,10 +224,12 @@ let package = Package(
             name: "TurboFieldfareServerTests",
             dependencies: [
                 "TurboFieldfareServerCore",
+                "TurboFieldfareFormat", "TurboFieldfareOfficialQwenSource",
                 .product(name: "NIOEmbedded", package: "swift-nio"),
             ],
             path: "Tests/TurboFieldfareServer",
             resources: [.copy("Fixtures")]
         ),
-    ]
+    ],
+    cxxLanguageStandard: .cxx17
 )

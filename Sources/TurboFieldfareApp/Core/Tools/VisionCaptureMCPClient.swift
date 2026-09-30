@@ -177,6 +177,7 @@ actor VisionCaptureMCPClient {
     private let session: URLSession
     private var nextID: Int64 = 1
     private var isPrepared = false
+    private var typedExecuteActions: Set<String>?
 
     init(port: Int) throws {
         guard (1...65_535).contains(port),
@@ -221,7 +222,95 @@ actor VisionCaptureMCPClient {
         guard names == ["execute"] else {
             throw VisionCaptureMCPError.executeUnavailable
         }
+        if case .object(let tool)? = tools.first,
+           case .object(let schema)? = tool["inputSchema"],
+           case .array(let required)? = schema["required"],
+           required.contains(.string("action")) {
+            guard case .object(let properties)? = schema["properties"],
+                  case .object(let action)? = properties["action"],
+                  case .array(let values)? = action["enum"] else {
+                throw VisionCaptureMCPError.invalidProtocol
+            }
+            let actions = values.compactMap { value -> String? in
+                guard case .string(let name) = value else { return nil }
+                return name
+            }
+            guard !actions.isEmpty, actions.count == values.count else {
+                throw VisionCaptureMCPError.invalidProtocol
+            }
+            typedExecuteActions = Set(actions)
+        }
         isPrepared = true
+    }
+
+    /// Adapt only the outbound contract. Host proof and identity checks keep the
+    /// original request, while the server resolves the session kind from its ID.
+    static func typedExecuteArguments(
+        _ arguments: JSONValue,
+        supportedActions: Set<String>
+    ) throws -> JSONValue {
+        func refused(_ reason: String) -> VisionCaptureMCPError {
+            .rpc("Unsupported typed execute request: \(reason). No action was sent.")
+        }
+        guard case .object(var object) = arguments,
+              case .string(let request)? = object["request"],
+              case .object(var parameters)? = object["parameters"] else {
+            throw refused("request and parameters are required")
+        }
+        let allowedKeys: Set<String> = [
+            "request", "bundle_id", "parameters", "session_id", "session_kind", "mode",
+        ]
+        guard Set(object.keys).isSubset(of: allowedKeys) else {
+            throw refused("unexpected top-level field")
+        }
+        if let kind = object["session_kind"] {
+            guard kind == .string("flow") || kind == .string("learning"),
+                  case .string(let session)? = object["session_id"],
+                  !session.isEmpty else {
+                throw refused("session kind is not bound to a known session")
+            }
+            object.removeValue(forKey: "session_kind")
+        }
+        let fixed: [String: String] = [
+            "launch app": "launch_app",
+            "describe screen": "describe_screen",
+            "take a screenshot": "take_screenshot",
+            "inspect cache": "inspect_cache",
+            "tap cached action": "tap_cached_action",
+            "execute cached action": "execute_cached_action",
+            "revalidate cached action": "revalidate_cached_action",
+            "execute observed action": "execute_observed_action",
+            "describe system alert": "describe_system_alert",
+            "press system alert button": "press_system_alert_button",
+            "go back": "go_back",
+        ]
+        let action: String
+        if let mapped = fixed[request] {
+            action = mapped
+        } else {
+            let forms = [("tap ", "tap", "query"),
+                         ("type ", "type", "text"),
+                         ("swipe ", "swipe", "direction")]
+            guard let form = forms.first(where: { request.hasPrefix($0.0) }) else {
+                throw refused("unknown operation")
+            }
+            let value = String(request.dropFirst(form.0.count))
+            guard !value.isEmpty,
+                  form.1 != "tap" || !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  form.1 != "swipe" || ["up", "down", "left", "right"].contains(value),
+                  parameters[form.2] == nil else {
+                throw refused("empty or conflicting embedded operation value")
+            }
+            action = form.1
+            parameters[form.2] = .string(value)
+        }
+        guard supportedActions.contains(action) else {
+            throw refused("operation is not advertised by the server")
+        }
+        object.removeValue(forKey: "request")
+        object["action"] = .string(action)
+        object["parameters"] = .object(parameters)
+        return .object(object)
     }
 
     func execute(
@@ -229,6 +318,9 @@ actor VisionCaptureMCPClient {
         beforeDispatch: @Sendable () async throws -> Void = {}
     ) async throws -> VisionCaptureMCPResult {
         try await prepare()
+        let wireArguments = try typedExecuteActions.map {
+            try Self.typedExecuteArguments(arguments, supportedActions: $0)
+        } ?? arguments
         let isScreenshot: Bool
         if case .object(let request) = arguments {
             isScreenshot = request["request"] == .string("take a screenshot")
@@ -243,7 +335,7 @@ actor VisionCaptureMCPClient {
             method: "tools/call",
             params: .object([
                 "name": .string("execute"),
-                "arguments": arguments,
+                "arguments": wireArguments,
             ]),
             responseLimit: isScreenshot ? VisionCaptureScreenshot.maximumResponseBytes
                 : Self.maximumResponseBytes)

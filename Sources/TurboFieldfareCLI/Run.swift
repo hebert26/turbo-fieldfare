@@ -47,12 +47,26 @@ public struct RunResult: Equatable, Sendable {
     public init(exitCode: Int32) { self.exitCode = exitCode }
 }
 
+func routedExpertCacheFooter(_ summary: RoutedExpertCacheSummary) -> String {
+    "\n[expert-cache scope=lifetime configured-slots=\(summary.configuredSlots) "
+        + "effective-slots=\(summary.effectiveSlots) policy=\(summary.policy) "
+        + "allocated-bytes=\(summary.allocatedBytes) "
+        + "peak-allocated-bytes=\(summary.peakAllocatedBytes) "
+        + "hits=\(summary.hits) misses=\(summary.misses)]\n"
+}
+
 protocol CLIGenerationSession: Sendable {
     var family: LoadedRuntimeFamily { get }
     var verifiedIdentity: LoadedRuntimeIdentity? { get }
+    var sourceIdentity: LoadedRuntimeSourceIdentity? { get }
+    func preflightLoadedSource(
+        prompt: ModelFamilyGenerationPrompt,
+        imagesByID: [String: URL],
+        visionResidency: VisionResidencyPolicy
+    ) async throws -> ModelFamilyGenerationPreflight
     func generate(
         _ request: ModelFamilyGenerationRequest,
-        onEvent: @Sendable (ModelFamilyGenerationEvent) -> Void
+        onEvent: @escaping @Sendable (ModelFamilyGenerationEvent) -> Void
     ) async throws -> ModelFamilyGenerationResult
 }
 
@@ -65,7 +79,7 @@ struct CLIRunDependencies: Sendable {
         VisionResidencyPolicy, Int
     ) throws -> ModelFamilyGenerationPreflight
     var loadSession: @Sendable (
-        URL, Int, RuntimeConfiguration, URL?
+        URL, Int, RuntimeConfiguration, URL?, ModelIntegrityPolicy
     ) throws -> any CLIGenerationSession
 
     static let live = CLIRunDependencies(
@@ -79,12 +93,13 @@ struct CLIRunDependencies: Sendable {
                 visionResidency: residency,
                 maxContext: maximum)
         },
-        loadSession: { directory, maxContext, runtime, visionPack in
+        loadSession: { directory, maxContext, runtime, visionPack, integrity in
             try ModelFamilyGenerationSession.load(
                 directoryURL: directory,
                 maxContext: maxContext,
                 runtimeConfiguration: runtime,
-                visionPackURL: visionPack)
+                visionPackURL: visionPack,
+                integrityPolicy: integrity)
         })
 }
 
@@ -113,6 +128,9 @@ func run(
         }
         let admission = try dependencies.inspect(modelURL)
         if admission.family == .gemma4 {
+            guard args.sourceIntegrity == nil else {
+                return errored(stderr, "--source-integrity requires an original BF16 source", 2)
+            }
             // Preserve the legacy parser's exact role/content acceptance before
             // its tokenizer or model is opened.
             _ = try parseInput(args: args)
@@ -144,9 +162,48 @@ func run(
                 PrefillRuntimeConfig.autoChunkTokens(promptTokens: args.maxContext)
         }
         let visionPackURL = args.visionPack.map { URL(fileURLWithPath: $0) }
-        let preflight = try dependencies.preflightQwen(
-            modelURL, parsed.prompt, parsed.imagesByID,
-            visionPackURL, args.visionResidency, args.maxContext)
+        let sourceBacking = admission.verifiedIdentity == nil
+        guard sourceBacking || args.sourceIntegrity == nil else {
+            return errored(stderr, "--source-integrity requires an original BF16 source", 2)
+        }
+        let runtime = try effectiveArgs.resolvedRuntimeConfiguration(
+            forceLogitsHead: true,
+            imagePrompt: !parsed.imagesByID.isEmpty)
+        let preflight: ModelFamilyGenerationPreflight
+        let session: any CLIGenerationSession
+        if sourceBacking {
+            // Obvious missing companions fail before source payload verification.
+            // A present companion is admitted against the loaded source below.
+            if !parsed.imagesByID.isEmpty {
+                let companion = try visionPackURL
+                    ?? VisionPackLocation.companionURL(forTextModel: modelURL)
+                guard FileManager.default.fileExists(atPath: companion.path) else {
+                    throw ModelFamilyGenerationError.sourceVisionUnavailable
+                }
+            }
+            session = try dependencies.loadSession(
+                modelURL, args.maxContext, runtime, visionPackURL,
+                (args.sourceIntegrity ?? .fullSHA256).policy)
+            guard session.family == .qwen3_6,
+                  session.verifiedIdentity == nil,
+                  session.sourceIdentity != nil else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+            preflight = try await session.preflightLoadedSource(
+                prompt: parsed.prompt, imagesByID: parsed.imagesByID,
+                visionResidency: args.visionResidency)
+        } else {
+            preflight = try dependencies.preflightQwen(
+                modelURL, parsed.prompt, parsed.imagesByID,
+                visionPackURL, args.visionResidency, args.maxContext)
+            session = try dependencies.loadSession(
+                modelURL, args.maxContext, runtime, visionPackURL, .fullSha256)
+            guard session.family == .qwen3_6,
+                  session.verifiedIdentity != nil,
+                  session.sourceIdentity == nil else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+        }
         if args.prefillChunkTokensAuto, !args.quiet {
             stderr.write(Data(
                 "[prefill chunk auto: verified Qwen uses native prefill]\n".utf8))
@@ -161,25 +218,20 @@ func run(
             stopStrings: args.stops,
             extraStopTokens: [])
         try config.validate()
-        let runtime = try effectiveArgs.resolvedRuntimeConfiguration(
-            forceLogitsHead: true,
-            imagePrompt: !parsed.imagesByID.isEmpty)
-        let session = try dependencies.loadSession(
-            modelURL,
-            args.maxContext,
-            runtime,
-            visionPackURL)
-        guard session.family == .qwen3_6 else {
-            return errored(stderr, "admitted family changed while loading", 1)
-        }
         if args.showModelIdentity {
-            guard let identity = session.verifiedIdentity else {
-                return errored(stderr, "verified Qwen identity is unavailable", 1)
+            if let identity = session.sourceIdentity {
+                let line = sourceIdentityLine(
+                    contentSHA256: identity.descriptorContentSHA256,
+                    integrity: args.sourceIntegrity ?? .fullSHA256)
+                stderr.write(Data(line.utf8))
+            } else if let identity = session.verifiedIdentity {
+                let line = "[model family=\(identity.family.rawValue) id=\(identity.modelID) "
+                    + "revision=\(identity.sourceRevision) "
+                    + "format=\(identity.formatMajor).\(identity.formatMinor)]\n"
+                stderr.write(Data(line.utf8))
+            } else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
             }
-            let line = "[model family=\(identity.family.rawValue) id=\(identity.modelID) "
-                + "revision=\(identity.sourceRevision) "
-                + "format=\(identity.formatMajor).\(identity.formatMinor)]\n"
-            stderr.write(Data(line.utf8))
         }
         let result = try await session.generate(
             ModelFamilyGenerationRequest(
@@ -198,6 +250,9 @@ func run(
             }
         }
         if !args.quiet {
+            if let summary = result.cacheSummary {
+                stderr.write(Data(routedExpertCacheFooter(summary).utf8))
+            }
             let rate = result.decodeSeconds > 0
                 ? Double(result.newTokens) / result.decodeSeconds : 0
             let footer = "\n[stop=\(String(describing: result.reason)) "
@@ -215,6 +270,11 @@ func run(
     } catch {
         return errored(stderr, "\(error)", 1)
     }
+}
+
+func sourceIdentityLine(contentSHA256: String, integrity: CLISourceIntegrityMode) -> String {
+    "[model family=qwen3_6 backing=official-safetensors-bf16-v1 "
+        + "content-sha256=\(contentSHA256) verification=\(integrity.rawValue)]\n"
 }
 
 private struct ParsedFamilyRequest {
@@ -850,6 +910,7 @@ private func legacyRun(args: Args,
             }
 
         if !args.quiet {
+            stderr.write(Data(routedExpertCacheFooter(model.routedExpertCacheSummary).utf8))
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds
                 : 0

@@ -223,7 +223,7 @@ struct InspectorView: View {
             }
 
             if model.selectedModelID == .qwen3_6 {
-                Text("Qwen image support is prepared with the selected local source during model conversion.")
+                Text("Qwen image support requires a valid adjacent .vision.gturbo pack.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } else {
@@ -436,27 +436,13 @@ struct InspectorView: View {
 
     private var qwenSourceSection: some View {
         Section("Local Qwen Source") {
-            Toggle("Include image support", isOn: Binding {
-                qwenSourceIncludesVision
-            } set: { includesVision in
-                qwenSourceIncludesVision = includesVision
-                guard let source = model.qwenSourceDirectory,
-                      model.canSelectModel else { return }
-                model.configureQwenSourceDirectory(
-                    source,
-                    includesVision: includesVision)
-                qwenSourceIncludesVision = model.qwenSourceIncludesVision
-            })
-            .toggleStyle(.switch)
-            .disabled(!model.canSelectModel)
-
             Button("Choose Qwen Source Folder…") {
                 showingQwenSourceImporter = true
             }
             .disabled(!model.canSelectModel)
             .keyboardShortcut("q", modifiers: [.command, .option])
             .accessibilityIdentifier("qwen-source-folder-chooser")
-            .accessibilityHint("Choose the pinned official Qwen source folder for local verification and conversion")
+            .accessibilityHint("Choose the original BF16 Qwen source folder for verification and registration")
 
             qwenSourceStatus
 
@@ -478,11 +464,14 @@ struct InspectorView: View {
                     }
                     .buttonStyle(.borderless)
                 }
-                Button("Clear Source", role: .destructive) {
+                Button("Clear Source Selection") {
                     model.clearQwenSourceDirectory()
                 }
                 .disabled(!model.canSelectModel)
             }
+            Text("Image support requires a valid adjacent .vision.gturbo pack. Original source files are never removed by this control.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -495,21 +484,25 @@ struct InspectorView: View {
         }
         switch model.qwenSourceConfigurationState {
         case .notConfigured:
-            Text("Choose an existing official source folder. Conversion starts only when you use the Convert button.")
+            Text("Choose the original BF16 source folder, then select Verify and Register. Registration does not copy model weights.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         case .checking:
             HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
-                Text("Verifying source files and available space")
+                Text("Checking the selected source folder")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
         case .ready:
-            Label("Source verified. Qwen is available in the model picker.",
-                  systemImage: "checkmark.circle.fill")
+            Label(model.installationStatus(for: .qwen3_6) == .complete
+                  ? "BF16 source verified and registered."
+                  : "Source selected. Verify and Register to authenticate it.",
+                  systemImage: model.installationStatus(for: .qwen3_6) == .complete
+                    ? "checkmark.circle.fill" : "folder")
                 .font(.caption)
-                .foregroundStyle(.green)
+                .foregroundStyle(model.installationStatus(for: .qwen3_6) == .complete
+                    ? Color.green : Color.secondary)
         case .failed(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
@@ -532,7 +525,7 @@ struct InspectorView: View {
             LabeledContent("Context") {
                 Picker("Context", selection: $model.maxContextTokens) {
                     ForEach(AppContextLengthOption.allCases) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                        Text(option.menuLabel(for: model.selectedModelEntry.family)).tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)
@@ -542,14 +535,17 @@ struct InspectorView: View {
             LabeledContent("Slots") {
                 Picker("Slots", selection: $model.runtimeOptions.expertCacheSlots) {
                     ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
-                        Text(AppRuntimeOptions.slotsLabel(for: slots)).tag(slots)
+                        Text(AppRuntimeOptions.slotsLabel(
+                            for: slots, family: model.selectedModelEntry.family)).tag(slots)
                     }
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 8K context and 16 slots and apply after reloading the model.")
+            Text(model.selectedModelID == .qwen3_6
+                 ? "More slots can use more memory. Qwen conversation state uses FP32, and total memory fit has not been measured. Changes apply after reloading the model."
+                 : "More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 8K context and 16 slots and apply after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

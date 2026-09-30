@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "width": 256,
+  "topK": 8,
+  "rows": 3789,
+  "actualSavedProbabilityRow": 3788,
+  "inputFile": "source-topk-inputs.fp32-le.bin",
+  "inputSHA256": "d763364a698b01c9e6a3c077dd85e4f748a50109d2efebef62b46ec85f92e5ce",
+  "expectedFile": "torch-ids.i64-le.bin",
+  "expectedSHA256": "d7b3bc647b2250947107fecbd7c04cd4310c7c77afe348b1d7957cf9e0374416",
+  "expectedSource": "Torch 2.10.0 CPU topk(8) with one thread, independently matched by the pinned native libc++ probe"
+}

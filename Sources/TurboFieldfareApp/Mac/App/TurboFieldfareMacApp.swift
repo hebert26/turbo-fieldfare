@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import TurboFieldfareAppCore
 import TurboFieldfareMacPresentation
 import SwiftUI
@@ -34,6 +35,13 @@ struct TurboFieldfareMacApp: App {
     @State private var model: AppModel
 
     init() {
+        do {
+            try AppSettingsLaunchConfiguration.validate()
+        } catch {
+            FileHandle.standardError.write(Data(
+                "Invalid TURBOFIELDFARE_SETTINGS_PATH: \(error.localizedDescription)\n".utf8))
+            exit(EXIT_FAILURE)
+        }
         let model = AppModel(
             client: DecodeServiceInferenceClient(),
             visionRuntimeSupported: AppModel.currentDeviceSupportsVisionRuntime,

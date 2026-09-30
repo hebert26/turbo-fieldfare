@@ -29,9 +29,7 @@ public struct AppModelCatalogEntry: Equatable, Sendable, Identifiable {
         self.installRoute = installRoute
     }
 
-    /// True only when the app can begin installation without first receiving a
-    /// local source. Qwen deliberately returns false until a verified local
-    /// source is supplied to the P21 conversion client.
+    /// Gemma can download itself. Qwen needs an existing local BF16 source.
     public var isInstallable: Bool {
         installRoute.isInstallableWithoutLocalSource
     }

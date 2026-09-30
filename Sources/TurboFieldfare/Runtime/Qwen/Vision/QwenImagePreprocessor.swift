@@ -1,4 +1,5 @@
 import CoreGraphics
+import CryptoKit
 import Foundation
 import ImageIO
 import Metal
@@ -184,38 +185,8 @@ final class QwenImagePreprocessor {
     func preprocess(_ plan: QwenImagePlan) throws -> QwenVisionPixelBuffer {
         let metadata = plan.metadata
         let geometry = plan.geometry
-        let options: [CFString: Any] = [
-            kCGImageSourceCreateThumbnailFromImageAlways: true,
-            kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceThumbnailMaxPixelSize:
-                max(metadata.orientedWidth, metadata.orientedHeight),
-            kCGImageSourceShouldCacheImmediately: true,
-            kCGImageSourceShouldAllowFloat: false,
-        ]
-        guard let decoded = CGImageSourceCreateThumbnailAtIndex(
-            plan.opened.source, 0, options as CFDictionary) else {
-            throw VisionImageError.decodeFailed
-        }
-        let sourceRowBytes = try multiply(decoded.width, 4, "source row bytes")
-        let sourceBytes = try multiply(sourceRowBytes, decoded.height, "source bytes")
-        let sourceRGBA = UnsafeMutableRawPointer.allocate(
-            byteCount: sourceBytes, alignment: 64)
-        defer { sourceRGBA.deallocate() }
-        sourceRGBA.initializeMemory(as: UInt8.self, repeating: 255, count: sourceBytes)
-        guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(
-                data: sourceRGBA, width: decoded.width, height: decoded.height,
-                bitsPerComponent: 8, bytesPerRow: sourceRowBytes,
-                space: colorSpace,
-                bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
-                    | CGImageAlphaInfo.premultipliedLast.rawValue) else {
-            throw VisionImageError.allocationFailed
-        }
-        context.setFillColor(CGColor(gray: 1, alpha: 1))
-        context.fill(CGRect(x: 0, y: 0, width: decoded.width, height: decoded.height))
-        context.draw(decoded, in: CGRect(
-            x: 0, y: 0, width: decoded.width, height: decoded.height))
-        withExtendedLifetime(context) {}
+        let source = try sourceRGBA(for: plan)
+        let sourceRowBytes = try multiply(source.width, 4, "source row bytes")
 
         let targetRowBytes = try multiply(geometry.processedWidth, 4, "target row bytes")
         let targetBytes = try multiply(
@@ -223,14 +194,16 @@ final class QwenImagePreprocessor {
         let targetRGBA = UnsafeMutableRawPointer.allocate(
             byteCount: targetBytes, alignment: 64)
         defer { targetRGBA.deallocate() }
-        let resizeScratchBytes = TorchBicubicResize.resize(
-            source: sourceRGBA.assumingMemoryBound(to: UInt8.self),
-            sourceWidth: decoded.width, sourceHeight: decoded.height,
-            sourceRowBytes: sourceRowBytes,
-            destination: targetRGBA.assumingMemoryBound(to: UInt8.self),
-            destinationWidth: geometry.processedWidth,
-            destinationHeight: geometry.processedHeight,
-            destinationRowBytes: targetRowBytes)
+        let resizeScratchBytes = source.pixels.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
+            TorchBicubicResize.resize(
+                source: bytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
+                sourceWidth: source.width, sourceHeight: source.height,
+                sourceRowBytes: sourceRowBytes,
+                destination: targetRGBA.assumingMemoryBound(to: UInt8.self),
+                destinationWidth: geometry.processedWidth,
+                destinationHeight: geometry.processedHeight,
+                destinationRowBytes: targetRowBytes)
+        }
 
         let patchElements = try multiply(
             geometry.patchRows, config.patchWidth, "patch elements")
@@ -257,7 +230,7 @@ final class QwenImagePreprocessor {
             rowBytes: targetRowBytes, geometry: geometry,
             patches: patches, positions: positions)
         let allocated = try sum([
-            sourceBytes, targetBytes, resizeScratchBytes, patchBytes, positionBytes,
+            source.allocatedBytes, targetBytes, resizeScratchBytes, patchBytes, positionBytes,
         ], "preprocessor allocation bytes")
         return QwenVisionPixelBuffer(
             patchesBF16: patches, positionsInt32x2: positions,
@@ -265,6 +238,53 @@ final class QwenImagePreprocessor {
             imageDigest: plan.imageDigest,
             wallNanoseconds: nanoseconds(plan.started.duration(to: .now)),
             allocatedBytes: allocated)
+    }
+
+    private func sourceRGBA(for plan: QwenImagePlan) throws
+        -> (pixels: Data, width: Int, height: Int, allocatedBytes: Int) {
+        let metadata = plan.metadata
+        if metadata.typeIdentifier == "public.jpeg", (metadata.bitsPerComponent ?? 8) == 8 {
+            let encoded = try plan.opened.copyEncodedBytes(maximum: metadataReader.limits.maximumEncodedBytes)
+            let digest = SHA256.hash(data: encoded).map { String(format: "%02x", $0) }.joined()
+            guard digest == plan.imageDigest else {
+                throw VisionImageError.invalidSource("admitted JPEG bytes changed before decode")
+            }
+            let decoded = try QwenJPEGDecoder.decode(
+                encoded: encoded, metadata: metadata, limits: metadataReader.limits)
+            return (decoded.rgba, decoded.width, decoded.height, decoded.allocatedBytes)
+        }
+        // Preserve the existing ImageIO conversion for other formats and
+        // higher-precision JPEGs outside the qualified 8-bit native decoder.
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: max(metadata.orientedWidth, metadata.orientedHeight),
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceShouldAllowFloat: false,
+        ]
+        guard let decoded = CGImageSourceCreateThumbnailAtIndex(
+            plan.opened.source, 0, options as CFDictionary) else {
+            throw VisionImageError.decodeFailed
+        }
+        let rowBytes = try multiply(decoded.width, 4, "source row bytes")
+        let byteCount = try multiply(rowBytes, decoded.height, "source bytes")
+        var rgba = Data(count: byteCount)
+        try rgba.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            bytes.initializeMemory(as: UInt8.self, repeating: 255)
+            guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+                  let context = CGContext(
+                    data: bytes.baseAddress!, width: decoded.width, height: decoded.height,
+                    bitsPerComponent: 8, bytesPerRow: rowBytes, space: colorSpace,
+                    bitmapInfo: CGBitmapInfo.byteOrder32Big.rawValue
+                        | CGImageAlphaInfo.premultipliedLast.rawValue) else {
+                throw VisionImageError.allocationFailed
+            }
+            context.setFillColor(CGColor(gray: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: decoded.width, height: decoded.height))
+            context.draw(decoded, in: CGRect(x: 0, y: 0, width: decoded.width, height: decoded.height))
+            withExtendedLifetime(context) {}
+        }
+        return (rgba, decoded.width, decoded.height, byteCount)
     }
 
     private func patchify(

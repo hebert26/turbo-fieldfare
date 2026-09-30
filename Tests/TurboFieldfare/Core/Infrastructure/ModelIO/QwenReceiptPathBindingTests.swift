@@ -175,6 +175,58 @@ func qwenReceiptRejectsWrongMissingAndDigestMismatchedBindings() throws {
     }
 }
 
+@Test("Qwen-provenance receipt roundtrip binds a physical path and hashes tiny opaque files")
+func qwenProvenanceReceiptRoundTripBindsPhysicalPathAndHashesTinyOpaqueFiles() throws {
+    let fixture = try ReceiptPathFixture("tiny-opaque-qwen")
+    defer { fixture.remove() }
+
+    let output = fixture.root.appendingPathComponent("qwen-receipt-roundtrip-toy",
+                                                      isDirectory: true)
+    try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
+    // These opaque bytes are not a valid packed/Gemma model; this covers only
+    // receipt roundtrip, path binding and hashes of tiny files.
+    let manifestData = Data("opaque tiny manifest bytes".utf8)
+    let payload = Data("opaque tiny payload bytes".utf8)
+    let manifestURL = output.appendingPathComponent("manifest.json")
+    let payloadURL = output.appendingPathComponent("model_weights.bin")
+    try manifestData.write(to: manifestURL)
+    try payload.write(to: payloadURL)
+
+    let manifestSHA = sha256(manifestData)
+    let payloadSHA = sha256(payload)
+    #expect(try Sha256Verifier.hashFile(at: manifestURL) == manifestSHA)
+    #expect(try Sha256Verifier.hashFile(at: payloadURL) == payloadSHA)
+    try Sha256Verifier.verifyFile(at: payloadURL,
+                                  named: "model_weights.bin",
+                                  expectedHex: payloadSHA)
+
+    let receiptData = try VerifiedInstallReceiptWriter.encode(
+        outputDir: output.path,
+        manifestSha256: manifestSHA,
+        manifestSize: UInt64(manifestData.count),
+        sourceRepoID: qwenRepository,
+        sourceRevision: qwenRevision,
+        verificationTimestamp: "tiny-fixture-time",
+        conversionProvenance: conversionProvenance(),
+        files: outputFiles(payload))
+    try receiptData.write(to: output.appendingPathComponent(
+        VerifiedInstallReceiptReader.fileName))
+
+    let receipt = try VerifiedInstallReceiptReader.load(directoryURL: output)
+    #expect(receipt.sourceRepoID == qwenRepository)
+    #expect(receipt.sourceRevision == qwenRevision)
+    let payloadEntry = try #require(receipt.files["model_weights.bin"])
+    #expect(payloadEntry.size == UInt64(payload.count))
+    #expect(payloadEntry.sha256 == payloadSHA)
+    try Sha256Verifier.verifyFile(at: payloadURL,
+                                  named: "model_weights.bin",
+                                  expectedHex: payloadEntry.sha256)
+    try VerifiedInstallReceiptReader.validateManifestBinding(
+        receipt,
+        directoryURL: output,
+        manifestSha256: manifestSHA)
+}
+
 @Test("Legacy Gemma receipt keeps standardized path and deterministic bytes")
 func legacyGemmaReceiptKeepsStandardizedPathAndDeterministicBytes() throws {
     let fixture = try ReceiptPathFixture("legacy")

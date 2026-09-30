@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import TurboFieldfareOfficialQwenSource
 
 /// Identity constraints for a local snapshot. Test fixtures supply their own
 /// digest table; the catalog supplies the immutable production Qwen table.
@@ -62,14 +63,14 @@ enum LocalPinnedSnapshotLoader {
         tensors.reserveCapacity(weightMap.count)
         for shard in shardFilenames {
             let shardPath = try leafPath(snapshotDirectory, shard)
-            let header = try Safetensors.parseLocalHeader(path: shardPath)
-            try validateNonOverlapping(header: header)
-            let expectedNames = Set(weightMap.compactMap { $0.value == shard ? $0.key : nil })
-            let actualNames = Set(header.tensors.map(\.name))
-            guard actualNames == expectedNames else {
-                throw RepackError.indexJsonInvalid(path: indexPath,
-                                                   detail: "tensor names disagree for \(shard)")
+            let sharedHeader = try Safetensors.parseLocalHeaderShared(path: shardPath)
+            do {
+                try OfficialSafetensorsSource.validateShard(
+                    sharedHeader, weightMap: weightMap, shardName: shard)
+            } catch let error as OfficialSafetensorsSource.ValidationError {
+                throw Safetensors.map(error, path: indexPath)
             }
+            let header = try Safetensors.convert(sharedHeader)
             for tensor in header.tensors {
                 guard tensor.dtype == .bf16 else {
                     throw RepackError.dtypeMismatch(name: tensor.name,
@@ -119,15 +120,9 @@ enum LocalPinnedSnapshotLoader {
 
     private static func parseWeightMap(_ data: Data, path: String) throws -> [String: String] {
         do {
-            guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let map = root["weight_map"] as? [String: String], !map.isEmpty else {
-                throw RepackError.indexJsonInvalid(path: path, detail: "no weight_map")
-            }
-            return map
-        } catch let error as RepackError {
-            throw error
-        } catch {
-            throw RepackError.indexJsonInvalid(path: path, detail: "\(error)")
+            return try OfficialSafetensorsSource.parseIndex(data)
+        } catch let error as OfficialSafetensorsSource.ValidationError {
+            throw Safetensors.map(error, path: path)
         }
     }
 
@@ -148,18 +143,6 @@ enum LocalPinnedSnapshotLoader {
         for name in names where name.hasSuffix(".safetensors") && !referenced.contains(name) {
             throw RepackError.installStateCorrupt(path: snapshotDirectory,
                                                    detail: "unreferenced shard \(name)")
-        }
-    }
-
-    private static func validateNonOverlapping(header: Safetensors.Header) throws {
-        let sorted = header.tensors.sorted { $0.absoluteOffset < $1.absoluteOffset }
-        for (previous, next) in zip(sorted, sorted.dropFirst()) {
-            let (end, overflow) = previous.absoluteOffset.addingReportingOverflow(previous.sizeBytes)
-            guard !overflow, end <= next.absoluteOffset else {
-                throw RepackError.safetensorsHeaderInvalid(
-                    path: header.path,
-                    detail: "tensor ranges overlap: \(previous.name), \(next.name)")
-            }
         }
     }
 

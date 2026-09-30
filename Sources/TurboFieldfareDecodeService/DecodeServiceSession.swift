@@ -41,6 +41,7 @@ final class DecodeServiceSession: Sendable {
         let loadID: UUID
         let family: DecodeModelFamily
         let modelIdentity: DecodeModelIdentity?
+        let sourceIdentity: DecodeSourceIdentity?
         let toolThinkingEnabled: Bool?
     }
 
@@ -318,14 +319,18 @@ final class DecodeServiceSession: Sendable {
         case .gemma(let toolThinkingEnabled):
             return Binding(
                 loadID: loadID, family: .gemma4, modelIdentity: nil,
-                toolThinkingEnabled: toolThinkingEnabled)
+                sourceIdentity: nil, toolThinkingEnabled: toolThinkingEnabled)
         case .qwen(let identity):
             guard identity.family == .qwen3_6 else {
                 throw Rejection.inconsistentReadiness
             }
             return Binding(
                 loadID: loadID, family: .qwen3_6, modelIdentity: identity,
-                toolThinkingEnabled: nil)
+                sourceIdentity: nil, toolThinkingEnabled: nil)
+        case .qwenSource(let identity):
+            return Binding(
+                loadID: loadID, family: .qwen3_6, modelIdentity: nil,
+                sourceIdentity: identity, toolThinkingEnabled: nil)
         }
     }
 

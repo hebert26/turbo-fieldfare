@@ -1,5 +1,6 @@
 import Foundation
 import TurboFieldfare
+import TurboFieldfareOfficialQwenSource
 import TurboFieldfareRepackCore
 
 public enum AppVisionPackInstallationStatus: Equatable, Sendable {
@@ -59,6 +60,37 @@ public enum AppVisionPackInstallationProbe {
         at textModelDirectory: URL,
         entry: AppModelCatalogEntry
     ) -> AppVisionPackInstallationStatus {
+        let sourceMarker = textModelDirectory.appendingPathComponent("official-source.json")
+        if FileManager.default.fileExists(atPath: sourceMarker.path) {
+            // A source registration binds to its physical path. Its companion
+            // contains only metadata and must match the trusted source receipt
+            // and pinned index mapping before the app reports it installed.
+            let location = AppModelLocation.qwenRegistrationResolved(
+                logicalURL: textModelDirectory)
+            guard FileManager.default.fileExists(atPath: location.visionModelURL.path) else {
+                return .missing
+            }
+            do {
+                let descriptor = try OfficialSourceRegistration.inspect(
+                    at: location.textModelURL)
+                guard descriptor.repository == entry.sourceIdentity.repoID,
+                      descriptor.revision == entry.sourceIdentity.revision,
+                      descriptor.storageProfile == OfficialQwenSourceIdentity.pinned.storageProfile,
+                      descriptor.sidecarSHA256["model.safetensors.index.json"]
+                        == entry.sourceIdentity.sourceIndexSHA256 else {
+                    return .partial("registered BF16 source does not match \(entry.displayName)")
+                }
+                try OfficialQwenSourceVisionMetadataProbe.verify(
+                    textModelURL: location.textModelURL,
+                    visionURL: location.visionModelURL)
+                return VisionRuntime.isSupportedOnDefaultDevice
+                    ? .complete
+                    : .verificationUnavailable(
+                        "source vision companion is verified but unsupported on this Mac")
+            } catch {
+                return .partial("\(error)")
+            }
+        }
         let textModelDirectory = textModelDirectory.standardizedFileURL
         let companion: URL
         do {

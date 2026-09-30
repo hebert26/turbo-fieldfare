@@ -1,9 +1,11 @@
 import CryptoKit
+import Darwin
 import Foundation
 import Testing
 import TurboFieldfare
 import TurboFieldfareDecodeProtocol
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 @testable import TurboFieldfareAppCore
 
 @Suite(.serialized)
@@ -20,6 +22,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
 
         model.loadModel()
@@ -54,6 +61,11 @@ struct AppModelSelectionTests {
         defer { try? FileManager.default.removeItem(at: directory) }
         let model = AppModel(
             client: client,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(
                 qwenDirectory: directory.appendingPathComponent("qwen3.6-35b-a3b.gturbo"),
                 gemmaDirectory: directory.appendingPathComponent("gemma4.gturbo")))
@@ -93,6 +105,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
 
         #expect(model.selectedModelID == .qwen3_6)
@@ -148,6 +165,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
 
         model.loadModel()
@@ -172,6 +194,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
 
         model.loadModel()
@@ -195,6 +222,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
 
         model.loadModel()
@@ -219,6 +251,11 @@ struct AppModelSelectionTests {
             modelDirectory: modelDirectory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: modelDirectory))
         #expect(model.selectedModelID == .qwen3_6)
         model.modelPathText = modelDirectory.path
@@ -275,6 +312,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
 
         model.loadModel()
@@ -311,6 +353,11 @@ struct AppModelSelectionTests {
             modelDirectory: directory,
             client: client,
             settingsPersistenceEnabled: true,
+            // These lifecycle tests inject installed status. The real BF16
+            // source probe is exercised separately with temporary metadata.
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
             catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
         model.loadModel()
         await waitUntil { model.loadState.isReady }
@@ -326,6 +373,66 @@ struct AppModelSelectionTests {
             == AppModelInstallDescriptor.default.repoID)
         #expect(model.selectedModelEntry.location.textModelURL
             != directory.standardizedFileURL)
+    }
+
+    @MainActor
+    @Test func sourceReadinessNeedsExactDigestAndExistingBoundSource() async throws {
+        let temporary = FileManager.default.temporaryDirectory.path
+        guard let physical = temporary.withCString({ realpath($0, nil) }) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        defer { free(physical) }
+        let root = URL(fileURLWithPath: String(cString: physical), isDirectory: true)
+            .appendingPathComponent("app-source-readiness-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        let logical = root.appendingPathComponent("qwen3.6-35b-a3b.gturbo", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: logical, withIntermediateDirectories: true)
+        let pin = OfficialQwenSourceIdentity.pinned
+        let descriptor = try OfficialSourceDescriptor(
+            repository: pin.repository, revision: pin.revision,
+            storageProfile: pin.storageProfile, sidecarSHA256: pin.sidecarSHA256,
+            shards: pin.shards.map { .init(filename: $0.filename, sha256: $0.sha256) },
+            sourceRoot: source.path)
+        try JSONEncoder().encode(descriptor).write(
+            to: logical.appendingPathComponent(OfficialSourceDescriptor.markerFilename))
+        try MacAppSettingsFileStore.save(
+            MacAppSettings(selectedModelID: .qwen3_6,
+                           qwenSourceRoot: source.path,
+                           qwenRegistrationPath: logical.path),
+            forModelDirectory: logical)
+        let provider: (URL, AppModelCatalogEntry) -> AppModelInstallationStatus = {
+            _, entry in entry.id == .qwen3_6 ? .complete : .missing
+        }
+        let catalog = testCatalogEntryProvider(qwenDirectory: logical)
+        func load(_ digest: String) async throws -> AppModel {
+            let identity = try DecodeSourceIdentity(
+                kind: .officialSafetensorsBF16V1, contentDigest: digest)
+            let client = SelectionLifecycleClient(readiness: .qwenSource(identity: identity))
+            let model = AppModel(modelDirectory: logical, client: client,
+                                 settingsPersistenceEnabled: true,
+                                 installationStatusProvider: provider,
+                                 catalogEntryProvider: catalog)
+            model.applyInstallEvent(.installed(logical), generation: 0)
+            #expect(model.modelPathText == logical.path)
+            model.loadModel()
+            await waitUntil { model.loadState.isReady || model.loadState.isFailed }
+            return model
+        }
+
+        // The injected status models a trusted receipt for state logic only.
+        // The real probe separately rejects marker-only registrations.
+        let matching = try await load(descriptor.contentSHA256)
+        #expect(matching.loadState.isReady)
+        #expect(matching.loadedRuntimeKey?.modelDirectory.path == logical.path)
+        let wrongDigest = try await load(String(repeating: "0", count: 64))
+        #expect(wrongDigest.loadState.isFailed)
+        try FileManager.default.moveItem(
+            at: source, to: root.appendingPathComponent("moved", isDirectory: true))
+        let moved = try await load(descriptor.contentSHA256)
+        #expect(moved.loadState.isFailed)
     }
 
     private static func waitUntil(

@@ -1,6 +1,8 @@
 import Foundation
 import TurboFieldfareRepackCore
 import Synchronization
+import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 public enum AppModelInstallerRoutingError: Error, Equatable, CustomStringConvertible, Sendable {
     case remoteInstallUnavailable(AppModelID)
@@ -215,10 +217,16 @@ public final class RepackModelInstallerClient: AppModelInstallerClient, Sendable
     }
 }
 
-/// App-side owner of one pinned local Qwen conversion. The source and both
-/// destinations are captured at construction so resume, cancellation, discard,
-/// and verification cannot drift onto Gemma or another catalog entry.
+/// Registers an existing pinned BF16 source without copying or changing its shards.
+/// A descriptor is metadata only. Installation completes after source trust
+/// authenticates every pinned shard and publishes its bound receipt.
 public final class LocalQwenModelInstallerClient: Sendable {
+    // Progress is replaceable state. Retain only the latest update so a slow
+    // main actor cannot replay every 512 KiB hash update after verification.
+    // Installed is the final yield and remains buffered until consumed.
+    static let eventBufferingPolicy:
+        AsyncThrowingStream<AppModelInstallEvent, Error>.Continuation.BufferingPolicy = .bufferingNewest(1)
+
     private struct ActiveInstall: Sendable {
         let id: UUID
         let task: Task<Void, Never>
@@ -232,233 +240,135 @@ public final class LocalQwenModelInstallerClient: Sendable {
     public let sourceDirectory: URL
     public let includesVision: Bool
     private let taskState = InstallTaskState()
+    private let beforeRegistration: @Sendable () async throws -> Void
 
-    public var hasPartialInstall: Bool {
-        let locations = [entry.location.textModelURL]
-            + (includesVision ? [entry.location.visionModelURL] : [])
-        return locations.contains { location in
-            let output = location.standardizedFileURL.path
-            return FileManager.default.fileExists(atPath: output + ".partial")
-                || FileManager.default.fileExists(atPath: output + ".resume.json")
-        }
+    var activeInstallID: UUID? {
+        taskState.value.withLock { $0?.id }
     }
 
-    public var canResume: Bool {
-        let text = entry.location.textModelURL.standardizedFileURL.path
-        guard FileManager.default.fileExists(atPath: text + ".partial"),
-              FileManager.default.fileExists(atPath: text + ".resume.json") else {
-            return false
-        }
-        return !includesVision || FileManager.default.fileExists(
-            atPath: entry.location.visionModelURL.standardizedFileURL.path + ".partial")
+    public var hasPartialInstall: Bool { false }
+    public var canResume: Bool { false }
+
+    public convenience init(entry: AppModelCatalogEntry, sourceDirectory: URL,
+                            includesVision: Bool = true) throws {
+        try self.init(entry: entry, sourceDirectory: sourceDirectory,
+                      includesVision: includesVision, beforeRegistration: {})
     }
 
-    public init(
-        entry: AppModelCatalogEntry,
-        sourceDirectory: URL,
-        includesVision: Bool = true
-    ) throws {
-        guard entry.id == .qwen3_6,
-              entry.family == .qwen3_6,
+    init(entry: AppModelCatalogEntry, sourceDirectory: URL,
+         includesVision: Bool,
+         beforeRegistration: @escaping @Sendable () async throws -> Void) throws {
+        guard entry.id == .qwen3_6, entry.family == .qwen3_6,
               entry.sourceIdentity == AppModelCatalog.entry(for: .qwen3_6).sourceIdentity,
               case .localQwenConversion = entry.installRoute,
-              Self.hasIsolatedQwenLocations(entry.location) else {
+              entry.location.textModelURL.path != AppModelCatalog.entry(for: .gemma4).location.textModelURL.path else {
             throw AppModelInstallerRoutingError.localConversionUnavailable(entry.id)
         }
         self.entry = entry
-        self.sourceDirectory = sourceDirectory.standardizedFileURL
+        self.sourceDirectory = sourceDirectory
         self.includesVision = includesVision
-    }
-
-    private static func hasIsolatedQwenLocations(
-        _ location: AppModelLocation.Resolved
-    ) -> Bool {
-        let text = location.textModelURL.standardizedFileURL
-        let vision = location.visionModelURL.standardizedFileURL
-        let gemma = AppModelCatalog.entry(for: .gemma4).location
-        let suffix = ".gturbo"
-        let name = text.lastPathComponent
-        guard name != "gemma4.gturbo",
-              text.path != gemma.textModelURL.path,
-              vision.path != gemma.visionModelURL.path,
-              name.hasSuffix(suffix), name.count > suffix.count else { return false }
-        let expectedVision = text.deletingLastPathComponent()
-            .appendingPathComponent(
-                "\(name.dropLast(suffix.count)).vision.gturbo",
-                isDirectory: true)
-            .standardizedFileURL
-        return vision.path == expectedVision.path
+        self.beforeRegistration = beforeRegistration
     }
 
     public func checkInstallRequirement() async throws -> AppModelInstallRequirement {
-        try await runCancellableDetached { [self] in
-            let preflight = try LocalQwenStreamingRepacker.preflight(
-                options: options(resume: canResume))
-            let probePath = preflight.diskRequirements.first?.probePath
-                ?? entry.location.textModelURL.deletingLastPathComponent().path
+        let source = sourceDirectory
+        let destination = entry.location.textModelURL
+        return try await Task.detached(priority: .utility) {
+            var isDirectory: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDirectory),
+                  isDirectory.boolValue else {
+                throw AppModelInstallerRoutingError.destinationMismatch(
+                    expected: "an existing BF16 source directory", actual: source.path)
+            }
+            // Registration writes only bounded metadata. Payload size is not
+            // a required-free-space estimate and total RAM fit is unmeasured.
             return AppModelInstallRequirement(
-                probePath: probePath,
-                requiredBytes: preflight.requiredBytes,
-                availableBytes: preflight.availableBytes)
-        }
+                probePath: destination.path, requiredBytes: 0, availableBytes: 0)
+        }.value
     }
 
-    public func install(
-        resume: Bool
-    ) -> AsyncThrowingStream<AppModelInstallEvent, Error> {
-        AsyncThrowingStream { continuation in
+    public func install(resume: Bool) -> AsyncThrowingStream<AppModelInstallEvent, Error> {
+        AsyncThrowingStream<AppModelInstallEvent, Error>(bufferingPolicy: Self.eventBufferingPolicy) {
+            (continuation: AsyncThrowingStream<AppModelInstallEvent, Error>.Continuation) in
             let id = UUID()
             let task = Task.detached(priority: .utility) { [self] in
                 do {
                     continuation.yield(.checking)
-                    let result = try LocalQwenStreamingRepacker.run(
-                        options: options(resume: resume)) { progress in
-                            continuation.yield(Self.event(for: progress))
+                    try await beforeRegistration()
+                    let destination = entry.location.textModelURL
+                    let pinned = OfficialQwenSourceIdentity.pinned
+                    let descriptor = try OfficialSourceDescriptor(
+                        repository: pinned.repository, revision: pinned.revision,
+                        storageProfile: pinned.storageProfile,
+                        sidecarSHA256: pinned.sidecarSHA256,
+                        shards: pinned.shards.map {
+                            OfficialSourceDescriptor.Shard(filename: $0.filename, sha256: $0.sha256)
+                        }, sourceRoot: sourceDirectory.path)
+                    if FileManager.default.fileExists(atPath: destination.path) {
+                        let existing = try OfficialSourceRegistration.inspect(at: destination)
+                        guard existing == descriptor else {
+                            throw AppModelInstallerRoutingError.destinationMismatch(
+                                expected: descriptor.sourceRoot,
+                                actual: existing.sourceRoot)
                         }
-                    try Task.checkCancellation()
-                    let published = URL(
-                        fileURLWithPath: result.textOutputDirectory,
-                        isDirectory: true).standardizedFileURL
-                    try validatePublishedPath(published)
-                    if includesVision {
-                        let actual = result.visionOutputDirectory.map {
-                            URL(fileURLWithPath: $0, isDirectory: true)
-                                .standardizedFileURL
-                        }
-                        guard actual?.path == entry.location.visionModelURL.path else {
-                            throw AppModelInstallerRoutingError.publishedPathMismatch(
-                                expected: entry.location.visionModelURL.path,
-                                actual: actual?.path ?? "missing")
-                        }
-                    } else if let actual = result.visionOutputDirectory {
-                        throw AppModelInstallerRoutingError.publishedPathMismatch(
-                            expected: "no vision output",
-                            actual: actual)
+                    } else {
+                        let data = try JSONEncoder().encode(descriptor)
+                        _ = try OfficialSourceRegistration.register(
+                            markerData: data, at: destination)
                     }
                     try Task.checkCancellation()
-                    continuation.yield(.installed(entry.location.textModelURL))
+                    continuation.yield(.hashingOutput("original BF16 source"))
+                    _ = try OfficialSourceTrust.verify(
+                        at: destination, policy: .fullSha256) { completed, total in
+                            continuation.yield(.copyingPayload(
+                                reusedBytes: 0, downloadedThisRunBytes: completed,
+                                totalBytes: total))
+                        }
+                    try Task.checkCancellation()
+                    continuation.yield(.installed(destination))
                     continuation.finish()
-                } catch is CancellationError {
-                    continuation.finish(throwing: CancellationError())
                 } catch {
                     continuation.finish(throwing: error)
                 }
             }
-            let previous = taskState.value.withLock { active in
-                let previous = active?.task
-                active = ActiveInstall(id: id, task: task)
+            let previous = taskState.value.withLock { current in
+                let previous = current?.task
+                current = ActiveInstall(id: id, task: task)
                 return previous
             }
             previous?.cancel()
             continuation.onTermination = { [taskState] _ in
-                let task = taskState.value.withLock { active -> Task<Void, Never>? in
-                    guard active?.id == id else { return nil }
-                    defer { active = nil }
-                    return active?.task
+                let current = taskState.value.withLock { task -> Task<Void, Never>? in
+                    guard task?.id == id else { return nil }
+                    let current = task?.task
+                    task = nil
+                    return current
                 }
-                task?.cancel()
+                current?.cancel()
             }
         }
     }
 
     public func cancel() {
-        let task = taskState.value.withLock { active -> Task<Void, Never>? in
-            defer { active = nil }
-            return active?.task
+        let current = taskState.value.withLock { task in
+            let current = task?.task
+            task = nil
+            return current
         }
-        task?.cancel()
+        current?.cancel()
     }
 
-    public func discardPartialInstall() async throws {
-        try await runCancellableDetached { [self] in
-            try LocalQwenStreamingRepacker.discardPartial(
-                options: options(resume: true))
-        }
-    }
+    /// Registration has no resumable payload. Never delete the source or an
+    /// existing logical registration through a generic download discard.
+    public func discardPartialInstall() async throws {}
 
     public func verifyPublished() async throws -> AppModelLocation.Resolved {
-        try await runCancellableDetached { [self] in
-            let verified = try LocalQwenStreamingRepacker.verifyPublished(
-                options: options(resume: true))
-            return try validate(verified)
-        }
-    }
-
-    private func runCancellableDetached<T: Sendable>(
-        _ body: @escaping @Sendable () throws -> T
-    ) async throws -> T {
-        let work = Task.detached(priority: .utility, operation: body)
-        return try await withTaskCancellationHandler {
-            try await work.value
-        } onCancel: {
-            work.cancel()
-        }
-    }
-
-    private func options(resume: Bool) -> LocalQwenStreamingRepackOptions {
-        let descriptor: AppLocalQwenInstallDescriptor
-        switch entry.installRoute {
-        case .localQwenConversion(let value): descriptor = value
-        case .remoteRepack: preconditionFailure("validated by initializer")
-        }
-        return LocalQwenStreamingRepackOptions(
-            sourceDirectory: sourceDirectory.path,
-            outputDirectory: entry.location.textModelURL.path,
-            visionOutputDirectory: includesVision
-                ? entry.location.visionModelURL.path : nil,
-            resume: resume,
-            reserveBytes: descriptor.reserveBytes)
-    }
-
-    private func validatePublishedPath(_ path: URL) throws {
-        guard path.path == entry.location.textModelURL.path else {
+        guard AppModelInstallationProbe.status(
+            at: entry.location.textModelURL, entry: entry) == .complete else {
             throw AppModelInstallerRoutingError.publishedPathMismatch(
                 expected: entry.location.textModelURL.path,
-                actual: path.path)
-        }
-    }
-
-    private func validate(
-        _ verified: LocalQwenPublishedVerification
-    ) throws -> AppModelLocation.Resolved {
-        let text = URL(
-            fileURLWithPath: verified.textOutputDirectory,
-            isDirectory: true).standardizedFileURL
-        try validatePublishedPath(text)
-        if includesVision {
-            let actual = verified.visionOutputDirectory.map {
-                URL(fileURLWithPath: $0, isDirectory: true).standardizedFileURL
-            }
-            guard actual?.path == entry.location.visionModelURL.path else {
-                throw AppModelInstallerRoutingError.publishedPathMismatch(
-                    expected: entry.location.visionModelURL.path,
-                    actual: actual?.path ?? "missing")
-            }
-        } else if let actual = verified.visionOutputDirectory {
-            throw AppModelInstallerRoutingError.publishedPathMismatch(
-                expected: "no vision output",
-                actual: actual)
+                actual: "BF16 source is not verified")
         }
         return entry.location
-    }
-
-    private static func event(
-        for progress: LocalQwenStreamingRepackProgress
-    ) -> AppModelInstallEvent {
-        switch progress.stage {
-        case .validatingSource, .preflighting:
-            .checking
-        case .planning:
-            .planning
-        case .converting:
-            .copyingPayload(
-                reusedBytes: 0,
-                downloadedThisRunBytes: progress.completedBytes,
-                totalBytes: progress.totalBytes)
-        case .auditing:
-            .hashingOutput("Qwen artifact")
-        case .publishing:
-            .finalizing
-        }
     }
 }

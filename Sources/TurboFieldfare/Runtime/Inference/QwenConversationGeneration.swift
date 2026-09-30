@@ -55,6 +55,9 @@ public struct QwenConversationGenerationResult: Sendable, Equatable {
     public let decodeSeconds: Double
     public let metrics: ConversationStateMetrics
     public let acceptedGeneratedTokenIDs: [Int32]
+    /// Present only for a committed, trust-gated original-source turn. This
+    /// local source identity is not a whole-shard payload-authenticity claim.
+    public let sourceIdentity: LoadedRuntimeSourceIdentity?
 
     public init(
         reason: StopReason,
@@ -63,7 +66,8 @@ public struct QwenConversationGenerationResult: Sendable, Equatable {
         prefillSeconds: Double,
         decodeSeconds: Double,
         metrics: ConversationStateMetrics,
-        acceptedGeneratedTokenIDs: [Int32]
+        acceptedGeneratedTokenIDs: [Int32],
+        sourceIdentity: LoadedRuntimeSourceIdentity? = nil
     ) {
         self.reason = reason
         self.promptTokens = promptTokens
@@ -72,6 +76,7 @@ public struct QwenConversationGenerationResult: Sendable, Equatable {
         self.decodeSeconds = decodeSeconds
         self.metrics = metrics
         self.acceptedGeneratedTokenIDs = acceptedGeneratedTokenIDs
+        self.sourceIdentity = sourceIdentity
     }
 }
 

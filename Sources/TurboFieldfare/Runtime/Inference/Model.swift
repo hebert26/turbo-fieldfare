@@ -67,10 +67,41 @@ public struct Model {
         }
     }
 
+    /// Cache configuration, live allocation, and lifetime successful fetch
+    /// totals. No measurement capture or profiling needs to be enabled.
+    public var routedExpertCacheSummary: RoutedExpertCacheSummary {
+        streamersQueue.sync {
+            let configuredSlots: Int
+            switch streamingMode {
+            case .pread(let slotCount): configuredSlots = slotCount
+            }
+            var allocatedBytes: UInt64 = 0
+            var hits = streamersBox.retiredCachePlanHits
+            var misses = streamersBox.retiredCachePlanMisses
+            for streamer in streamersBox.streamers.compactMap({ $0 }) {
+                allocatedBytes += streamer.allocatedCacheBytes
+                let counts = streamer.successfulCachePlanCounts
+                hits += counts.hits
+                misses += counts.misses
+            }
+            return RoutedExpertCacheSummary(
+                configuredSlots: configuredSlots,
+                effectiveSlots: configuredSlots,
+                policy: expertCachePolicy.rawValue,
+                allocatedBytes: allocatedBytes,
+                peakAllocatedBytes: streamersBox.peakCacheAllocatedBytes,
+                hits: hits,
+                misses: misses)
+        }
+    }
+
     final class StreamersBox: @unchecked Sendable {
         var streamers: [PreadExpertStreamer?]
         var layerVerified: [Bool]
         var measurementCapture: RuntimeMeasurementCapture?
+        var retiredCachePlanHits: UInt64 = 0
+        var retiredCachePlanMisses: UInt64 = 0
+        var peakCacheAllocatedBytes: UInt64 = 0
         init(numLayers: Int) {
             self.streamers = Array(repeating: nil, count: numLayers)
             self.layerVerified = Array(repeating: false, count: numLayers)
@@ -338,6 +369,10 @@ public struct Model {
             slotCount: slotCount,
             cachePolicy: expertCachePolicy,
             fileDescriptor: layerFD)
+        let allocatedBytes = streamersBox.streamers.compactMap { $0 }
+            .reduce(UInt64(0)) { $0 + $1.allocatedCacheBytes }
+        streamersBox.peakCacheAllocatedBytes = max(
+            streamersBox.peakCacheAllocatedBytes, allocatedBytes)
         streamersBox.layerVerified[L] = true
         if let capture = streamersBox.measurementCapture,
            let streamer = streamersBox.streamers[L] {
@@ -792,6 +827,13 @@ extension Model {
                 recordMeasurementCacheSnapshotLocked(capture, reason: 7, position: -1)
             }
             if policy == .onDemand {
+                // Lifetime totals survive releases. Allocation snapshots still
+                // report only the buffers currently owned by live streamers.
+                for streamer in streamersBox.streamers.compactMap({ $0 }) {
+                    let counts = streamer.successfulCachePlanCounts
+                    streamersBox.retiredCachePlanHits += counts.hits
+                    streamersBox.retiredCachePlanMisses += counts.misses
+                }
                 var released = streamersBox.streamers
                 streamersBox.streamers = Array(
                     repeating: nil, count: packedExpertsLayout.numLayers)

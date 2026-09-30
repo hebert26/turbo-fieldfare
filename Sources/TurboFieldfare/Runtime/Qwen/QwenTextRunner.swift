@@ -1427,7 +1427,9 @@ actor QwenTextRunner {
             }
         }
         let geometry = linearState.geometry
-        try linearState.restore(QwenLinearAttentionSnapshot(geometry: geometry, layers: layers))
+        let positions = Dictionary(uniqueKeysWithValues: layers.keys.map { ($0, 0) })
+        try linearState.restore(QwenLinearAttentionSnapshot(
+            geometry: geometry, layers: layers, positions: positions))
     }
 
     private func validate(_ state: QwenTextRunnerState) throws {
@@ -1722,4 +1724,687 @@ private func project(
         }
     }
     return output
+}
+
+/// Names of four independently admitted, resident BF16 matrices. The weight
+/// owner validates both their role and the actual Safetensors header geometry.
+struct QwenBF16FullAttentionNames: Sendable {
+    let query: String
+    let key: String
+    let value: String
+    let output: String
+}
+
+/// Internal deterministic failure seam. Production uses `.none`; the hooks
+/// cannot provide weights, offsets, command buffers or committed KV storage.
+struct QwenBF16FullAttentionHooks: Sendable {
+    enum Checkpoint: Sendable {
+        case beforeSubmission(stage: String)
+        case afterSubmission(stage: String)
+        case beforeCommit
+    }
+
+    let checkpoint: @Sendable (Checkpoint) async throws -> Void
+
+    init(checkpoint: @escaping @Sendable (Checkpoint) async throws -> Void = { _ in }) {
+        self.checkpoint = checkpoint
+    }
+
+    static let none = Self()
+}
+
+/// Additive one-token full-attention component, not a source runtime factory.
+/// The input row has already passed the layer's input RMSNorm. Only short FP32
+/// vectors/scores are materialized; all four full matrices stay resident BF16.
+/// No command buffer touches the committed KV until both rows are published.
+actor QwenBF16FullAttentionStep {
+    private let context: MetalContext
+    private let weights: QwenBF16Weights
+    private let names: QwenBF16FullAttentionNames
+    private let attention: QwenFullAttention
+    private let kv: QwenFullAttentionKV
+    private let layer: Int
+    private let hiddenSize: Int
+    private let queryWidth: Int
+    private let keyValueWidth: Int
+    private let queryNormBuffer: MTLBuffer
+    private let keyNormBuffer: MTLBuffer
+    private let hooks: QwenBF16FullAttentionHooks
+    private var inFlight = false
+
+    init(context: MetalContext, weights: QwenBF16Weights,
+         names: QwenBF16FullAttentionNames,
+         configuration: QwenFullAttentionConfiguration,
+         hiddenSize: Int, layer: Int, kv: QwenFullAttentionKV,
+         queryNorm: [Float], keyNorm: [Float],
+         hooks: QwenBF16FullAttentionHooks = .none) throws {
+        let queryWidth = try Self.product(
+            configuration.queryHeadCount, configuration.headDimension, label: "query width")
+        let keyValueWidth = try Self.product(
+            configuration.keyValueHeadCount, configuration.headDimension,
+            label: "key/value width")
+        let doubledQuery = try Self.product(2, queryWidth, label: "query/gate width")
+        guard hiddenSize > 0, hiddenSize <= Int(UInt32.max),
+              doubledQuery <= Int(UInt32.max), keyValueWidth <= Int(UInt32.max),
+              kv.fullLayerIndices.contains(layer),
+              kv.keyValueHeadCount == configuration.keyValueHeadCount,
+              kv.headDimension == configuration.headDimension,
+              queryNorm.count == configuration.headDimension,
+              keyNorm.count == configuration.headDimension,
+              queryNorm.allSatisfy(\.isFinite), keyNorm.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 full-attention head/norm/KV geometry")
+        }
+        let view = try kv.view(layer: layer)
+        let expectedKVStride = try Self.product(
+            keyValueWidth, MemoryLayout<Float>.stride, label: "KV stride")
+        guard view.key.device === context.device, view.value.device === context.device,
+              view.key.storageMode == .shared, view.value.storageMode == .shared,
+              view.strideBytes == expectedKVStride else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 full-attention KV device/stride")
+        }
+        try weights.requireShape(names.query, role: .dense,
+                                 rows: doubledQuery, columns: hiddenSize)
+        try weights.requireShape(names.key, role: .dense,
+                                 rows: keyValueWidth, columns: hiddenSize)
+        try weights.requireShape(names.value, role: .dense,
+                                 rows: keyValueWidth, columns: hiddenSize)
+        try weights.requireShape(names.output, role: .dense,
+                                 rows: hiddenSize, columns: queryWidth)
+        let queryNormBuffer = try Self.floatBuffer(
+            queryNorm, device: context.device, label: "qwen.bf16.attention.qnorm")
+        let keyNormBuffer = try Self.floatBuffer(
+            keyNorm, device: context.device, label: "qwen.bf16.attention.knorm")
+        self.context = context
+        self.weights = weights
+        self.names = names
+        attention = try QwenFullAttention(
+            context: context, configuration: configuration, useOfficialSourceMath: true)
+        self.kv = kv
+        self.layer = layer
+        self.hiddenSize = hiddenSize
+        self.queryWidth = queryWidth
+        self.keyValueWidth = keyValueWidth
+        self.queryNormBuffer = queryNormBuffer
+        self.keyNormBuffer = keyNormBuffer
+        self.hooks = hooks
+    }
+
+    func committedPosition() throws -> Int {
+        try kv.committedPosition(layer: layer)
+    }
+
+    /// Prepare one complete candidate, settle every submitted GPU operation,
+    /// and publish K, V and position together only after the final checkpoint.
+    /// Reentrant actor calls fail closed while this method is suspended.
+    func append(hidden: [Float], mropePosition: QwenMRoPEPosition? = nil,
+                mropeSections: [Int] = []) async throws -> [Float] {
+        guard !inFlight else { throw QwenTextRunnerError.operationInProgress }
+        guard hidden.count == hiddenSize, hidden.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 attention input row")
+        }
+        inFlight = true
+        defer { inFlight = false }
+        try Task.checkCancellation()
+        let position = try kv.committedPosition(layer: layer)
+        let write = try kv.reserveWrite(layer: layer, position: position, tokenCount: 1)
+        var published = false
+        defer { if !published { try? kv.abandon(write) } }
+        let cache = try kv.view(layer: layer)
+        let qAndGateCount = try Self.product(2, queryWidth, label: "query/gate row")
+        let input = try Self.floatBuffer(hidden, device: context.device,
+                                         label: "qwen.bf16.attention.input")
+        let projected = try emptyBuffer(qAndGateCount, label: "qwen.bf16.attention.qgate")
+        let key = try emptyBuffer(keyValueWidth, label: "qwen.bf16.attention.key")
+        let value = try emptyBuffer(keyValueWidth, label: "qwen.bf16.attention.value")
+        let projectionCommand = try commandBuffer(stage: "qkv")
+        try weights.encodeProjection(commandBuffer: projectionCommand,
+                                     tensorName: names.query, input: input,
+                                     tokenCount: 1, output: projected)
+        try weights.encodeProjection(commandBuffer: projectionCommand,
+                                     tensorName: names.key, input: input,
+                                     tokenCount: 1, output: key)
+        try weights.encodeProjection(commandBuffer: projectionCommand,
+                                     tensorName: names.value, input: input,
+                                     tokenCount: 1, output: value)
+        try await submitAndSettle(projectionCommand, stage: "qkv")
+
+        // The Q source row is [head, query then gate, dimension]. The two
+        // kernel inputs are [head, dimension], so copy one short row only.
+        let qAndGate = projected.contents().assumingMemoryBound(to: Float.self)
+        var queryValues = [Float](repeating: 0, count: queryWidth)
+        var gateValues = [Float](repeating: 0, count: queryWidth)
+        let dimension = attention.configuration.headDimension
+        for head in 0..<attention.configuration.queryHeadCount {
+            for column in 0..<dimension {
+                let target = head * dimension + column
+                let source = head * 2 * dimension + column
+                queryValues[target] = qAndGate[source]
+                gateValues[target] = qAndGate[source + dimension]
+            }
+        }
+        guard queryValues.allSatisfy(\.isFinite), gateValues.allSatisfy(\.isFinite) else {
+            throw QwenFullAttentionError.nonfiniteAttention
+        }
+        let queryInput = try Self.floatBuffer(queryValues, device: context.device,
+                                               label: "qwen.bf16.attention.query")
+        let rotatedQuery = try emptyBuffer(queryWidth, label: "qwen.bf16.attention.rotatedQuery")
+        let rotatedKey = try emptyBuffer(keyValueWidth, label: "qwen.bf16.attention.rotatedKey")
+        let normCommand = try commandBuffer(stage: "normRoPE")
+        if let mropePosition {
+            let sections = mropeSections == [1]
+                && attention.configuration.rotaryDimension == 2
+                ? [1, 0, 0] : mropeSections
+            let values = mropePosition.values
+            guard let positionBuffer = context.device.makeBuffer(
+                bytes: values, length: values.count * MemoryLayout<Int32>.stride,
+                options: .storageModeShared) else {
+                throw QwenTextRunnerError.execution(detail: "source M-RoPE position allocation")
+            }
+            try attention.encodeNormAndPartialMRoPE(
+                commandBuffer: normCommand, input: queryInput, weight: queryNormBuffer,
+                positions: positionBuffer, output: rotatedQuery, tokenCount: 1,
+                headCount: attention.configuration.queryHeadCount, sections: sections)
+            try attention.encodeNormAndPartialMRoPE(
+                commandBuffer: normCommand, input: key, weight: keyNormBuffer,
+                positions: positionBuffer, output: rotatedKey, tokenCount: 1,
+                headCount: attention.configuration.keyValueHeadCount, sections: sections)
+            try await submitAndSettle(normCommand, stage: "normRoPE")
+        } else {
+            try attention.encodeNormAndPartialRoPE(
+                commandBuffer: normCommand, input: queryInput, weight: queryNormBuffer,
+                output: rotatedQuery, tokenCount: 1,
+                headCount: attention.configuration.queryHeadCount, startPosition: position)
+            try attention.encodeNormAndPartialRoPE(
+                commandBuffer: normCommand, input: key, weight: keyNormBuffer,
+                output: rotatedKey, tokenCount: 1,
+                headCount: attention.configuration.keyValueHeadCount, startPosition: position)
+            try await submitAndSettle(normCommand, stage: "normRoPE")
+        }
+        let preGate = try attention.attentionStep(
+            rotatedQuery: Self.readFloats(rotatedQuery, count: queryWidth),
+            rotatedKey: Self.readFloats(rotatedKey, count: keyValueWidth),
+            value: Self.readFloats(value, count: keyValueWidth), cache: cache)
+        let attentionInput = try Self.floatBuffer(preGate, device: context.device,
+                                                  label: "qwen.bf16.attention.values")
+        let gateInput = try Self.floatBuffer(gateValues, device: context.device,
+                                             label: "qwen.bf16.attention.gate")
+        let gated = try emptyBuffer(queryWidth, label: "qwen.bf16.attention.gated")
+        let gateCommand = try commandBuffer(stage: "gate")
+        try attention.encodeOutputGate(
+            commandBuffer: gateCommand, attention: attentionInput,
+            rawGate: gateInput, output: gated, elementCount: queryWidth)
+        try await submitAndSettle(gateCommand, stage: "gate")
+        let output = try emptyBuffer(hiddenSize, label: "qwen.bf16.attention.output")
+        let outputCommand = try commandBuffer(stage: "output")
+        try weights.encodeProjection(commandBuffer: outputCommand,
+                                     tensorName: names.output, input: gated,
+                                     tokenCount: 1, output: output)
+        try await submitAndSettle(outputCommand, stage: "output")
+        let result = Self.readFloats(output, count: hiddenSize)
+        guard result.allSatisfy(\.isFinite) else {
+            throw QwenFullAttentionError.nonfiniteAttention
+        }
+        try await hooks.checkpoint(.beforeCommit)
+        try Task.checkCancellation()
+        try kv.commitStaged(write, key: rotatedKey, value: value)
+        published = true
+        return result
+    }
+
+    private func submitAndSettle(_ command: MTLCommandBuffer,
+                                 stage: String) async throws {
+        try await hooks.checkpoint(.beforeSubmission(stage: stage))
+        try Task.checkCancellation()
+        command.commit()
+        // A hook may suspend, throw or observe cancellation after submission.
+        // Regardless, settle this command before any caller releases scratch.
+        var hookError: Error?
+        do { try await hooks.checkpoint(.afterSubmission(stage: stage)) }
+        catch { hookError = error }
+        // Match the existing hybrid runner's cancellation-safe completion
+        // boundary: cancellation never releases submitted GPU scratch early.
+        await withTaskCancellationHandler {
+            await command.completed()
+        } onCancel: {
+            // GPU work cannot be cancelled; always await its actual completion.
+        }
+        if let hookError { throw hookError }
+        guard command.status == .completed, command.error == nil else {
+            throw QwenTextRunnerError.gpuExecution(
+                stage: stage, detail: command.error?.localizedDescription
+                    ?? "status \(command.status.rawValue)")
+        }
+        try Task.checkCancellation()
+    }
+
+    private func commandBuffer(stage: String) throws -> MTLCommandBuffer {
+        guard let command = context.queue.makeCommandBuffer() else {
+            throw QwenTextRunnerError.gpuExecution(
+                stage: stage, detail: "command buffer unavailable")
+        }
+        return command
+    }
+
+    private func emptyBuffer(_ elements: Int, label: String) throws -> MTLBuffer {
+        let bytes = try Self.product(elements, MemoryLayout<Float>.stride, label: label)
+        guard bytes <= context.device.maxBufferLength,
+              let buffer = context.device.makeBuffer(length: bytes, options: .storageModeShared)
+        else { throw QwenTextRunnerError.execution(detail: "BF16 attention allocation: \(label)") }
+        buffer.label = label
+        return buffer
+    }
+
+    private static func floatBuffer(_ values: [Float], device: MTLDevice,
+                                    label: String) throws -> MTLBuffer {
+        let bytes = try product(values.count, MemoryLayout<Float>.stride, label: label)
+        guard bytes <= device.maxBufferLength,
+              let buffer = device.makeBuffer(length: bytes, options: .storageModeShared)
+        else { throw QwenTextRunnerError.execution(detail: "BF16 attention allocation: \(label)") }
+        try values.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else {
+                throw QwenTextRunnerError.execution(detail: "BF16 attention empty input")
+            }
+            buffer.contents().copyMemory(from: base, byteCount: bytes)
+        }
+        buffer.label = label
+        return buffer
+    }
+
+    private static func readFloats(_ buffer: MTLBuffer, count: Int) -> [Float] {
+        let base = buffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: base, count: count))
+    }
+
+    private static func product(_ lhs: Int, _ rhs: Int, label: String) throws -> Int {
+        guard lhs > 0, rhs > 0 else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 attention \(label) is empty")
+        }
+        let (result, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 attention \(label) overflow")
+        }
+        return result
+    }
+}
+
+
+/// Five named dense BF16 matrices, selected from the already admitted resident set.
+struct QwenBF16LinearNames: Sendable {
+    let qkv: String
+    let z: String
+    let b: String
+    let a: String
+    let output: String
+}
+
+/// Only small FP32 vectors are kept beside resident BF16 matrices.
+struct QwenBF16LinearVectors: Sendable {
+    let convolution: [Float]
+    let normalization: [Float]
+    let aLog: [Float]
+    let timeStepBias: [Float]
+}
+
+struct QwenBF16LinearHooks: Sendable {
+    enum Checkpoint: Sendable {
+        case beforeSubmission(stage: String)
+        case afterSubmission(stage: String)
+        case beforeCommit
+    }
+
+    let checkpoint: @Sendable (Checkpoint) async throws -> Void
+    /// First input position, stage, actual FP32 activations. Default nil.
+    let observeActivation: (@Sendable (Int, String, [Float]) -> Void)?
+
+    init(observeActivation: (@Sendable (Int, String, [Float]) -> Void)? = nil,
+         checkpoint: @escaping @Sendable (Checkpoint) async throws -> Void = { _ in }) {
+        self.checkpoint = checkpoint
+        self.observeActivation = observeActivation
+    }
+
+    static let none = Self()
+}
+
+/// A separate BF16 linear step. The packed runner's two early state submissions
+/// are deliberately untouched. One reservation spans convolution, recurrence
+/// and output; none of its GPU writes alias committed history or matrix storage.
+actor QwenBF16LinearStep {
+    private let context: MetalContext
+    private let weights: QwenBF16Weights
+    private let names: QwenBF16LinearNames
+    private let runtime: QwenGatedDeltaNet
+    private let configuration: QwenGatedDeltaNetConfiguration
+    private let state: QwenLinearAttentionState
+    private let layer: Int
+    private let hooks: QwenBF16LinearHooks
+    private let convolutionWeights: MTLBuffer
+    private let normWeights: MTLBuffer
+    private let aLog: [Float]
+    private let timeStepBias: [Float]
+    private var inFlight = false
+
+    init(context: MetalContext, weights: QwenBF16Weights,
+         names: QwenBF16LinearNames,
+         configuration: QwenGatedDeltaNetConfiguration,
+         vectors: QwenBF16LinearVectors, layer: Int,
+         state: QwenLinearAttentionState,
+         hooks: QwenBF16LinearHooks = .none) throws {
+        let channels = configuration.convolutionChannelCount
+        let valueWidth = configuration.valueDimension
+        let recurrent = try Self.product(
+            configuration.valueHeadCount,
+            try Self.product(configuration.keyHeadDimension,
+                             configuration.valueHeadDimension, label: "recurrent dimensions"),
+            label: "recurrent elements")
+        let convolutionElements = try Self.product(
+            channels, configuration.convolutionWidth, label: "convolution weights")
+        guard state.isBound(to: context.device),
+              weights.inspectedChunks.allSatisfy({ $0.buffer.device === context.device }),
+              state.linearLayerIndices.contains(layer),
+              state.geometry.convolutionWidth == configuration.convolutionWidth,
+              state.geometry.convolutionChannelCount == channels,
+              state.geometry.valueHeadCount == configuration.valueHeadCount,
+              state.geometry.keyHeadDimension == configuration.keyHeadDimension,
+              state.geometry.valueHeadDimension == configuration.valueHeadDimension,
+              state.geometry.recurrentElementCount == recurrent,
+              vectors.convolution.count == convolutionElements,
+              vectors.normalization.count == configuration.valueHeadDimension,
+              vectors.aLog.count == configuration.valueHeadCount,
+              vectors.timeStepBias.count == configuration.valueHeadCount,
+              vectors.convolution.allSatisfy(\.isFinite),
+              vectors.normalization.allSatisfy(\.isFinite),
+              vectors.aLog.allSatisfy({
+                  $0.isFinite && Float(Foundation.exp(Double($0))).isFinite
+              }),
+              vectors.timeStepBias.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear configuration/vectors/state")
+        }
+        try weights.requireShape(names.qkv, role: .dense,
+                                 rows: channels, columns: configuration.hiddenSize)
+        try weights.requireShape(names.z, role: .dense,
+                                 rows: valueWidth, columns: configuration.hiddenSize)
+        try weights.requireShape(names.b, role: .dense,
+                                 rows: configuration.valueHeadCount, columns: configuration.hiddenSize)
+        try weights.requireShape(names.a, role: .dense,
+                                 rows: configuration.valueHeadCount, columns: configuration.hiddenSize)
+        try weights.requireShape(names.output, role: .dense,
+                                 rows: configuration.hiddenSize, columns: valueWidth)
+        let conv = try Self.floatBuffer(vectors.convolution, device: context.device,
+                                        label: "qwen.bf16.linear.convWeights")
+        let norm = try Self.floatBuffer(vectors.normalization, device: context.device,
+                                        label: "qwen.bf16.linear.normWeights")
+        self.context = context
+        self.weights = weights
+        self.names = names
+        self.configuration = configuration
+        runtime = try QwenGatedDeltaNet(context: context, configuration: configuration,
+                                      useOfficialSourceMath: true)
+        self.state = state
+        self.layer = layer
+        self.hooks = hooks
+        convolutionWeights = conv
+        normWeights = norm
+        aLog = vectors.aLog
+        timeStepBias = vectors.timeStepBias
+    }
+
+    func snapshot() throws -> QwenBF16LinearStepSnapshot {
+        try state.layerSnapshot(layer)
+    }
+
+    func append(normalizedHidden: [Float], tokenCount: Int) async throws -> [Float] {
+        guard !inFlight else { throw QwenTextRunnerError.operationInProgress }
+        // Bound per-call scratch and all UInt32 arithmetic used inside Metal.
+        guard (1...256).contains(tokenCount) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear token count")
+        }
+        let hidden = configuration.hiddenSize
+        let channels = configuration.convolutionChannelCount
+        let keyWidth = configuration.keyDimension
+        let valueWidth = configuration.valueDimension
+        let heads = configuration.valueHeadCount
+        let queryWidth = try Self.product(heads, configuration.keyHeadDimension,
+                                          label: "expanded query width")
+        let inputCount = try Self.product(tokenCount, hidden, label: "input")
+        let qkvCount = try Self.product(tokenCount, channels, label: "QKV")
+        let valueCount = try Self.product(tokenCount, valueWidth, label: "value")
+        let scalarCount = try Self.product(tokenCount, heads, label: "scalars")
+        let queryCount = try Self.product(tokenCount, queryWidth, label: "query")
+        guard normalizedHidden.count == inputCount,
+              normalizedHidden.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear normalized input")
+        }
+        // No GPU buffer is allocated before every per-stage allocation size is
+        // proven representable and below this device's physical per-buffer cap.
+        for count in [inputCount, qkvCount, valueCount, scalarCount, queryCount,
+                      configuration.valueHeadDimension] {
+            _ = try Self.checkedBytes(count, device: context.device)
+        }
+        let position = try state.committedPosition(layer: layer)
+        let (_, positionOverflow) = position.addingReportingOverflow(tokenCount)
+        guard !positionOverflow else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear position overflow")
+        }
+        inFlight = true
+        defer { inFlight = false }
+        try Task.checkCancellation()
+        let update = try state.reserveUpdate(layer: layer)
+        var published = false
+        defer { if !published { try? state.cancel(update) } }
+
+        let input = try Self.floatBuffer(normalizedHidden, device: context.device,
+                                          label: "qwen.bf16.linear.input")
+        let qkv = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.qkv")
+        let gate = try emptyBuffer(valueCount, label: "qwen.bf16.linear.z")
+        let rawBeta = try emptyBuffer(scalarCount, label: "qwen.bf16.linear.b")
+        let rawA = try emptyBuffer(scalarCount, label: "qwen.bf16.linear.a")
+        let projection = try commandBuffer(stage: "projections")
+        try weights.encodeProjection(commandBuffer: projection, tensorName: names.qkv,
+                                     input: input, tokenCount: tokenCount, output: qkv)
+        try weights.encodeProjection(commandBuffer: projection, tensorName: names.z,
+                                     input: input, tokenCount: tokenCount, output: gate)
+        try weights.encodeProjection(commandBuffer: projection, tensorName: names.b,
+                                     input: input, tokenCount: tokenCount, output: rawBeta)
+        try weights.encodeProjection(commandBuffer: projection, tensorName: names.a,
+                                     input: input, tokenCount: tokenCount, output: rawA)
+        try await submitAndSettle(projection, stage: "projections")
+        if let observe = hooks.observeActivation {
+            observe(position, "input", normalizedHidden)
+            observe(position, "qkv", Self.readFloats(qkv, count: qkvCount))
+            observe(position, "z", Self.readFloats(gate, count: valueCount))
+            observe(position, "b", Self.readFloats(rawBeta, count: scalarCount))
+            observe(position, "a", Self.readFloats(rawA, count: scalarCount))
+        }
+
+        let channelMajor = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.channelMajor")
+        let convolvedMajor = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.convolvedMajor")
+        let convolved = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.convolved")
+        let convolution = try commandBuffer(stage: "convolution")
+        try runtime.encodeLayout(commandBuffer: convolution, input: qkv,
+                                 output: channelMajor, tokenCount: tokenCount,
+                                 channelCount: channels, tokenToChannel: true)
+        try runtime.encodeCausalConvolution(
+            commandBuffer: convolution, channelMajorInput: channelMajor,
+            weights: convolutionWeights, update: update,
+            channelMajorOutput: convolvedMajor, tokenCount: tokenCount)
+        try runtime.encodeLayout(commandBuffer: convolution, input: convolvedMajor,
+                                 output: convolved, tokenCount: tokenCount,
+                                 channelCount: channels, tokenToChannel: false)
+        try await submitAndSettle(convolution, stage: "convolution", update: update)
+
+        let projected = Self.readFloats(convolved, count: qkvCount)
+        let betaRaw = Self.readFloats(rawBeta, count: scalarCount)
+        let aRaw = Self.readFloats(rawA, count: scalarCount)
+        guard projected.allSatisfy(\.isFinite), betaRaw.allSatisfy(\.isFinite),
+              aRaw.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite projections")
+        }
+        hooks.observeActivation?(position, "convolved", projected)
+        var query = [Float](repeating: 0, count: queryCount)
+        var key = [Float](repeating: 0, count: queryCount)
+        var value = [Float](repeating: 0, count: valueCount)
+        var beta = [Float](repeating: 0, count: scalarCount)
+        var decay = [Float](repeating: 0, count: scalarCount)
+        for token in 0..<tokenCount {
+            for head in 0..<heads {
+                let sourceHead = head / configuration.headsPerKeyHead
+                let sourceBase = token * channels + sourceHead * configuration.keyHeadDimension
+                let targetBase = (token * heads + head) * configuration.keyHeadDimension
+                for dimension in 0..<configuration.keyHeadDimension {
+                    query[targetBase + dimension] = projected[sourceBase + dimension]
+                    key[targetBase + dimension] = projected[sourceBase + keyWidth + dimension]
+                }
+            }
+            let sourceBase = token * channels + 2 * keyWidth
+            let valueBase = token * valueWidth
+            for index in 0..<valueWidth {
+                value[valueBase + index] = projected[sourceBase + index]
+            }
+            for head in 0..<heads {
+                let index = token * heads + head
+                beta[index] = 1 / (1 + QwenOfficialSourceRouterArithmetic.exponential(-betaRaw[index]))
+                let x = aRaw[index] + timeStepBias[head]
+                let softplus = x > 20 ? x
+                    : QwenOfficialSourcePositiveLog1p.evaluate(QwenOfficialSourceRouterArithmetic.exponential(x))
+                decay[index] = -QwenOfficialSourceRouterArithmetic.exponential(aLog[head]) * softplus
+            }
+        }
+        guard beta.allSatisfy(\.isFinite), decay.allSatisfy(\.isFinite),
+              query.allSatisfy(\.isFinite), key.allSatisfy(\.isFinite),
+              value.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite recurrence inputs")
+        }
+        if let observe = hooks.observeActivation {
+            observe(position, "query-raw", query)
+            observe(position, "key-raw", key)
+            observe(position, "value", value)
+            observe(position, "beta", beta)
+            observe(position, "log-decay", decay)
+        }
+        let queryBuffer = try Self.floatBuffer(query, device: context.device,
+                                                label: "qwen.bf16.linear.query")
+        let keyBuffer = try Self.floatBuffer(key, device: context.device,
+                                              label: "qwen.bf16.linear.key")
+        let valueBuffer = try Self.floatBuffer(value, device: context.device,
+                                                label: "qwen.bf16.linear.value")
+        let betaBuffer = try Self.floatBuffer(beta, device: context.device,
+                                               label: "qwen.bf16.linear.beta")
+        let decayBuffer = try Self.floatBuffer(decay, device: context.device,
+                                                label: "qwen.bf16.linear.decay")
+        let recurrenceOutput = try emptyBuffer(valueCount, label: "qwen.bf16.linear.recurrence")
+        let gated = try emptyBuffer(valueCount, label: "qwen.bf16.linear.gated")
+        let recurrence = try commandBuffer(stage: "recurrence")
+        try runtime.encodeRecurrence(
+            commandBuffer: recurrence, query: queryBuffer, key: keyBuffer,
+            value: valueBuffer, logDecay: decayBuffer, beta: betaBuffer,
+            update: update, output: recurrenceOutput, tokenCount: tokenCount,
+            initialToken: position == 0)
+        try runtime.encodeGatedRMSNorm(
+            commandBuffer: recurrence, input: recurrenceOutput, gate: gate,
+            weights: normWeights, output: gated, tokenCount: tokenCount)
+        try await submitAndSettle(recurrence, stage: "recurrence", update: update)
+        if let observe = hooks.observeActivation {
+            observe(position, "core", Self.readFloats(recurrenceOutput, count: valueCount))
+            observe(position, "gated", Self.readFloats(gated, count: valueCount))
+        }
+
+        let output = try emptyBuffer(inputCount, label: "qwen.bf16.linear.output")
+        let outputCommand = try commandBuffer(stage: "output")
+        try weights.encodeProjection(commandBuffer: outputCommand,
+                                     tensorName: names.output, input: gated,
+                                     tokenCount: tokenCount, output: output)
+        try await submitAndSettle(outputCommand, stage: "output")
+        let result = Self.readFloats(output, count: inputCount)
+        guard result.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite output")
+        }
+        hooks.observeActivation?(position, "output", result)
+        try await hooks.checkpoint(.beforeCommit)
+        try Task.checkCancellation()
+        try state.commitDeferred(update, tokenCount: tokenCount)
+        published = true
+        return result
+    }
+
+    private func submitAndSettle(_ command: MTLCommandBuffer, stage: String,
+                                 update: QwenLinearAttentionUpdate? = nil) async throws {
+        try await hooks.checkpoint(.beforeSubmission(stage: stage))
+        try Task.checkCancellation()
+        if let update { try state.submitDeferred(update, on: command) }
+        else { command.commit() }
+        var hookError: Error?
+        do { try await hooks.checkpoint(.afterSubmission(stage: stage)) }
+        catch { hookError = error }
+        // Cancellation or a throwing hook must not free any submitted buffer.
+        await withTaskCancellationHandler {
+            await command.completed()
+        } onCancel: {
+            // Metal work must settle; never release the reserved pair early.
+        }
+        if let update { await state.waitForDeferredStage(update) }
+        if let hookError { throw hookError }
+        guard command.status == .completed, command.error == nil else {
+            throw QwenTextRunnerError.gpuExecution(
+                stage: stage, detail: command.error?.localizedDescription
+                    ?? "status \(command.status.rawValue)")
+        }
+        try Task.checkCancellation()
+    }
+
+    private func commandBuffer(stage: String) throws -> MTLCommandBuffer {
+        guard let command = context.queue.makeCommandBuffer() else {
+            throw QwenTextRunnerError.gpuExecution(
+                stage: stage, detail: "command buffer unavailable")
+        }
+        return command
+    }
+
+    private func emptyBuffer(_ count: Int, label: String) throws -> MTLBuffer {
+        try Self.allocate(count, device: context.device, label: label)
+    }
+
+    private static func floatBuffer(_ values: [Float], device: MTLDevice,
+                                    label: String) throws -> MTLBuffer {
+        let buffer = try allocate(values.count, device: device, label: label)
+        values.withUnsafeBytes { raw in
+            if let base = raw.baseAddress {
+                buffer.contents().copyMemory(from: base, byteCount: raw.count)
+            }
+        }
+        return buffer
+    }
+
+    private static func allocate(_ count: Int, device: MTLDevice,
+                                 label: String) throws -> MTLBuffer {
+        let bytes = try checkedBytes(count, device: device)
+        guard let buffer = device.makeBuffer(length: bytes, options: .storageModeShared) else {
+            throw QwenTextRunnerError.execution(detail: "BF16 linear allocation: \(label)")
+        }
+        buffer.label = label
+        return buffer
+    }
+
+    private static func checkedBytes(_ count: Int, device: MTLDevice) throws -> Int {
+        let bytes = try product(count, MemoryLayout<Float>.stride, label: "buffer bytes")
+        guard bytes <= device.maxBufferLength else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear Metal buffer limit")
+        }
+        return bytes
+    }
+
+    private static func readFloats(_ buffer: MTLBuffer, count: Int) -> [Float] {
+        let base = buffer.contents().assumingMemoryBound(to: Float.self)
+        return Array(UnsafeBufferPointer(start: base, count: count))
+    }
+
+    private static func product(_ lhs: Int, _ rhs: Int, label: String) throws -> Int {
+        guard lhs > 0, rhs > 0 else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear empty \(label)")
+        }
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard !overflow, value <= Int(UInt32.max) else {
+            throw QwenTextRunnerError.invalidState(detail: "BF16 linear overflow \(label)")
+        }
+        return value
+    }
 }

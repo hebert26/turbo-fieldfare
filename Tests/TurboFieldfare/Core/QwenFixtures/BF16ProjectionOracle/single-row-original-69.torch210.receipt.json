@@ -1,0 +1,642 @@
+{
+  "scope": "fresh deterministic synthetic single-row1x2048 BF16-to-FP32 projections",
+  "torch": "2.10.0",
+  "torchGit": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+  "python": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/reference-environment/venv/bin/python",
+  "torchModule": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/reference-environment/venv/lib/python3.12/site-packages/torch/__init__.py",
+  "threads": 1,
+  "device": "cpu",
+  "cases": [
+    {
+      "label": "mixed-sign-0",
+      "seed": 1779623323,
+      "officialBits": 1092198774,
+      "chunkedFMABits": 1092198774,
+      "chunkedFMAExact": true,
+      "inputSHA256": "60155b0c65404eb1cc405c0a6771287c51b01e7bce84fd3322cdece6f2826e68",
+      "weightSHA256": "1830e839097524e7442d427899d0d6dc83003023010d5cb5e0c3b9e7c82308e4"
+    },
+    {
+      "label": "mixed-sign-1",
+      "seed": 1779688860,
+      "officialBits": 1107834577,
+      "chunkedFMABits": 1107834577,
+      "chunkedFMAExact": true,
+      "inputSHA256": "e824c255679ae57b753c9493bc452bff46d151e721c926d9f64053fa26bfee1a",
+      "weightSHA256": "6d1900bec797aad7573a2dbbea837db6d8e74ac87a86c893bb5db69ffa7662b6"
+    },
+    {
+      "label": "mixed-sign-2",
+      "seed": 1779754397,
+      "officialBits": 3248209117,
+      "chunkedFMABits": 3248209117,
+      "chunkedFMAExact": true,
+      "inputSHA256": "198147a860119f59c75684fce34f9e25aa27d814b63fc8ce991463cd1dc731fc",
+      "weightSHA256": "97d646d0b644f17d7c71e415d8ae5477869157a36d21d8c6aafeb502611633f6"
+    },
+    {
+      "label": "mixed-sign-3",
+      "seed": 1779819934,
+      "officialBits": 3234030696,
+      "chunkedFMABits": 3234030696,
+      "chunkedFMAExact": true,
+      "inputSHA256": "9f7206c7efc74c622f14470704561c270eecae8263cf2b5d03e18f90a28c11dd",
+      "weightSHA256": "f71b4aeadd822e3ef4b19228025e34a51b3e9d43a40c92919de773ce37763b6d"
+    },
+    {
+      "label": "mixed-sign-4",
+      "seed": 1779885471,
+      "officialBits": 1086014842,
+      "chunkedFMABits": 1086014842,
+      "chunkedFMAExact": true,
+      "inputSHA256": "7936cb3c7905303f2ad919fb052eff4985f8544eb6493fef1ec14142554b0486",
+      "weightSHA256": "eed701a29ff42f9aa65879d93145d445ad094c693b383dc6779d8b205933f068"
+    },
+    {
+      "label": "mixed-sign-5",
+      "seed": 1779951008,
+      "officialBits": 3248653369,
+      "chunkedFMABits": 3248653369,
+      "chunkedFMAExact": true,
+      "inputSHA256": "44a733d7b42070c61dd5aa19c55e9071544890218be99d6a539efd8ef29b1d2d",
+      "weightSHA256": "d9da773990184b15e071c4b1636bfa5e565c5d65648a74c6ddc67d6fa3c9134e"
+    },
+    {
+      "label": "mixed-sign-6",
+      "seed": 1780016545,
+      "officialBits": 1076035388,
+      "chunkedFMABits": 1076035384,
+      "chunkedFMAExact": false,
+      "inputSHA256": "2b70b239a371d5c2b5760f2eea0a5b93eeb5dddcfcc6308698d79f905266503d",
+      "weightSHA256": "efbd181d10215248b52e3c40876b2287e3c79abe11cd1087ed9f500e2f5ad866"
+    },
+    {
+      "label": "mixed-sign-7",
+      "seed": 1780082082,
+      "officialBits": 3245259103,
+      "chunkedFMABits": 3245259103,
+      "chunkedFMAExact": true,
+      "inputSHA256": "67e8193e28754f7f5eca2f141d51a6253b579099384931e253d048a68cecc08a",
+      "weightSHA256": "5a38f39469c26c13bf0ed4b4b647de565614acf51edcfbeb01ad38c5aa56df46"
+    },
+    {
+      "label": "mixed-sign-8",
+      "seed": 1780147619,
+      "officialBits": 1101553743,
+      "chunkedFMABits": 1101553743,
+      "chunkedFMAExact": true,
+      "inputSHA256": "e056e05e73c39a4c60e9b8322ef6d3e10a4d5130aa4bfc3fa35681740da8b181",
+      "weightSHA256": "ce4800d3c799de0b5d7146dbe99295c006bcee028f83df2d45c77f36324d0e06"
+    },
+    {
+      "label": "mixed-sign-9",
+      "seed": 1780213156,
+      "officialBits": 1068512604,
+      "chunkedFMABits": 1068512604,
+      "chunkedFMAExact": true,
+      "inputSHA256": "23d197ca8e7e0b8f851a9f0f88a12b1a715ee0b24c3ac23ab8ea7c98fbf504ac",
+      "weightSHA256": "9c1ae9c0b8e3fa6ac583bec900f0800244a5135317cf59214a3b1206d439de16"
+    },
+    {
+      "label": "mixed-sign-10",
+      "seed": 1780278693,
+      "officialBits": 1081214672,
+      "chunkedFMABits": 1081214672,
+      "chunkedFMAExact": true,
+      "inputSHA256": "087ce924ba8300913d161637029fcc97967d7fa836d5309531f87098fb67bc88",
+      "weightSHA256": "95fc71e7e1bcd8f62fe34345a2b60b74a4218fd1811858cbdbf0cfc2ec64a377"
+    },
+    {
+      "label": "mixed-sign-11",
+      "seed": 1780344230,
+      "officialBits": 3245932337,
+      "chunkedFMABits": 3245932337,
+      "chunkedFMAExact": true,
+      "inputSHA256": "8dc51c7e6d8f636eaae2bdb6df2eb190acc7d4daf458073130f505ceb30b8e98",
+      "weightSHA256": "aa6fed355c2046b5779d37b941a9c840ac8c5116688f65ed0972439462f6fe36"
+    },
+    {
+      "label": "mixed-sign-12",
+      "seed": 1780409767,
+      "officialBits": 3252374648,
+      "chunkedFMABits": 3252374648,
+      "chunkedFMAExact": true,
+      "inputSHA256": "fe8b933578682d1519219512781e31618a3243f3d8f1e37c4d61aed6c28f9db5",
+      "weightSHA256": "66f752bb705ba7d8aaf9c5bfa089b553b6b416e40eea652962d5f22a1971498d"
+    },
+    {
+      "label": "mixed-sign-13",
+      "seed": 1780475304,
+      "officialBits": 3256911331,
+      "chunkedFMABits": 3256911331,
+      "chunkedFMAExact": true,
+      "inputSHA256": "01cfb2465e46f8203c0f57fbe98a4e5e31ccd8d1a35c4b3e7be3b60869d9b3d8",
+      "weightSHA256": "14ed1fe0a7b51b9faf931d4ba013aa1ddff1feb69001965c0c8db842f5193249"
+    },
+    {
+      "label": "mixed-sign-14",
+      "seed": 1780540841,
+      "officialBits": 1098875248,
+      "chunkedFMABits": 1098875248,
+      "chunkedFMAExact": true,
+      "inputSHA256": "12273464f2f5cd3c7e11aa513014dc6443007fd5dcbfae03e70b98b0f8bb7de5",
+      "weightSHA256": "0f9d8b7c3dfc69ef1f70acf2b91110ca826dd514b0591b3fb7e517dc49508af4"
+    },
+    {
+      "label": "mixed-sign-15",
+      "seed": 1780606378,
+      "officialBits": 3248635718,
+      "chunkedFMABits": 3248635718,
+      "chunkedFMAExact": true,
+      "inputSHA256": "c3ee1ae10a9fe7faa16bb41fa39d78d9072bc842e5da3b6617255fe630ae5643",
+      "weightSHA256": "150c38683837f61aaa84a9a675df4946c49f8588427006ade1f1d9e630f5298c"
+    },
+    {
+      "label": "mixed-sign-16",
+      "seed": 1780671915,
+      "officialBits": 3257164970,
+      "chunkedFMABits": 3257164970,
+      "chunkedFMAExact": true,
+      "inputSHA256": "e4471e1342cb4024b3153ee10ebf57bb087569daac62d450195f5f74be17b5e6",
+      "weightSHA256": "cdacc5ed3837aec3d02c92195ff4b8ae9220d5e697ad0137e67a4e3af8d8094f"
+    },
+    {
+      "label": "mixed-sign-17",
+      "seed": 1780737452,
+      "officialBits": 3237482038,
+      "chunkedFMABits": 3237482038,
+      "chunkedFMAExact": true,
+      "inputSHA256": "0820baa012dd04786fdc893d0ab3ccd37761c9c2fd9136337c6ac068fd05110c",
+      "weightSHA256": "abe8ebaae6d11343c17883de564f03e6b4458c89a8a4fe0160da9ad6a18ceaa3"
+    },
+    {
+      "label": "mixed-sign-18",
+      "seed": 1780802989,
+      "officialBits": 3255142932,
+      "chunkedFMABits": 3255142932,
+      "chunkedFMAExact": true,
+      "inputSHA256": "adc4c9fc570bd7f16db3eac1485d0de73d1e328155617156cd3b591ae7cbb2f2",
+      "weightSHA256": "51bd5e2a99809f67728cb30a548da232541ef7b2dd8b10892120110881663971"
+    },
+    {
+      "label": "mixed-sign-19",
+      "seed": 1780868526,
+      "officialBits": 1101824444,
+      "chunkedFMABits": 1101824444,
+      "chunkedFMAExact": true,
+      "inputSHA256": "c48b8b46dbd36a5efd74c89fb3cdcebaf9acdfb76a789038f5db1de071388016",
+      "weightSHA256": "5f402f32ada104898c026a64817f50a169f4292c14763ec9a6d0b42aaf1b7ccf"
+    },
+    {
+      "label": "mixed-sign-20",
+      "seed": 1780934063,
+      "officialBits": 1106118331,
+      "chunkedFMABits": 1106118331,
+      "chunkedFMAExact": true,
+      "inputSHA256": "b076b1324e4960eef5924bee28e3b33e359e12a21a9319ba31bd5cff16a67f6a",
+      "weightSHA256": "5c63d64741db2783bf7bade800da65bcbdc8e3144cee2731c879d1cc24ab9fb1"
+    },
+    {
+      "label": "mixed-sign-21",
+      "seed": 1780999600,
+      "officialBits": 3238805628,
+      "chunkedFMABits": 3238805628,
+      "chunkedFMAExact": true,
+      "inputSHA256": "a96dd7c38e2feb146fa26997cf28de2d05e734006d33dd9ee903c242549a25c6",
+      "weightSHA256": "eb9f523a392366cbdf2cbb48a6c25da40d5b20a40f072a1cdc5ce0f3337a0418"
+    },
+    {
+      "label": "mixed-sign-22",
+      "seed": 1781065137,
+      "officialBits": 3260717034,
+      "chunkedFMABits": 3260717034,
+      "chunkedFMAExact": true,
+      "inputSHA256": "1967a308453d52f465f984d67c694d30f6bb47a156a139f6440ebb3aa0f3a1dd",
+      "weightSHA256": "01b69bf0159fc8419c186d66db7fdf83de2f986501acd2d96ccb8007a13a506a"
+    },
+    {
+      "label": "mixed-sign-23",
+      "seed": 1781130674,
+      "officialBits": 3250771534,
+      "chunkedFMABits": 3250771534,
+      "chunkedFMAExact": true,
+      "inputSHA256": "c299132763c00ebf3bc2ecfe6a42cf46ee532579029141df2fe7a3a60d3e53d5",
+      "weightSHA256": "b681c71f3514a096a45d3d9ce2b887a19a0763dac8e33253d5441721c95fddb2"
+    },
+    {
+      "label": "mixed-sign-24",
+      "seed": 1781196211,
+      "officialBits": 3234847610,
+      "chunkedFMABits": 3234847610,
+      "chunkedFMAExact": true,
+      "inputSHA256": "b869228907d3c5e14f8cca0cf2237db8439f870b77ac9883ebadb79f48af8d4f",
+      "weightSHA256": "0769234e56615db4a7ee7ccd3f85c956dccd13590686422bf7e85cbd5444bedf"
+    },
+    {
+      "label": "mixed-sign-25",
+      "seed": 1781261748,
+      "officialBits": 1098834928,
+      "chunkedFMABits": 1098834924,
+      "chunkedFMAExact": false,
+      "inputSHA256": "cb5f187d78fe5263e4189f1d19787c421466864ea6911e94f284fadec2d960a8",
+      "weightSHA256": "25d7a17c77f7c7338830744043dfcb02a81ea15e3eceef4a3b75c080162128a4"
+    },
+    {
+      "label": "mixed-sign-26",
+      "seed": 1781327285,
+      "officialBits": 1109030225,
+      "chunkedFMABits": 1109030225,
+      "chunkedFMAExact": true,
+      "inputSHA256": "aa0a1a3ee328324ecdd82386cd7e8564d79e21c29b8e72a41ab04d36510abb96",
+      "weightSHA256": "c61456bb6b07cf7b44bb9f0140160563757c2d4eae5243c902118d1f4db032f1"
+    },
+    {
+      "label": "mixed-sign-27",
+      "seed": 1781392822,
+      "officialBits": 1074267622,
+      "chunkedFMABits": 1074267622,
+      "chunkedFMAExact": true,
+      "inputSHA256": "6f203fc0f2f865497cc5bf5d4a8d8f7095d1d640bdcab545cc2cc9c2fe7328f8",
+      "weightSHA256": "79c289f5711bb6885382484400c6f03f110e2d2858a3b1115b76bda70fabbab2"
+    },
+    {
+      "label": "mixed-sign-28",
+      "seed": 1781458359,
+      "officialBits": 3226692444,
+      "chunkedFMABits": 3226692444,
+      "chunkedFMAExact": true,
+      "inputSHA256": "487abed2259bea7b7b7cee5ff89d50b9471599b0739e72323912fc2d8d32dff9",
+      "weightSHA256": "f48b74a24982d8bc5e972ef74b1cb61791d743037b44f55d0c10698c9a5e3167"
+    },
+    {
+      "label": "mixed-sign-29",
+      "seed": 1781523896,
+      "officialBits": 1115531761,
+      "chunkedFMABits": 1115531761,
+      "chunkedFMAExact": true,
+      "inputSHA256": "d76b0a6acbe08a9d05c465876b725c9925eba7c4d38f0e23a07139f5d48f0699",
+      "weightSHA256": "449c4c66b61c04264175b711330000ca596eaa139768c47333bf44168e9aa941"
+    },
+    {
+      "label": "mixed-sign-30",
+      "seed": 1781589433,
+      "officialBits": 3235359822,
+      "chunkedFMABits": 3235359822,
+      "chunkedFMAExact": true,
+      "inputSHA256": "e0c384f66f16621a56a36ad2f0126adae24c0e04a076f51ffeb052279e02aa74",
+      "weightSHA256": "ce1712ddbe66dadf73a8c92e3106cba3746e3c5cbb0e6eeb9145712d41640789"
+    },
+    {
+      "label": "mixed-sign-31",
+      "seed": 1781654970,
+      "officialBits": 3229887959,
+      "chunkedFMABits": 3229887959,
+      "chunkedFMAExact": true,
+      "inputSHA256": "0261aff300c22865503f9a03d5994313c6de7761113db1c2ca0d4ccb8b92178c",
+      "weightSHA256": "12daa7fad27b8ffb9a9de42869ef33dfb320f44d4a36d1da73bda54b6fba175b"
+    },
+    {
+      "label": "mixed-sign-32",
+      "seed": 1781720507,
+      "officialBits": 1103225792,
+      "chunkedFMABits": 1103225792,
+      "chunkedFMAExact": true,
+      "inputSHA256": "92f1d355b68c539eda7e253f1cf01a9722a12830f3701ee88b34b8fcd2b6254d",
+      "weightSHA256": "5a8edfd361da230e1f2e0486c4a47218d5b8f73423262f178c0eff8216a97053"
+    },
+    {
+      "label": "mixed-sign-33",
+      "seed": 1781786044,
+      "officialBits": 3231108029,
+      "chunkedFMABits": 3231108029,
+      "chunkedFMAExact": true,
+      "inputSHA256": "23cbad6b2afa98747c0570d4a2f89ef5667f0ceb97c87925c33e19e03dd574f4",
+      "weightSHA256": "83f88bcf79a2ce3c11f858a8b1cf30d4de6ebf785e827e8b15afd4f56051ebba"
+    },
+    {
+      "label": "mixed-sign-34",
+      "seed": 1781851581,
+      "officialBits": 3247701191,
+      "chunkedFMABits": 3247701191,
+      "chunkedFMAExact": true,
+      "inputSHA256": "5435839a10572738a67b4fe956eea94fb79f1bc27eee5eb06c312268a71becd2",
+      "weightSHA256": "e08af476fd88fb54e613f99b825bfcc5bffc899d6121efac2bb2b45a4c4e14d9"
+    },
+    {
+      "label": "mixed-sign-35",
+      "seed": 1781917118,
+      "officialBits": 1076291652,
+      "chunkedFMABits": 1076291652,
+      "chunkedFMAExact": true,
+      "inputSHA256": "826e7419ec2d407ceda6fb9829b86581b0f893f2b72a393f632dd132c59e9013",
+      "weightSHA256": "c02608e8c7d9245eb8f3f5951c01ab96a07b4969a959d94c5d4bef1f790963e6"
+    },
+    {
+      "label": "mixed-sign-36",
+      "seed": 1781982655,
+      "officialBits": 3247558914,
+      "chunkedFMABits": 3247558914,
+      "chunkedFMAExact": true,
+      "inputSHA256": "a721d138240663d92ffe990f38af9fb6a42bccd4539d6c1e4d4723c2034df2cf",
+      "weightSHA256": "854094de637b0b125d395e3a0babd83b77f724ad4972eef93d4b3e1f511deaa2"
+    },
+    {
+      "label": "mixed-sign-37",
+      "seed": 1782048192,
+      "officialBits": 1104992692,
+      "chunkedFMABits": 1104992692,
+      "chunkedFMAExact": true,
+      "inputSHA256": "d361ae2ae60dece9b3d96ab631aa0111a6d6eecce0470d8291beabeb4c25812a",
+      "weightSHA256": "06fa2c22223d0f6118a1c9190734071ff8dcf75055e50393139cd0b13484a045"
+    },
+    {
+      "label": "mixed-sign-38",
+      "seed": 1782113729,
+      "officialBits": 3257365938,
+      "chunkedFMABits": 3257365938,
+      "chunkedFMAExact": true,
+      "inputSHA256": "9d7c0ea13501dad49085c8bd46d46fb0f8290db9bd4739474614b9075d2317eb",
+      "weightSHA256": "c693aae90304cbc28956e0f5bc3554c025e2f16c812887d40d403c6cf9d9408e"
+    },
+    {
+      "label": "mixed-sign-39",
+      "seed": 1782179266,
+      "officialBits": 1099778504,
+      "chunkedFMABits": 1099778504,
+      "chunkedFMAExact": true,
+      "inputSHA256": "1e5708740bb675854e6282b2a65c7bbac206c20094711af96ab91a2b218b8d05",
+      "weightSHA256": "6527b3a43a0d0a318878f9d37fba3f346849601fc464eb16edf8b152da6d5188"
+    },
+    {
+      "label": "mixed-sign-40",
+      "seed": 1782244803,
+      "officialBits": 3252238784,
+      "chunkedFMABits": 3252238784,
+      "chunkedFMAExact": true,
+      "inputSHA256": "4a2be53662ac5674b8ac6f61ebf8ae0518eef34fbdcff0d7ff2df8d710fb674e",
+      "weightSHA256": "84f282816bc5e6ae3d72b14cbd3fe29c1ec8eccafd05c343ba3ddf1254b78230"
+    },
+    {
+      "label": "mixed-sign-41",
+      "seed": 1782310340,
+      "officialBits": 3239237340,
+      "chunkedFMABits": 3239237339,
+      "chunkedFMAExact": false,
+      "inputSHA256": "9f81738ae2cf58f3f580be927187266ccc56e732eb5badd08041da547176f4e2",
+      "weightSHA256": "b32ede16a4cdd97a1f8a6cb4d2e486479747b7c45696b1b1c4984a4221eed946"
+    },
+    {
+      "label": "mixed-sign-42",
+      "seed": 1782375877,
+      "officialBits": 3242700547,
+      "chunkedFMABits": 3242700547,
+      "chunkedFMAExact": true,
+      "inputSHA256": "3f1e2fbc2a3fa7997b97b6c0666c9153afc391219c3a1a156d38053e5ed1eb54",
+      "weightSHA256": "41eb254736c3658e84e107abac8393fc8c2c9c18cb6d68bb2f83f3b2f0843df1"
+    },
+    {
+      "label": "mixed-sign-43",
+      "seed": 1782441414,
+      "officialBits": 3259852358,
+      "chunkedFMABits": 3259852358,
+      "chunkedFMAExact": true,
+      "inputSHA256": "efd444d9ad6212d9bc28a91cc3e501d1407546fb12385afc3fd30fd21ba5fa99",
+      "weightSHA256": "8ce2bb3a279031c868d741c72d63e245b45cbcb4e1cfb15a630a689e3762b4c3"
+    },
+    {
+      "label": "mixed-sign-44",
+      "seed": 1782506951,
+      "officialBits": 3245096772,
+      "chunkedFMABits": 3245096772,
+      "chunkedFMAExact": true,
+      "inputSHA256": "e82496a60deae2bfbb7e481374ff1a8514f0adb56f6d40a978a9173bcb970f55",
+      "weightSHA256": "91cc01bb4dac8328f9a8729f19d9f882d415d93cfb4fa0cd0c41cadde42f8a97"
+    },
+    {
+      "label": "mixed-sign-45",
+      "seed": 1782572488,
+      "officialBits": 3239098300,
+      "chunkedFMABits": 3239098300,
+      "chunkedFMAExact": true,
+      "inputSHA256": "e78487dd1d0383177f4a629bf0d1771108f3242c61aaf600ea43e32c06ccd76e",
+      "weightSHA256": "c87d852a98d74ba700b5aca9d513f8878f9ac3d486c7c6a8940ad59f6ed8cd36"
+    },
+    {
+      "label": "mixed-sign-46",
+      "seed": 1782638025,
+      "officialBits": 1100879011,
+      "chunkedFMABits": 1100879011,
+      "chunkedFMAExact": true,
+      "inputSHA256": "c355a33c9def13145e352943365aa53b68a6b59baeada9c4813b6164a07f1173",
+      "weightSHA256": "e3e9353b91b11cc0d465679d5e29be2bb0a063b35f6c94a85c9ee64776699c12"
+    },
+    {
+      "label": "mixed-sign-47",
+      "seed": 1782703562,
+      "officialBits": 1084753725,
+      "chunkedFMABits": 1084753725,
+      "chunkedFMAExact": true,
+      "inputSHA256": "f27f32c11b191e02bac67c6e5d078241e9376dda4bbf5818eda9f28cfe299ec6",
+      "weightSHA256": "220843ec98770a0628243d36a8adde0ce0f1be9397dcdc8d5183871f5726af6c"
+    },
+    {
+      "label": "mixed-sign-48",
+      "seed": 1782769099,
+      "officialBits": 1098752867,
+      "chunkedFMABits": 1098752867,
+      "chunkedFMAExact": true,
+      "inputSHA256": "f691bbdad9f521f7e5a771dd300022e542c4a800f62a0952bc366805a6c916dc",
+      "weightSHA256": "6d0814226d8ddf1131bb65e28d4f0e0264d63423d17eea995434a2f0a7799c06"
+    },
+    {
+      "label": "mixed-sign-49",
+      "seed": 1782834636,
+      "officialBits": 3223076062,
+      "chunkedFMABits": 3223076062,
+      "chunkedFMAExact": true,
+      "inputSHA256": "5c28bb2cdf458be4d497d656b53ea6efe0d2be19b9ad33840c32de614f0daf71",
+      "weightSHA256": "c5f87480466405ba7c950b167c7452339e8412389c90a2832adddb7ff6bf91e7"
+    },
+    {
+      "label": "mixed-sign-50",
+      "seed": 1782900173,
+      "officialBits": 3243097820,
+      "chunkedFMABits": 3243097820,
+      "chunkedFMAExact": true,
+      "inputSHA256": "ae13cf994cd0598b45aaba9d6cd92d76141172595ecf24ac2c0c66ba8dc4c331",
+      "weightSHA256": "04917a9ccec6bae00da189fd3840c1b8ffa2d069af5a33fef1fe3aad805e04eb"
+    },
+    {
+      "label": "mixed-sign-51",
+      "seed": 1782965710,
+      "officialBits": 1077098174,
+      "chunkedFMABits": 1077098170,
+      "chunkedFMAExact": false,
+      "inputSHA256": "25678db68d42b4ef02ac79b6c67c7cfb5d989b40bce4992ad0f956a917668d23",
+      "weightSHA256": "9f4762ca5f34ccaec11ffceb126cb44fa5bd90baafa2c868e7e196db8d109d76"
+    },
+    {
+      "label": "mixed-sign-52",
+      "seed": 1783031247,
+      "officialBits": 3228000544,
+      "chunkedFMABits": 3228000544,
+      "chunkedFMAExact": true,
+      "inputSHA256": "c8af3a1c19e9d66f65b29c289db16d081d4436d2eb2e4fc3a83002609a0e1ff2",
+      "weightSHA256": "920a9f0e2c407e0b9de5afa9372c610d53e1729937f7e1edd0b3634c81044d8f"
+    },
+    {
+      "label": "mixed-sign-53",
+      "seed": 1783096784,
+      "officialBits": 1098995100,
+      "chunkedFMABits": 1098995100,
+      "chunkedFMAExact": true,
+      "inputSHA256": "faf0156c49cc2c0da624c5585351afd53d2a0c2310834a63950726c3bef63a31",
+      "weightSHA256": "3146abddec96ab347882f6d7083a57f9fd954d9ddae63212d83f3e9da153d1f7"
+    },
+    {
+      "label": "mixed-sign-54",
+      "seed": 1783162321,
+      "officialBits": 3251835206,
+      "chunkedFMABits": 3251835206,
+      "chunkedFMAExact": true,
+      "inputSHA256": "4a105a51b1b608f7ddea7e17d2045523982a3b5a982d71a884cb38d534811c9e",
+      "weightSHA256": "ad368531aca3c72aba3f5bbf40281bed8d5a67215bf236461d101f2fb312758e"
+    },
+    {
+      "label": "mixed-sign-55",
+      "seed": 1783227858,
+      "officialBits": 1082247084,
+      "chunkedFMABits": 1082247084,
+      "chunkedFMAExact": true,
+      "inputSHA256": "2be8cf241cbdfd0c7bd25dd8433571b2c84715d0aa58a7864168be328c8804e5",
+      "weightSHA256": "44697a65e54031cd847f2ea1addbbdf3068e32b79fc3496ca36c4ced1098a8aa"
+    },
+    {
+      "label": "mixed-sign-56",
+      "seed": 1783293395,
+      "officialBits": 1061838624,
+      "chunkedFMABits": 1061838624,
+      "chunkedFMAExact": true,
+      "inputSHA256": "9a7d76c523f69897bcd2609084561214cac2370325a275c3e7be9e2b8b433552",
+      "weightSHA256": "eaed949a54973da26b70a72d37b21d7ecf07638f1691d1311f9f3a0d3bc6fb04"
+    },
+    {
+      "label": "mixed-sign-57",
+      "seed": 1783358932,
+      "officialBits": 1093837044,
+      "chunkedFMABits": 1093837044,
+      "chunkedFMAExact": true,
+      "inputSHA256": "9eb5a58a4a70747190af7b39c4029466b8702ff39fdf377101f4f2bba0ac2394",
+      "weightSHA256": "ad2d9242b5f500c1de2ce28bdb8dd1782106cced84bcc6eb0e2eeba222b8b881"
+    },
+    {
+      "label": "mixed-sign-58",
+      "seed": 1783424469,
+      "officialBits": 3250818384,
+      "chunkedFMABits": 3250818384,
+      "chunkedFMAExact": true,
+      "inputSHA256": "a25260a486befa7b62fc75b7cbbb9dbcc2e1c7207fa556e4b8974ffa2ac7ed77",
+      "weightSHA256": "cdc9a5e53150bcfcc82723b7487f3d5b9107a75ae4a63e2fa6b24e9c4c0e02fc"
+    },
+    {
+      "label": "mixed-sign-59",
+      "seed": 1783490006,
+      "officialBits": 1086604828,
+      "chunkedFMABits": 1086604828,
+      "chunkedFMAExact": true,
+      "inputSHA256": "64904ba7d82e063e41aaf42ec481fed908328c94fd866988f0a8f11191f50015",
+      "weightSHA256": "8bc0d2352523e5e62002b2e79455e3608e04611b8e38c471703104d5667af252"
+    },
+    {
+      "label": "mixed-sign-60",
+      "seed": 1783555543,
+      "officialBits": 1104509349,
+      "chunkedFMABits": 1104509349,
+      "chunkedFMAExact": true,
+      "inputSHA256": "d15bc5fcce0d853f99c90e3404f07bedc16b14ca45f97574b7036bbe6ed2c6ca",
+      "weightSHA256": "5da882682feeae3e81aafd3b6f3a961b7c7d16fb2cfd6c29574119e82a45a4af"
+    },
+    {
+      "label": "mixed-sign-61",
+      "seed": 1783621080,
+      "officialBits": 3233428228,
+      "chunkedFMABits": 3233428228,
+      "chunkedFMAExact": true,
+      "inputSHA256": "77486049552dfb458a099def12ea1cfb16b196c5ef31358bd116dd356537b08a",
+      "weightSHA256": "21125d36da80a6739133b0ff8b9657a02be13038103001f56f417caff51d67ab"
+    },
+    {
+      "label": "mixed-sign-62",
+      "seed": 1783686617,
+      "officialBits": 3213947056,
+      "chunkedFMABits": 3213947056,
+      "chunkedFMAExact": true,
+      "inputSHA256": "dbeba6c6d533db26bf26fa5efe22b956c363e66e41357a8b4f4faccc9da82dbc",
+      "weightSHA256": "097611fb4287316ce7da89fc4c37d61f041da4395b6f51092d2d0d50d7835e17"
+    },
+    {
+      "label": "mixed-sign-63",
+      "seed": 1783752154,
+      "officialBits": 3230332101,
+      "chunkedFMABits": 3230332101,
+      "chunkedFMAExact": true,
+      "inputSHA256": "cb536b7fadf4864e36e0c56d2ec97780563d5594881c18b4672507395ba1a8a7",
+      "weightSHA256": "20fdb0e17fd2fddfa3b1f62ef2bf819aa21de61dc7864046020a3ad94e861ef2"
+    },
+    {
+      "label": "all-zero",
+      "seed": null,
+      "officialBits": 0,
+      "chunkedFMABits": 0,
+      "chunkedFMAExact": true,
+      "inputSHA256": "9f1dcbc35c350d6027f98be0f5c8b43b42ca52b7604459c0c42be3aa88913d47",
+      "weightSHA256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644"
+    },
+    {
+      "label": "all-one",
+      "seed": null,
+      "officialBits": 1157627904,
+      "chunkedFMABits": 1157627904,
+      "chunkedFMAExact": true,
+      "inputSHA256": "fc3bd1e348ef843a5052596a42863c169d54cc3c352449596039497873862155",
+      "weightSHA256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644"
+    },
+    {
+      "label": "large-cancellation",
+      "seed": null,
+      "officialBits": 1149239296,
+      "chunkedFMABits": 1149239296,
+      "chunkedFMAExact": true,
+      "inputSHA256": "456f6d396b9b76ae41aa237b10986a7c052f6a8e5c41fd8d47b801a6311fa4be",
+      "weightSHA256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644"
+    },
+    {
+      "label": "rounded-product-cancellation",
+      "seed": null,
+      "officialBits": 872415232,
+      "chunkedFMABits": 872415232,
+      "chunkedFMAExact": true,
+      "inputSHA256": "52a829b5ce40e7ffc25199793814ca33b7046b60c29caacb528aab0d202b5876",
+      "weightSHA256": "06f3de47ea89b1ade80c5c55478cfdcc01d7d1ea74bc043e88caa24db58eb388"
+    },
+    {
+      "label": "cross-chunk-cancellation",
+      "seed": null,
+      "officialBits": 1156571136,
+      "chunkedFMABits": 1156571136,
+      "chunkedFMAExact": true,
+      "inputSHA256": "c277e273ecc9dc4d8a76891d9055f7597cb658e1f593fd310aae361b96329306",
+      "weightSHA256": "045ad01d502fc9de7069fd37169060ce79a14a289444ffcd9881ec367a554644"
+    }
+  ],
+  "caseCount": 69,
+  "width": 2048,
+  "chunkedFMAExactMismatches": 4,
+  "payloadSHA256": {
+    "inputs.fp32-le.bin": "d8fa1fe04af1d6390f656e2ae86258676f47856f58815996ae6a91d84629c66a",
+    "weights.bf16-le.bin": "31794fb1ef42eddea59481975718fe1344f6c1d5919e817f522055834155a297",
+    "expected.fp32-le.bin": "19eeff39c789f9baeac8c281a6aa9c5b551dfd71401ead78a13cae424b040b5b"
+  },
+  "scriptSHA256": "631663bb9742d25b07994f46203618cc7a9708e48db0450518fb62e5170c613a",
+  "originalWeightReads": 0
+}

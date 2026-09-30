@@ -1,0 +1,92 @@
+{
+  "cases": [
+    {
+      "dimension": 72,
+      "expectedContext": {
+        "byteCount": 32256,
+        "count": 8064,
+        "file": "case-rows-7.context.fp32-le.bin",
+        "sha256": "1787c227146c111ac2fce088f94e36aa1442d5454dce0d604b5a67874d37001a",
+        "shape": [
+          7,
+          1152
+        ]
+      },
+      "heads": 16,
+      "keyShape": [
+        1,
+        16,
+        7,
+        72
+      ],
+      "keyStride": [
+        1152,
+        72,
+        3456,
+        1
+      ],
+      "peakRSSBytes": 329629696,
+      "qkv": {
+        "byteCount": 96768,
+        "count": 24192,
+        "file": "case-rows-7.qkv.fp32-le.bin",
+        "sha256": "2cc66d38148fb923f90a6eef890e1a0c0835e659312387a7813b5c384ff59899",
+        "shape": [
+          7,
+          3456
+        ]
+      },
+      "queryShape": [
+        1,
+        16,
+        7,
+        72
+      ],
+      "queryStride": [
+        1152,
+        72,
+        3456,
+        1
+      ],
+      "rows": 7,
+      "scaleFP32Bits": 1039227887,
+      "seconds": 0.004175583133473992,
+      "seed": 589668359,
+      "valueShape": [
+        1,
+        16,
+        7,
+        72
+      ],
+      "valueStride": [
+        1152,
+        72,
+        3456,
+        1
+      ]
+    }
+  ],
+  "complete": true,
+  "dimension": 72,
+  "generator": "torch.randn([rows,3,16,72], CPU float32, torch.Generator seed=0x2325A000+rows) * 0.25",
+  "heads": 16,
+  "kind": "qwen-vision-synthetic-attention-shape-oracle-v1",
+  "numpyVersion": "2.4.3",
+  "officialModuleSHA256": "971b08ed3eb7452f3f5f1b0f8ab8e602fc4c4e2cc10d0a4e99ec1e1830776074",
+  "originalSourceBytesRead": 0,
+  "peakRSSBytes": 1365671936,
+  "rows": [
+    7
+  ],
+  "rssCeilingBytes": 4294967296,
+  "scaleExpression": "72 ** -0.5, unmodified eager attention scaling argument",
+  "scaleFP32Bits": 1039227887,
+  "scope": "unmodified pinned CPU eager_attention_forward on deterministic synthetic interleaved QKV; no weights/models",
+  "scriptSHA256": "d7bd69778480a67b1be55161da9f53eced49d6aa5a41f12707cc2ad81f2f16a7",
+  "seconds": 3.71755599998869,
+  "sourceSweepSHA256": "f233251375f764e5fbb3e4b4124efa7bce32fee9ae4e4fa82ada2f9532ed25dd",
+  "threads": 1,
+  "torchGit": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+  "torchVersion": "2.10.0",
+  "transformersVersion": "5.18.0.dev0"
+}

@@ -29,10 +29,21 @@ protocol DecodeServiceModelRuntime: AnyObject, Sendable {
 
 extension RealInferenceClient: DecodeServiceModelRuntime {}
 
+/// Only a runtime retaining an admitted BF16 model can validate its source
+/// receipt after the service's await points. Synthetic/packed runtimes cannot
+/// turn a digest received over the wire into an inference ticket.
+protocol DecodeServiceSourceRuntime: DecodeServiceModelRuntime {
+    func validateSourceReadiness(_ identity: DecodeSourceIdentity) async throws
+}
+
+extension RealInferenceClient: DecodeServiceSourceRuntime {}
+
 /// Owns the service-side model transaction through ready-frame completion.
 /// Session leases are synchronous; model work never runs while their mutex is held.
 final class DecodeServiceLoadCoordinator: Sendable {
-    enum Rejection: Error, Equatable { case lifecycleInProgress, invalidAttempt }
+    enum Rejection: Error, Equatable {
+        case lifecycleInProgress, invalidAttempt, sourceRegistrationChanged
+    }
 
     struct Attempt: Sendable, Equatable {
         fileprivate let id: UUID
@@ -73,6 +84,7 @@ final class DecodeServiceLoadCoordinator: Sendable {
 
     private struct State: Sendable {
         var active: Attempt?
+        var sourceProbe: OfficialSourceRegistrationProbe?
         var aborting = false
     }
     private let state = Mutex(State())
@@ -89,6 +101,7 @@ final class DecodeServiceLoadCoordinator: Sendable {
             guard value.active == nil else { throw Rejection.lifecycleInProgress }
             let attempt = Attempt(id: UUID(), completion: Completion(), lease: lease)
             value.active = attempt
+            value.sourceProbe = nil
             return attempt
         }
     }
@@ -105,6 +118,15 @@ final class DecodeServiceLoadCoordinator: Sendable {
         options: AppRuntimeOptions, forceLogitsHead: Bool
     ) async throws -> AppLoadedModelReadiness {
         try require(attempt)
+        // Retain the actual protected marker/root handles across loader awaits.
+        // Metadata checks never stand in for ModelFamilyRuntime.loadBundle trust.
+        let probe = try OfficialSourceRegistrationProbe.openIfSource(
+            directoryURL: directory)
+        try require(attempt)
+        try state.withLock { value in
+            guard value.active == attempt else { throw Rejection.invalidAttempt }
+            value.sourceProbe = probe
+        }
         try await runtime.ensureLoaded(
             modelDirectory: directory, maxContextTokens: maxContextTokens,
             options: options, forceLogitsHead: forceLogitsHead) { _ in }
@@ -116,13 +138,93 @@ final class DecodeServiceLoadCoordinator: Sendable {
                 "loaded runtime did not publish verified family readiness")
         }
         try require(attempt)
+        try validateReadiness(readiness, attempt: attempt)
+        if case .qwenSource(let identity) = readiness {
+            try await validateAdmittedSource(identity, attempt: attempt)
+        }
         return readiness
+    }
+
+    private func validateAdmittedSource(
+        _ identity: DecodeSourceIdentity, attempt: Attempt
+    ) async throws {
+        try require(attempt)
+        guard let source = runtime as? any DecodeServiceSourceRuntime else {
+            throw Rejection.sourceRegistrationChanged
+        }
+        try await source.validateSourceReadiness(identity)
+        try require(attempt)
+        guard let probe = try sourceProbe(attempt),
+              probe.contentDigest == identity.contentDigest else {
+            throw Rejection.sourceRegistrationChanged
+        }
+        try probe.revalidate()
+        try require(attempt)
+    }
+
+    private func sourceProbe(_ attempt: Attempt) throws
+        -> OfficialSourceRegistrationProbe? {
+        try require(attempt)
+        return try state.withLock { value in
+            guard value.active == attempt else { throw Rejection.invalidAttempt }
+            return value.sourceProbe
+        }
+    }
+
+    private func validateReadiness(
+        _ readiness: AppLoadedModelReadiness, attempt: Attempt
+    ) throws {
+        let probe = try sourceProbe(attempt)
+        try probe?.revalidate()
+        switch (probe, readiness) {
+        case (nil, .qwenSource), (.some, .gemma), (.some, .qwen):
+            throw Rejection.sourceRegistrationChanged
+        case (.some(let probe), .qwenSource(let identity)):
+            guard identity.kind == .officialSafetensorsBF16V1,
+                  identity.contentDigest == probe.contentDigest else {
+                throw Rejection.sourceRegistrationChanged
+            }
+        case (nil, .gemma), (nil, .qwen):
+            break
+        }
+    }
+
+    /// Called after encoding, before ready I/O. The source model rechecks its
+    /// retained trust receipt and named payloads, then the probe rechecks its
+    /// retained marker/root; no model work occurs under coordinator locks.
+    func validatePublication(
+        _ attempt: Attempt, event: DecodeServiceEvent
+    ) async throws {
+        try require(attempt)
+        try event.validateBackingIdentity()
+        guard event.kind == .ready,
+              let binding = session.binding(loadID: event.loadID),
+              binding.family == event.loadedFamily,
+              binding.modelIdentity == event.modelIdentity,
+              binding.sourceIdentity == event.sourceIdentity else {
+            throw Rejection.sourceRegistrationChanged
+        }
+        let probe = try sourceProbe(attempt)
+        try probe?.revalidate()
+        switch (probe, event.sourceIdentity) {
+        case (nil, nil): break
+        case (.some(let held), .some(let identity))
+            where held.contentDigest == identity.contentDigest
+                && identity.kind == .officialSafetensorsBF16V1:
+            break
+        default: throw Rejection.sourceRegistrationChanged
+        }
+        if let identity = event.sourceIdentity {
+            try await validateAdmittedSource(identity, attempt: attempt)
+        }
+        try require(attempt)
     }
 
     func reservePublication(
         _ attempt: Attempt, readiness: AppLoadedModelReadiness
     ) throws -> DecodeServiceSession.Binding {
         try require(attempt)
+        try validateReadiness(readiness, attempt: attempt)
         return try session.reserveAndPublish(readiness, lease: attempt.lease)
     }
 
@@ -132,6 +234,7 @@ final class DecodeServiceLoadCoordinator: Sendable {
         state.withLock { value in
             if value.active == attempt {
                 value.active = nil
+                value.sourceProbe = nil
                 value.aborting = false
             }
         }
@@ -172,6 +275,7 @@ final class DecodeServiceLoadCoordinator: Sendable {
         state.withLock { value in
             if value.active == attempt {
                 value.active = nil
+                value.sourceProbe = nil
                 value.aborting = false
             }
         }
@@ -200,6 +304,7 @@ struct DecodeServiceReadyPublisher {
     ) async -> Outcome {
         do {
             let frame = try DecodeFrameCodec.encode(event)
+            try await coordinator.validatePublication(attempt, event: event)
             try writeFrame(frame, output)
             return .committed(try coordinator.finishCommit(attempt))
         } catch {
@@ -355,6 +460,7 @@ struct DecodeServiceReadyPublisher {
                             loadAttemptID: request.attemptID,
                             loadedFamily: binding.family, loadID: binding.loadID,
                             modelIdentity: binding.modelIdentity,
+                            sourceIdentity: binding.sourceIdentity,
                             currentMemoryBytes: memory, peakMemoryBytes: memory,
                             conversationLogicalStateBytes:
                                 client.currentConversationLogicalStateBytes,
@@ -586,6 +692,7 @@ struct DecodeServiceReadyPublisher {
                     loadedFamily: binding.family,
                     loadID: binding.loadID,
                     modelIdentity: binding.modelIdentity,
+                    sourceIdentity: binding.sourceIdentity,
                     conversationEpoch: request.conversationEpoch,
                     towerBytes: { client.currentVisionTowerBytes },
                     conversationTokens: {
@@ -750,6 +857,7 @@ struct DecodeServiceReadyPublisher {
             kind: kind, generationID: id,
             loadedFamily: binding?.family, loadID: binding?.loadID,
             modelIdentity: binding?.modelIdentity,
+            sourceIdentity: binding?.sourceIdentity,
             error: error, conversationTokenCount: conversationTokenCount,
             conversationEpoch: epoch)
     }

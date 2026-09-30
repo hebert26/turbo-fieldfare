@@ -22,6 +22,7 @@ enum QwenFullAttentionKVError: Error, Equatable, Sendable {
     case snapshotAheadOfCommitted(layer: Int, snapshot: Int, committed: Int)
     case inconsistentCommittedPositions
     case commandBufferAlreadySubmitted
+    case invalidStagedBuffer(kind: String, required: Int, actual: Int)
 }
 
 struct QwenFullAttentionKVView: @unchecked Sendable {
@@ -101,9 +102,14 @@ final class QwenFullAttentionKV: @unchecked Sendable {
         fullAttentionLayerMask: [UInt8],
         maxContext: Int,
         keyValueHeadCount: Int,
-        headDimension: Int
+        headDimension: Int,
+        expectedLayerCount: Int = 40,
+        expectedFullLayerCount: Int = 10
     ) throws {
-        guard fullAttentionLayerMask.count == 40 else {
+        // Defaults preserve the official Phase 9 geometry. Only the internal
+        // two-layer source fixture supplies reduced expected counts.
+        guard expectedLayerCount > 0,
+              fullAttentionLayerMask.count == expectedLayerCount else {
             throw QwenFullAttentionKVError.invalidLayerMaskCount(fullAttentionLayerMask.count)
         }
         for (layer, value) in fullAttentionLayerMask.enumerated() where value != 0 && value != 1 {
@@ -112,7 +118,8 @@ final class QwenFullAttentionKV: @unchecked Sendable {
         let selectedLayers = fullAttentionLayerMask.indices.filter {
             fullAttentionLayerMask[$0] == 1
         }
-        guard selectedLayers.count == 10 else {
+        guard expectedFullLayerCount > 0,
+              selectedLayers.count == expectedFullLayerCount else {
             throw QwenFullAttentionKVError.invalidFullLayerCount(selectedLayers.count)
         }
         guard maxContext > 0 else {
@@ -133,6 +140,10 @@ final class QwenFullAttentionKV: @unchecked Sendable {
             elementsPerToken, MemoryLayout<Float>.stride, operation: "KV token stride")
         let bufferBytes = try Self.checkedMultiply(
             maxContext, stride, operation: "KV buffer bytes")
+        guard maxContext <= Int(UInt32.max), bufferBytes <= device.maxBufferLength else {
+            throw QwenFullAttentionKVError.invalidGeometry(
+                field: "KV device/position limit", value: bufferBytes)
+        }
 
         var storage: [Int: LayerStorage] = [:]
         storage.reserveCapacity(selectedLayers.count)
@@ -256,6 +267,59 @@ final class QwenFullAttentionKV: @unchecked Sendable {
                 layer: write.layer,
                 identifier: write.identifier,
                 succeeded: completed.status == .completed && completed.error == nil)
+        }
+    }
+
+    /// Publish two completed, shared FP32 rows and the cursor as one locked
+    /// operation. Neither source buffer may alias a committed KV buffer. All
+    /// geometry, ownership and capacity checks precede the first byte copy;
+    /// the bounded synchronous copies have no suspension or throwing point.
+    /// Failed GPU work must never call this method: abandon the reservation.
+    func commitStaged(_ write: QwenFullAttentionKVWrite,
+                      key: MTLBuffer, value: MTLBuffer) throws {
+        try withLock {
+            var storage = try requireLayer(write.layer)
+            guard let pending = storage.pendingWrite,
+                  pending.identifier == write.identifier,
+                  pending.position == write.position,
+                  pending.tokenCount == write.tokenCount,
+                  !pending.submitted,
+                  storage.committedPosition == write.position else {
+                throw QwenFullAttentionKVError.unknownWrite
+            }
+            guard storage.activeReads == 0 else {
+                throw QwenFullAttentionKVError.activeGPUUse
+            }
+            let bytes = try Self.checkedMultiply(
+                write.tokenCount, strideBytes, operation: "staged KV bytes")
+            let offset = try Self.checkedMultiply(
+                write.position, strideBytes, operation: "staged KV offset")
+            let end = try Self.checkedAdd(offset, bytes, operation: "staged KV end")
+            guard write.keyOffset == offset, write.valueOffset == offset,
+                  write.strideBytes == strideBytes, end <= storage.key.length,
+                  end <= storage.value.length, key.length == bytes,
+                  storage.key.storageMode == .shared,
+                  storage.value.storageMode == .shared,
+                  key.storageMode == .shared, key.device === storage.key.device,
+                  key !== value, key !== storage.key, key !== storage.value else {
+                throw QwenFullAttentionKVError.invalidStagedBuffer(
+                    kind: "key", required: bytes, actual: key.length)
+            }
+            guard value.length == bytes, value.storageMode == .shared,
+                  value.device === storage.value.device,
+                  value !== storage.key, value !== storage.value else {
+                throw QwenFullAttentionKVError.invalidStagedBuffer(
+                    kind: "value", required: bytes, actual: value.length)
+            }
+            let next = try Self.checkedAdd(
+                write.position, write.tokenCount, operation: "staged KV position")
+            storage.key.contents().advanced(by: offset).copyMemory(
+                from: key.contents(), byteCount: bytes)
+            storage.value.contents().advanced(by: offset).copyMemory(
+                from: value.contents(), byteCount: bytes)
+            storage.committedPosition = next
+            storage.pendingWrite = nil
+            layers[write.layer] = storage
         }
     }
 

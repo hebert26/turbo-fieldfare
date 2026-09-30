@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 /// Metadata-only family classification. This boundary intentionally does not
 /// inspect payload files, create a Metal object, map weights, or construct a
@@ -8,17 +9,70 @@ import TurboFieldfareFormat
 enum ModelFamilyAdmission: Sendable, Equatable {
     case gemmaV1
     case qwenV2(LoadedModelManifest)
+    case qwenOfficialSource(OfficialSourceDescriptor)
+
+    /// Inspect only the top-level keys of the already capped metadata. The
+    /// packed decoders tolerate unrelated legacy extensions, but source-only
+    /// descriptor fields must never be silently accepted as packed metadata.
+    private struct PackedTopLevelKeys: Decodable {
+        private struct Key: CodingKey {
+            let stringValue: String
+            var intValue: Int? { nil }
+            init(stringValue: String) { self.stringValue = stringValue }
+            init?(intValue: Int) { return nil }
+        }
+
+        let names: Set<String>
+
+        init(from decoder: Decoder) throws {
+            let values = try decoder.container(keyedBy: Key.self)
+            names = Set(values.allKeys.map(\.stringValue))
+        }
+    }
+
+    private static let sourceOnlyManifestKeys: Set<String> = [
+        "kind", "version", "repository", "revision", "storageProfile",
+        "sidecarSHA256", "shards", "sourceRoot", "contentSHA256",
+    ]
 
     static func classify(
         directoryURL: URL,
         maxManifestBytes: UInt64 = ManifestReader.defaultMaxBytes
     ) throws -> ModelFamilyAdmission {
         let directory = try GTurboModelDirectory(rootURL: directoryURL)
+        let names = try directory.basenames()
+        let hasSource = names.contains(OfficialSourceDescriptor.markerFilename)
+        let hasManifest = names.contains("manifest.json")
+        guard !hasSource || !hasManifest else {
+            throw ModelError.indexCorrupt(detail: "ambiguous model directory: source marker and packed manifest")
+        }
+        if hasSource {
+            do {
+                let data = try directory.readMetadata(
+                    OfficialSourceDescriptor.markerFilename,
+                    maxBytes: min(maxManifestBytes, OfficialSourceDescriptor.maximumMarkerBytes))
+                let descriptor = try OfficialSourceDescriptor.decodeStrict(data: data)
+                try OfficialSourceDescriptorValidation.validate(descriptor)
+                return .qwenOfficialSource(descriptor)
+            } catch {
+                throw ModelError.indexCorrupt(detail: "\(OfficialSourceDescriptor.markerFilename): \(error)")
+            }
+        }
         let data: Data
         do {
             data = try directory.readMetadata("manifest.json", maxBytes: maxManifestBytes)
         } catch ModelError.missingFile {
             throw ModelError.partialInstall(path: directoryURL.path)
+        }
+        let packedKeys: PackedTopLevelKeys
+        do {
+            packedKeys = try JSONDecoder().decode(PackedTopLevelKeys.self, from: data)
+        } catch {
+            throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
+        }
+        if let sourceKey = packedKeys.names.intersection(sourceOnlyManifestKeys).sorted().first {
+            throw ModelError.indexCorrupt(
+                detail: "manifest.json contains source-only field \(sourceKey)")
         }
         let version: (major: Int, minor: Int)
         do {
@@ -122,13 +176,16 @@ public struct LoadedModelFamilyBundle: Sendable {
     public let runtime: ModelFamilyRuntime
     public let family: LoadedRuntimeFamily
     public let verifiedIdentity: LoadedRuntimeIdentity?
+    public let sourceIdentity: LoadedRuntimeSourceIdentity?
     public let qwenCodec: QwenChatCodec?
 
     init(runtime: ModelFamilyRuntime, family: LoadedRuntimeFamily,
-         verifiedIdentity: LoadedRuntimeIdentity?, qwenCodec: QwenChatCodec?) {
+         verifiedIdentity: LoadedRuntimeIdentity?, qwenCodec: QwenChatCodec?,
+         sourceIdentity: LoadedRuntimeSourceIdentity? = nil) {
         self.runtime = runtime
         self.family = family
         self.verifiedIdentity = verifiedIdentity
+        self.sourceIdentity = sourceIdentity
         self.qwenCodec = qwenCodec
     }
 }
@@ -138,6 +195,7 @@ public struct LoadedModelFamilyBundle: Sendable {
 public enum ModelFamilyRuntime: @unchecked Sendable {
     case gemma(Model)
     case qwen(QwenTextModel)
+    case qwenOfficialSource(QwenOfficialSourceModel)
 
     public static func load(
         directoryURL: URL,
@@ -158,6 +216,21 @@ public enum ModelFamilyRuntime: @unchecked Sendable {
         case .qwenV2(let manifest):
             return .qwen(try QwenTextModel.loadOfficial(
                 directoryURL: directoryURL, manifest: manifest, device: device))
+        case .qwenOfficialSource:
+            let context = try MetalContext()
+            guard context.device.registryID == device.registryID else {
+                throw ModelError.indexCorrupt(detail: "source device changed during load")
+            }
+            let expertSlots: Int
+            switch streamingMode {
+            case .pread(let slotCount): expertSlots = slotCount
+            }
+            return .qwenOfficialSource(try QwenOfficialSourceModel.load(
+                registrationURL: directoryURL, context: context,
+                integrityPolicy: integrityPolicy ?? .fullSha256,
+                expertCacheSlots: expertSlots,
+                expertCachePolicy: expertCachePolicy,
+                residencyBudgetBytes: 12 * 1024 * 1024 * 1024))
         }
     }
 }
@@ -193,6 +266,35 @@ public extension ModelFamilyRuntime {
                 runtime: .qwen(model), family: .qwen3_6,
                 verifiedIdentity: LoadedRuntimeIdentity(descriptor: manifest.descriptor),
                 qwenCodec: codec)
+        case .qwenOfficialSource:
+            let context = try MetalContext()
+            guard context.device.registryID == device.registryID else {
+                throw ModelError.indexCorrupt(detail: "source device changed during load")
+            }
+            let expertSlots: Int
+            switch streamingMode {
+            case .pread(let slotCount): expertSlots = slotCount
+            }
+            let model = try QwenOfficialSourceModel.load(
+                registrationURL: directoryURL, context: context,
+                integrityPolicy: integrityPolicy ?? .fullSha256,
+                expertCacheSlots: expertSlots,
+                expertCachePolicy: expertCachePolicy,
+                residencyBudgetBytes: 12 * 1024 * 1024 * 1024)
+            guard let identity = model.sourceIdentity else {
+                throw ModelError.sourceBackingUnsupported
+            }
+            try model.revalidateSource()
+            // The existing pinned sidecar codec grants no source admission by
+            // itself. The full/trusted policy and retained-handle checks above
+            // and below are mandatory before this codec enters a bundle.
+            let codec = QwenChatCodec(tokenizer: try QwenTokenizer.loadVerifiedOfficialSource(
+                from: model.source))
+            try model.revalidateSource()
+            return LoadedModelFamilyBundle(
+                runtime: .qwenOfficialSource(model), family: .qwen3_6,
+                verifiedIdentity: nil, qwenCodec: codec,
+                sourceIdentity: identity)
         }
     }
 }

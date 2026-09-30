@@ -63,12 +63,14 @@ final class QwenVisionScratch: @unchecked Sendable {
     let mergerHidden: MTLBuffer
     let outputBF16: MTLBuffer
     let outputFloat32: MTLBuffer
+    let sourceFC1Staging: MTLBuffer?
 
     init(
         device: MTLDevice,
         rows: Int,
         config: QwenVisionConfig,
         retainedRequestedBytes: Int = 0,
+        sourceFC1Staging: Bool = false,
         limits: QwenVisionResourceLimits = .provisional
     ) throws {
         guard rows > 0, rows <= config.maximumPatchRows else {
@@ -93,7 +95,7 @@ final class QwenVisionScratch: @unchecked Sendable {
         // The entries below are physical allocations; logical stage aliases
         // intentionally reuse them after command-buffer completion.
         let fp32 = MemoryLayout<Float>.stride
-        let entries = try [
+        var entries = try [
             bytes(paddedRows, config.hiddenSize, fp32, "hidden A"),
             bytes(paddedRows, config.hiddenSize, fp32, "hidden B"),
             bytes(paddedRows, 3 * config.hiddenSize, fp32, "QKV workspace"),
@@ -103,6 +105,12 @@ final class QwenVisionScratch: @unchecked Sendable {
                   "retained Float32 output staging"),
             .init(name: "retained lineage", bytes: retainedRequestedBytes),
         ]
+        if sourceFC1Staging {
+            entries.append(.init(
+                name: "source FC1 Float32 weight staging",
+                bytes: try QwenSourceVisionLinear.stagingByteCount(
+                    inputWidth: config.hiddenSize, outputWidth: config.intermediateSize)))
+        }
         allocationPlan = try QwenVisionAllocationPlan(entries: entries, limits: limits)
         try allocationPlan.validate(device: device)
         var allocated: [String: MTLBuffer] = [:]
@@ -126,6 +134,7 @@ final class QwenVisionScratch: @unchecked Sendable {
         let attentionWorkspace = try required("attention workspace")
         let mlp = try required("MLP workspace")
         outputFloat32 = try required("retained Float32 output staging")
+        self.sourceFC1Staging = allocated["source FC1 Float32 weight staging"]
         // Stage aliases. Runtime offsets Q/K/V within `qkv`.
         normalizedPatches = qkv
         q = qkv
@@ -183,26 +192,82 @@ enum QwenVisionExecutionEvent: Equatable, Sendable {
 struct QwenVisionExecutionHooks: Sendable {
     var afterCommandSubmission: @Sendable (String) async -> Void
     var observe: @Sendable (QwenVisionExecutionEvent) -> Void
+    /// Opt-in fault isolation, never an acceptance run. It completes one
+    /// operation at a time and stops at the first bad output or after block 0.
+    var firstBlockDiagnostics: (@Sendable (QwenVisionStageDiagnostic) -> Void)? = nil
+
+    /// Copies only one selected merger row after completed GPU operations.
+    var mergerDiagnosticRow: Int = 0
+    var mergerDiagnostics: (@Sendable (QwenVisionMergerDiagnostic) -> Void)? = nil
+    /// Opt-in completed tower boundaries. No arrays are copied by default.
+    var towerDiagnostics: (@Sendable (QwenVisionTowerDiagnostic) -> Void)? = nil
+    /// Source-only patch discriminator, intentionally stops before tower blocks.
+    var initialStageDiagnostics: (@Sendable (QwenVisionTowerDiagnostic) -> Void)? = nil
+    /// Source-only completed block-0 arrays; intentionally stops before block 1.
+    var firstBlockStageDiagnostics: (@Sendable (QwenVisionTowerDiagnostic) -> Void)? = nil
 
     static let none = QwenVisionExecutionHooks(
         afterCommandSubmission: { _ in }, observe: { _ in })
 }
 
+struct QwenVisionTowerDiagnostic: Sendable {
+    let stage: String
+    let rows: Int
+    let width: Int
+    let values: [Float]
+}
+
+struct QwenVisionMergerDiagnostic: Sendable {
+    let stage: String
+    let row: Int
+    let values: [Float]
+}
+
+struct QwenVisionStageDiagnostic: Sendable {
+    let stage: String
+    let count: Int
+    let finiteCount: Int
+    let nanCount: Int
+    let positiveInfinityCount: Int
+    let negativeInfinityCount: Int
+    let firstNonfiniteIndex: Int?
+    let firstNonfiniteIndices: [Int]
+    let sampleBits: [UInt32]
+    let finiteMinimum: Float?
+    let finiteMaximum: Float?
+}
+
+enum QwenVisionSourceRotaryArithmetic {
+    static func inverseFrequencies(headDimension: Int) throws -> [Float] {
+        guard headDimension == 72 else { throw QwenVisionError.invalidConfiguration }
+        return (0..<18).map { index in
+            let exponent = Float(2 * index) / Float(36)
+            return Float(1) / powf(Float(10_000), exponent)
+        }
+    }
+}
+
 actor QwenVisionRuntime {
     private let context: MetalContext
     private let store: QwenVisionWeightStore?
+    private let sourceStore: QwenOfficialSourceVisionWeightStore?
     private let config: QwenVisionConfig
     private let limits: QwenVisionResourceLimits
     private let executionHooks: QwenVisionExecutionHooks
     private let patchPipeline: MTLComputePipelineState
     private let normPipeline: MTLComputePipelineState
     private let rotatePipeline: MTLComputePipelineState
+    private let sourceInverseFrequencyBuffer: MTLBuffer?
+    private let sourceAttentionScale: Float?
+    private let sourceMergerGELUPipeline: MTLComputePipelineState?
+    private let sourceFC1GELUPipeline: MTLComputePipelineState?
     private let attentionPipeline: MTLComputePipelineState
     private let residualPipeline: MTLComputePipelineState
     private let linearTanhGELUPipeline: MTLComputePipelineState
     private let mergerPackPipeline: MTLComputePipelineState
     private let linearGELUPipeline: MTLComputePipelineState
     private let linearPipeline: MTLComputePipelineState
+    private var processing = false
 
     init(
         context: MetalContext,
@@ -217,6 +282,11 @@ actor QwenVisionRuntime {
         }
         self.context = context
         self.store = store
+        sourceStore = nil
+        sourceInverseFrequencyBuffer = nil
+        sourceAttentionScale = nil
+        sourceMergerGELUPipeline = nil
+        sourceFC1GELUPipeline = nil
         self.config = config
         self.limits = limits
         self.executionHooks = executionHooks
@@ -242,6 +312,11 @@ actor QwenVisionRuntime {
         try config.validate()
         self.context = context
         store = nil
+        sourceStore = nil
+        sourceInverseFrequencyBuffer = nil
+        sourceAttentionScale = nil
+        sourceMergerGELUPipeline = nil
+        sourceFC1GELUPipeline = nil
         self.config = config
         self.limits = limits
         self.executionHooks = executionHooks
@@ -256,11 +331,56 @@ actor QwenVisionRuntime {
         linearPipeline = try Self.safePipeline(context: context, name: "qwen_vision_linear")
     }
 
+    /// The source store reads only the group requested by execute; the
+    /// existing BF16 vision pipelines, scratch cap and completion gates apply.
+    init(context: MetalContext, sourceStore: QwenOfficialSourceVisionWeightStore,
+         limits: QwenVisionResourceLimits = .provisional,
+         executionHooks: QwenVisionExecutionHooks = .none) throws {
+        try sourceStore.config.validate()
+        // mapGroup checks the retained source model's exact Metal device.
+        self.context = context
+        store = nil
+        self.sourceStore = sourceStore
+        config = sourceStore.config
+        self.limits = limits
+        self.executionHooks = executionHooks
+        patchPipeline = try Self.safePipeline(context: context, name: "qwen_source_vision_patch_position", preciseFunctions: true)
+        normPipeline = try Self.safePipeline(context: context, name: "qwen_source_vision_layernorm", preciseFunctions: true)
+        if config.matchesOfficialWeightLayout {
+            let frequencies = try QwenVisionSourceRotaryArithmetic.inverseFrequencies(headDimension: config.headDimension)
+            guard let buffer = context.device.makeBuffer(
+                bytes: frequencies, length: frequencies.count * MemoryLayout<Float>.stride,
+                options: .storageModeShared) else {
+                throw QwenVisionError.commandBufferUnavailable
+            }
+            sourceInverseFrequencyBuffer = buffer
+            sourceAttentionScale = Float(pow(Double(config.headDimension), -0.5))
+            sourceMergerGELUPipeline = try Self.safePipeline(context: context, name: "qwen_source_vision_gelu_in_place", preciseFunctions: true)
+            sourceFC1GELUPipeline = try Self.safePipeline(context: context, name: "qwen_source_vision_gelu_tanh_in_place", preciseFunctions: true)
+            rotatePipeline = try Self.safePipeline(context: context, name: "qwen_source_vision_rotate_qk", preciseFunctions: true)
+        } else {
+            // The synthetic source-store seam retains its original small geometry.
+            sourceInverseFrequencyBuffer = nil
+            sourceAttentionScale = nil
+            sourceMergerGELUPipeline = nil
+            sourceFC1GELUPipeline = nil
+            rotatePipeline = try Self.safePipeline(context: context, name: "qwen_vision_rotate_qk", preciseFunctions: true)
+        }
+        attentionPipeline = try Self.safePipeline(context: context, name: config.matchesOfficialWeightLayout ? "qwen_source_vision_attention" : "qwen_vision_attention", preciseFunctions: true)
+        residualPipeline = try Self.safePipeline(context: context, name: "qwen_vision_linear_residual", preciseFunctions: true)
+        linearTanhGELUPipeline = try Self.safePipeline(context: context, name: config.matchesOfficialWeightLayout ? "qwen_source_vision_linear_gelu_tanh" : "qwen_vision_linear_gelu_tanh", preciseFunctions: true)
+        mergerPackPipeline = try Self.safePipeline(context: context, name: "qwen_source_vision_merger_norm_pack", preciseFunctions: true)
+        linearGELUPipeline = try Self.safePipeline(context: context, name: "qwen_vision_linear_gelu", preciseFunctions: true)
+        linearPipeline = try Self.safePipeline(context: context, name: "qwen_vision_linear", preciseFunctions: true)
+    }
+
     private static func safePipeline(
-        context: MetalContext, name: String
+        context: MetalContext, name: String, preciseFunctions: Bool = false
     ) throws -> MTLComputePipelineState {
         let library = try MetalContext.privateLibrary(
-            device: context.device, module: "qwen_vision", mathMode: .safe)
+            device: context.device, module: "qwen_vision", mathMode: .safe,
+            mathFloatingPointFunctions: preciseFunctions ? .precise : nil,
+            includeQwenSourceMath: preciseFunctions)
         guard let function = library.makeFunction(name: name) else {
             throw MetalError.missingFunction(name)
         }
@@ -268,10 +388,20 @@ actor QwenVisionRuntime {
     }
 
     func process(_ pixels: QwenVisionPixelBuffer) async throws -> QwenVisionFeatures {
-        try await execute(pixels)
+        guard !processing else {
+            throw QwenVisionError.commandFailed("vision process already active")
+        }
+        processing = true
+        defer { processing = false }
+        return try await execute(pixels)
     }
 
     func process(_ images: [QwenVisionPixelBuffer]) async throws -> [QwenVisionFeatures] {
+        guard !processing else {
+            throw QwenVisionError.commandFailed("vision process already active")
+        }
+        processing = true
+        defer { processing = false }
         try QwenImagePreprocessor.preflight(images.map(\.geometry), limits: limits)
         var result: [QwenVisionFeatures] = []
         result.reserveCapacity(images.count)
@@ -288,10 +418,13 @@ actor QwenVisionRuntime {
         gridWidth: Int,
         weights: [String: [Float]]
     ) async throws -> QwenVisionFixtureResult {
-        guard store == nil, positions.count == gridHeight * gridWidth,
+        guard !processing, store == nil, sourceStore == nil,
+              positions.count == gridHeight * gridWidth,
               patches.count == positions.count * config.patchWidth else {
             throw QwenVisionError.invalidFeatureShape
         }
+        processing = true
+        defer { processing = false }
         let geometry = try QwenImageGeometry(
             sourceWidth: gridWidth * config.patchSize,
             sourceHeight: gridHeight * config.patchSize,
@@ -381,6 +514,16 @@ actor QwenVisionRuntime {
                 requested: pixels.geometry.mergedRows,
                 maximum: limits.maximumVisibleHistoryRows)
         }
+        if (executionHooks.initialStageDiagnostics != nil
+            || executionHooks.firstBlockStageDiagnostics != nil), sourceStore == nil {
+            throw QwenVisionError.commandFailed("initial stage diagnostic requires the source store")
+        }
+        if executionHooks.mergerDiagnostics != nil {
+            guard executionHooks.mergerDiagnosticRow >= 0,
+                  executionHooks.mergerDiagnosticRow < pixels.geometry.mergedRows else {
+                throw QwenVisionError.commandFailed("merger diagnostic row is out of bounds")
+            }
+        }
         let retainedFeatureBytes = pixels.geometry.mergedRows
             * (config.outputHiddenSize * MemoryLayout<Float>.stride
                + 3 * MemoryLayout<Int32>.stride)
@@ -389,6 +532,7 @@ actor QwenVisionRuntime {
         let scratch = try QwenVisionScratch(
             device: context.device, rows: pixels.geometry.patchRows,
             config: config, retainedRequestedBytes: retainedBytes,
+            sourceFC1Staging: sourceFC1GELUPipeline != nil,
             limits: limits)
         executionHooks.observe(.scratchAllocated(bytes: scratch.allocationPlan.totalBytes))
         defer { executionHooks.observe(.scratchReleased) }
@@ -396,11 +540,10 @@ actor QwenVisionRuntime {
             mutableRequestedBytes: scratch.allocationPlan.totalBytes,
             mutableHighWaterBytes: scratch.allocationPlan.totalBytes)
 
-        guard let store else {
+        guard store != nil || sourceStore != nil else {
             throw QwenVisionError.commandFailed("verified vision store is unavailable")
         }
-        var patchLease: QwenVisionMappedGroupLease? = try store.mapGroup(
-            .patchAndPosition, device: context.device)
+        var patchLease: QwenVisionMappedGroupLease? = try mapGroup(.patchAndPosition)
         executionHooks.observe(.groupMapped(
             .patchAndPosition, bytes: patchLease!.diagnostic.pageAlignedMappedBytes))
         do {
@@ -421,6 +564,37 @@ actor QwenVisionRuntime {
             self.dispatch(encoder, self.patchPipeline, scratch.paddedRows * config.hiddenSize)
                 encoder.endEncoding()
             }
+            if let observer = executionHooks.initialStageDiagnostics {
+                for (label, component) in [("patch.projection", UInt32(1)), ("patch.position", UInt32(2))] {
+                    try await submit(stage: label, diagnostics: &diagnostics) { command in
+                        guard let lease = patchLease else {
+                            throw QwenVisionError.commandFailed("patch lease")
+                        }
+                        var parameters = self.parameters(
+                            rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
+                            inputWidth: config.patchWidth, outputWidth: config.hiddenSize,
+                            geometry: pixels.geometry)
+                        parameters.reserved = component
+                        let encoder = try self.encoder(command, pipeline: self.patchPipeline)
+                        encoder.setBytes(&parameters, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
+                        encoder.setBuffer(pixels.patchesBF16, offset: 0, index: 1)
+                        encoder.setBuffer(pixels.positionsInt32x2, offset: 0, index: 2)
+                        try self.bind(lease, "model.visual.patch_embed.proj.weight", encoder, 3)
+                        try self.bind(lease, "model.visual.patch_embed.proj.bias", encoder, 4)
+                        try self.bind(lease, "model.visual.pos_embed.weight", encoder, 5)
+                        encoder.setBuffer(scratch.hiddenB, offset: 0, index: 6)
+                        self.dispatch(encoder, self.patchPipeline, scratch.paddedRows * config.hiddenSize)
+                        encoder.endEncoding()
+                    }
+                    observer(QwenVisionTowerDiagnostic(
+                        stage: label, rows: pixels.geometry.patchRows, width: config.hiddenSize,
+                        values: Self.read(scratch.hiddenB, count: pixels.geometry.patchRows * config.hiddenSize)))
+                }
+                observer(QwenVisionTowerDiagnostic(
+                    stage: "patch.sum", rows: pixels.geometry.patchRows, width: config.hiddenSize,
+                    values: Self.read(scratch.hiddenA, count: pixels.geometry.patchRows * config.hiddenSize)))
+                throw QwenVisionError.commandFailed("source vision diagnostic stopped after initial stages")
+            }
         } catch {
             patchLease = nil
             executionHooks.observe(.groupReleased(.patchAndPosition))
@@ -434,23 +608,90 @@ actor QwenVisionRuntime {
         patchLease = nil
         executionHooks.observe(.groupReleased(.patchAndPosition))
 
+        observeTower(stage: "tower.patch-position", buffer: scratch.hiddenA,
+                     rows: pixels.geometry.patchRows, width: config.hiddenSize)
+        if executionHooks.firstBlockDiagnostics != nil {
+            try observeDiagnosticStage("patch-position", buffer: scratch.hiddenA,
+                                       count: pixels.geometry.patchRows * config.hiddenSize)
+        }
+
         for layer in 0..<config.depth {
-            var lease: QwenVisionMappedGroupLease? = try store.mapGroup(
-                .block(layer), device: context.device)
+            var lease: QwenVisionMappedGroupLease? = try mapGroup(.block(layer))
             executionHooks.observe(.groupMapped(
                 .block(layer), bytes: lease!.diagnostic.pageAlignedMappedBytes))
             do {
-                try await submit(stage: "block \(layer)", diagnostics: &diagnostics) { command in
-                guard let lease else { throw QwenVisionError.commandFailed("block lease") }
-                try self.encodeBlock(
-                    layer: layer, pixels: pixels, scratch: scratch,
-                        source: .mapped(lease), command: command)
+                if (executionHooks.firstBlockDiagnostics != nil
+                    || executionHooks.firstBlockStageDiagnostics != nil), layer == 0 {
+                    observeFirstBlockStage("block-0.input", buffer: scratch.hiddenA,
+                                           rows: pixels.geometry.patchRows, width: config.hiddenSize)
+                    let stages: [(String, MTLBuffer, Int, Int)] = [
+                        ("norm1", scratch.attention, config.hiddenSize, 0),
+                        ("qkv", scratch.q, 3 * config.hiddenSize, 1),
+                        ("rotate-qk", scratch.q, 3 * config.hiddenSize, 2),
+                        ("attention", scratch.attention, config.hiddenSize, 3),
+                        ("attention-residual", scratch.hiddenB, config.hiddenSize, 4),
+                        ("norm2", scratch.attention, config.hiddenSize, 5),
+                        ("mlp-pre-gelu", scratch.gate, config.intermediateSize, 8),
+                        ("mlp-gelu", scratch.gate, config.intermediateSize, 6),
+                        ("mlp-residual", scratch.hiddenA, config.hiddenSize, 7),
+                    ]
+                    for stage in stages {
+                        let label = "block-0.\(stage.0)"
+                        let stageIndex = stage.3
+                        if stageIndex == 3, sourceAttentionScale != nil, scratch.paddedRows > 128 {
+                            guard let lease else { throw QwenVisionError.commandFailed("block lease") }
+                            try await submitSourceAttentionChunks(
+                                layer: layer, pixels: pixels, scratch: scratch,
+                                source: .mapped(lease), diagnostics: &diagnostics)
+                        } else if (stageIndex == 6 || stageIndex == 8), sourceFC1GELUPipeline != nil {
+                            guard let lease else { throw QwenVisionError.commandFailed("block lease") }
+                            try await submitSourceFC1(
+                                layer: layer, pixels: pixels, scratch: scratch,
+                                source: .mapped(lease), applyGELU: stageIndex == 6,
+                                diagnostics: &diagnostics)
+                        } else {
+                            try await submit(stage: label, diagnostics: &diagnostics) { command in
+                                guard let lease else { throw QwenVisionError.commandFailed("block lease") }
+                                try self.encodeBlock(layer: layer, pixels: pixels, scratch: scratch,
+                                                     source: .mapped(lease), command: command,
+                                                     onlyStage: stageIndex)
+                            }
+                        }
+                        try observeDiagnosticStage(label, buffer: stage.1,
+                                                   count: pixels.geometry.patchRows * stage.2)
+                        let arrayLabel: String
+                        switch stageIndex {
+                        case 3: arrayLabel = "block-0.attention-context"
+                        case 8: arrayLabel = "block-0.fc1-pre-gelu"
+                        case 6: arrayLabel = "block-0.fc1-gelu"
+                        case 7: arrayLabel = "block-0.output"
+                        default: arrayLabel = label
+                        }
+                        observeFirstBlockStage(arrayLabel, buffer: stage.1,
+                                               rows: pixels.geometry.patchRows, width: stage.2)
+                    }
+                    throw QwenVisionError.commandFailed("source vision diagnostic stopped after block-0")
+                }
+                if sourceFC1GELUPipeline != nil {
+                    guard let lease else { throw QwenVisionError.commandFailed("block lease") }
+                    try await submitSourceBlock(
+                        layer: layer, pixels: pixels, scratch: scratch,
+                        source: .mapped(lease), diagnostics: &diagnostics)
+                } else {
+                    try await submit(stage: "block \(layer)", diagnostics: &diagnostics) { command in
+                        guard let lease else { throw QwenVisionError.commandFailed("block lease") }
+                        try self.encodeBlock(
+                            layer: layer, pixels: pixels, scratch: scratch,
+                            source: .mapped(lease), command: command)
+                    }
                 }
             } catch {
                 lease = nil
                 executionHooks.observe(.groupReleased(.block(layer)))
                 throw error
             }
+            observeTower(stage: "tower.block.\(layer)", buffer: scratch.hiddenA,
+                         rows: pixels.geometry.patchRows, width: config.hiddenSize)
             diagnostics.orderedSubmittedGroups.append(.block(layer))
             diagnostics.mappedPageAlignedBytes.append(lease!.diagnostic.pageAlignedMappedBytes)
             diagnostics.maximumLiveMappedBytes = max(
@@ -465,16 +706,39 @@ actor QwenVisionRuntime {
             executionHooks.observe(.groupReleased(.block(layer)))
         }
 
-        var mergerLease: QwenVisionMappedGroupLease? = try store.mapGroup(
-            .merger, device: context.device)
+        var mergerLease: QwenVisionMappedGroupLease? = try mapGroup(.merger)
         executionHooks.observe(.groupMapped(
             .merger, bytes: mergerLease!.diagnostic.pageAlignedMappedBytes))
         do {
-            try await submit(stage: "merger", diagnostics: &diagnostics) { command in
-            guard let lease = mergerLease else { throw QwenVisionError.commandFailed("merger lease") }
-            try self.encodeMerger(
-                pixels: pixels, scratch: scratch,
-                    source: .mapped(lease), command: command)
+            if executionHooks.mergerDiagnostics != nil {
+                observeMerger(stage: "merger.input", buffer: scratch.hiddenA,
+                              width: config.mergedHiddenSize)
+                let stages: [(String, Int)] = [
+                    ("merger.norm-packed", 0), ("merger.fc1-pre-gelu", 3),
+                    ("merger.fc1-gelu", 1), ("merger.output", 2)]
+                for (label, stageIndex) in stages {
+                    try await submit(stage: label, diagnostics: &diagnostics) { command in
+                        guard let lease = mergerLease else {
+                            throw QwenVisionError.commandFailed("merger lease")
+                        }
+                        try self.encodeMerger(
+                            pixels: pixels, scratch: scratch, source: .mapped(lease),
+                            command: command, onlyStage: stageIndex)
+                    }
+                    let buffer = stageIndex == 0 ? scratch.mergerPacked
+                        : stageIndex == 2 ? scratch.outputFloat32 : scratch.mergerNormalized
+                    observeMerger(stage: label, buffer: buffer,
+                                  width: stageIndex == 2 ? config.outputHiddenSize : config.mergedHiddenSize)
+                }
+            } else {
+                try await submit(stage: "merger", diagnostics: &diagnostics) { command in
+                    guard let lease = mergerLease else {
+                        throw QwenVisionError.commandFailed("merger lease")
+                    }
+                    try self.encodeMerger(
+                        pixels: pixels, scratch: scratch,
+                        source: .mapped(lease), command: command)
+                }
             }
         } catch {
             mergerLease = nil
@@ -488,7 +752,10 @@ actor QwenVisionRuntime {
             mergerLease!.diagnostic.pageAlignedMappedBytes)
         mergerLease = nil
         executionHooks.observe(.groupReleased(.merger))
+        try sourceStore?.revalidate()
 
+        observeTower(stage: "merger.output", buffer: scratch.outputFloat32,
+                     rows: pixels.geometry.mergedRows, width: config.outputHiddenSize)
         let values = Self.read(
             scratch.outputFloat32,
             count: pixels.geometry.mergedRows * config.outputHiddenSize)
@@ -508,16 +775,115 @@ actor QwenVisionRuntime {
                 }
             }
         }
-        guard let processor = store.manifest.files[GTurboVisionFormatV2.processorFile] else {
+        guard let processorDigest = sourceStore?.descriptor.processorConfigSHA256
+                ?? store?.manifest.files[GTurboVisionFormatV2.processorFile]?.sha256,
+              let profile = sourceStore?.descriptor.processorProfile
+                ?? store?.manifest.processorProfile else {
             throw QwenVisionError.commandFailed("processor digest missing")
         }
+        try sourceStore?.revalidate()
         return try QwenVisionFeatures(
             device: context.device, features: values, positions: positions,
             imageDigest: pixels.imageDigest,
-            processorDigest: processor.sha256,
-            profile: store.manifest.processorProfile,
+            processorDigest: processorDigest,
+            profile: profile,
             grid: grid, diagnostics: diagnostics,
             hiddenSize: config.outputHiddenSize)
+    }
+
+    private func mapGroup(_ group: QwenVisionWeightGroup) throws -> QwenVisionMappedGroupLease {
+        if let sourceStore { return try sourceStore.mapGroup(group, device: context.device) }
+        if let store { return try store.mapGroup(group, device: context.device) }
+        throw QwenVisionError.commandFailed("verified vision store is unavailable")
+    }
+
+    /// A completed command between query ranges bounds the source attention
+    /// workload without changing its full-key reduction or allocating buffers.
+    private func submitSourceAttentionChunks(
+        layer: Int,
+        pixels: QwenVisionPixelBuffer,
+        scratch: QwenVisionScratch,
+        source: QwenVisionTensorSource,
+        diagnostics: inout QwenVisionRuntimeDiagnostics
+    ) async throws {
+        for queryBase in stride(from: 0, to: scratch.paddedRows, by: 128) {
+            let queryRows = min(128, scratch.paddedRows - queryBase)
+            try await submit(stage: "block \(layer).attention.\(queryBase)", diagnostics: &diagnostics) { command in
+                try self.encodeBlock(
+                    layer: layer, pixels: pixels, scratch: scratch, source: source,
+                    command: command, onlyStage: 3,
+                    attentionQueryBase: queryBase, attentionQueryRows: queryRows)
+            }
+        }
+    }
+
+    private func submitSourceBlock(
+        layer: Int,
+        pixels: QwenVisionPixelBuffer,
+        scratch: QwenVisionScratch,
+        source: QwenVisionTensorSource,
+        diagnostics: inout QwenVisionRuntimeDiagnostics
+    ) async throws {
+        try await submit(stage: "block \(layer).before-attention", diagnostics: &diagnostics) { command in
+            for stage in 0...2 {
+                try self.encodeBlock(layer: layer, pixels: pixels, scratch: scratch,
+                                     source: source, command: command, onlyStage: stage)
+            }
+        }
+        try await submitSourceAttentionChunks(
+            layer: layer, pixels: pixels, scratch: scratch,
+            source: source, diagnostics: &diagnostics)
+        try await submit(stage: "block \(layer).after-attention", diagnostics: &diagnostics) { command in
+            for stage in 4...5 {
+                try self.encodeBlock(layer: layer, pixels: pixels, scratch: scratch,
+                                     source: source, command: command, onlyStage: stage)
+            }
+        }
+        try await submitSourceFC1(
+            layer: layer, pixels: pixels, scratch: scratch, source: source,
+            applyGELU: true, diagnostics: &diagnostics)
+        try await submit(stage: "block \(layer).after-fc1", diagnostics: &diagnostics) { command in
+            try self.encodeBlock(layer: layer, pixels: pixels, scratch: scratch,
+                                 source: source, command: command, onlyStage: 7)
+        }
+    }
+
+    /// The preceding norm2 command has completed before the shared activation
+    /// buffers are read by Accelerate. The enclosing block retains its lease.
+    private func submitSourceFC1(
+        layer: Int, pixels: QwenVisionPixelBuffer, scratch: QwenVisionScratch,
+        source: QwenVisionTensorSource, applyGELU: Bool,
+        diagnostics: inout QwenVisionRuntimeDiagnostics
+    ) async throws {
+        guard case .mapped(let lease) = source,
+              let staging = scratch.sourceFC1Staging,
+              let pipeline = sourceFC1GELUPipeline else {
+            throw QwenVisionError.commandFailed("source FC1 staging unavailable")
+        }
+        let prefix = "model.visual.blocks.\(layer).mlp.linear_fc1."
+        try QwenSourceVisionLinear.project(
+            rows: pixels.geometry.patchRows, inputWidth: config.hiddenSize,
+            outputWidth: config.intermediateSize, input: scratch.attention,
+            weight: lease.buffer, weightOffset: try lease.offset(of: prefix + "weight"),
+            bias: lease.buffer, biasOffset: try lease.offset(of: prefix + "bias"),
+            output: scratch.gate, staging: staging)
+        let paddingStart = pixels.geometry.patchRows * config.intermediateSize
+        let paddingCount = (scratch.paddedRows - pixels.geometry.patchRows) * config.intermediateSize
+        scratch.gate.contents().assumingMemoryBound(to: Float.self)
+            .advanced(by: paddingStart).update(repeating: 0, count: paddingCount)
+        try Task.checkCancellation()
+        guard applyGELU else { return }
+        try await submit(stage: "block \(layer).mlp-gelu", diagnostics: &diagnostics) { command in
+            var parameters = self.parameters(
+                rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
+                inputWidth: config.hiddenSize, outputWidth: config.intermediateSize,
+                geometry: pixels.geometry)
+            let encoder = try self.encoder(command, pipeline: pipeline)
+            encoder.setBytes(&parameters, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
+            encoder.setBuffer(scratch.gate, offset: 0, index: 1)
+            self.dispatch(encoder, pipeline, pixels.geometry.patchRows * config.intermediateSize)
+            encoder.endEncoding()
+        }
     }
 
     private func encodeBlock(
@@ -526,14 +892,19 @@ actor QwenVisionRuntime {
         scratch: QwenVisionScratch,
         source: QwenVisionTensorSource,
         command: MTLCommandBuffer,
-        weightScalarBytes: UInt32 = 2
+        weightScalarBytes: UInt32 = 2,
+        onlyStage: Int? = nil,
+        attentionQueryBase: Int = 0,
+        attentionQueryRows: Int? = nil
     ) throws {
         let prefix = "model.visual.blocks.\(layer)."
         var normalized = parameters(
             rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
             inputWidth: config.hiddenSize, outputWidth: config.hiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
-        var encoder = try self.encoder(command, pipeline: normPipeline)
+        var encoder: MTLComputeCommandEncoder
+        if onlyStage == nil || onlyStage == 0 {
+        encoder = try self.encoder(command, pipeline: normPipeline)
         encoder.setBytes(&normalized, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.hiddenA, offset: 0, index: 1)
         try bind(source, prefix + "norm1.weight", encoder, 2)
@@ -541,11 +912,13 @@ actor QwenVisionRuntime {
         encoder.setBuffer(scratch.attention, offset: 0, index: 4)
         dispatch(encoder, normPipeline, scratch.paddedRows)
         encoder.endEncoding()
+        }
 
         var qkv = parameters(
             rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
             inputWidth: config.hiddenSize, outputWidth: 3 * config.hiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
+        if onlyStage == nil || onlyStage == 1 {
         encoder = try self.encoder(command, pipeline: linearPipeline)
         encoder.setBytes(&qkv, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.attention, offset: 0, index: 1)
@@ -555,25 +928,39 @@ actor QwenVisionRuntime {
         dispatch(encoder, linearPipeline,
                  pixels.geometry.patchRows * 3 * config.hiddenSize)
         encoder.endEncoding()
+        }
 
         var rotate = parameters(
             rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
             inputWidth: config.hiddenSize, outputWidth: config.hiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
+        if onlyStage == nil || onlyStage == 2 {
         encoder = try self.encoder(command, pipeline: rotatePipeline)
         encoder.setBytes(&rotate, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(pixels.positionsInt32x2, offset: 0, index: 1)
         encoder.setBuffer(scratch.q, offset: 0, index: 2)
+        if let sourceInverseFrequencyBuffer {
+            encoder.setBuffer(sourceInverseFrequencyBuffer, offset: 0, index: 3)
+        }
         dispatch(encoder, rotatePipeline, pixels.geometry.patchRows * config.hiddenSize)
         encoder.endEncoding()
+        }
 
+        if onlyStage == nil || onlyStage == 3 {
+        var attention = rotate
+        attention.reserved = UInt32(attentionQueryBase)
         encoder = try self.encoder(command, pipeline: attentionPipeline)
-        encoder.setBytes(&rotate, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
+        encoder.setBytes(&attention, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.q, offset: 0, index: 1)
         encoder.setBuffer(scratch.attention, offset: 0, index: 2)
-        dispatch(encoder, attentionPipeline, scratch.paddedRows * config.numHeads)
+        if var sourceAttentionScale {
+            encoder.setBytes(&sourceAttentionScale, length: MemoryLayout<Float>.stride, index: 3)
+        }
+        dispatch(encoder, attentionPipeline, (attentionQueryRows ?? scratch.paddedRows) * config.numHeads)
         encoder.endEncoding()
+        }
 
+        if onlyStage == nil || onlyStage == 4 {
         encoder = try self.encoder(command, pipeline: residualPipeline)
         encoder.setBytes(&rotate, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.attention, offset: 0, index: 1)
@@ -583,7 +970,9 @@ actor QwenVisionRuntime {
         encoder.setBuffer(scratch.hiddenB, offset: 0, index: 5)
         dispatch(encoder, residualPipeline, scratch.paddedRows * config.hiddenSize)
         encoder.endEncoding()
+        }
 
+        if onlyStage == nil || onlyStage == 5 {
         encoder = try self.encoder(command, pipeline: normPipeline)
         encoder.setBytes(&normalized, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.hiddenB, offset: 0, index: 1)
@@ -592,25 +981,30 @@ actor QwenVisionRuntime {
         encoder.setBuffer(scratch.attention, offset: 0, index: 4)
         dispatch(encoder, normPipeline, scratch.paddedRows)
         encoder.endEncoding()
+        }
 
         var mlp = parameters(
             rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
             inputWidth: config.hiddenSize, outputWidth: config.intermediateSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
-        encoder = try self.encoder(command, pipeline: linearTanhGELUPipeline)
+        if onlyStage == nil || onlyStage == 6 || onlyStage == 8 {
+        let mlpPipeline = onlyStage == 8 ? linearPipeline : linearTanhGELUPipeline
+        encoder = try self.encoder(command, pipeline: mlpPipeline)
         encoder.setBytes(&mlp, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.attention, offset: 0, index: 1)
         try bind(source, prefix + "mlp.linear_fc1.weight", encoder, 2)
         try bind(source, prefix + "mlp.linear_fc1.bias", encoder, 3)
         encoder.setBuffer(scratch.gate, offset: 0, index: 4)
-        dispatch(encoder, linearTanhGELUPipeline,
+        dispatch(encoder, mlpPipeline,
                  pixels.geometry.patchRows * config.intermediateSize)
         encoder.endEncoding()
+        }
 
         var down = parameters(
             rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
             inputWidth: config.intermediateSize, outputWidth: config.hiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
+        if onlyStage == nil || onlyStage == 7 {
         encoder = try self.encoder(command, pipeline: residualPipeline)
         encoder.setBytes(&down, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.gate, offset: 0, index: 1)
@@ -620,6 +1014,63 @@ actor QwenVisionRuntime {
         encoder.setBuffer(scratch.hiddenA, offset: 0, index: 5)
         dispatch(encoder, residualPipeline, scratch.paddedRows * config.hiddenSize)
         encoder.endEncoding()
+        }
+    }
+
+    private func observeDiagnosticStage(_ stage: String, buffer: MTLBuffer, count: Int) throws {
+        guard let observe = executionHooks.firstBlockDiagnostics else { return }
+        let values = buffer.contents().assumingMemoryBound(to: Float.self)
+        var finite = 0, nan = 0, positiveInfinity = 0, negativeInfinity = 0
+        var bad: [Int] = []
+        var minimum: Float?, maximum: Float?
+        for index in 0..<count {
+            let value = values[index]
+            if value.isFinite {
+                finite += 1
+                minimum = minimum.map { min($0, value) } ?? value
+                maximum = maximum.map { max($0, value) } ?? value
+            } else {
+                if bad.count < 16 { bad.append(index) }
+                if value.isNaN { nan += 1 }
+                else if value > 0 { positiveInfinity += 1 }
+                else { negativeInfinity += 1 }
+            }
+        }
+        let sampleIndices = Array(0..<min(count, 16))
+            + Array(max(0, count - 16)..<count) + bad
+        observe(QwenVisionStageDiagnostic(
+            stage: stage, count: count, finiteCount: finite, nanCount: nan,
+            positiveInfinityCount: positiveInfinity, negativeInfinityCount: negativeInfinity,
+            firstNonfiniteIndex: bad.first, firstNonfiniteIndices: bad,
+            sampleBits: sampleIndices.map { values[$0].bitPattern },
+            finiteMinimum: minimum, finiteMaximum: maximum))
+        if finite != count {
+            throw QwenVisionError.commandFailed("source vision diagnostic stopped after \(stage)")
+        }
+    }
+
+    private func observeFirstBlockStage(_ stage: String, buffer: MTLBuffer, rows: Int, width: Int) {
+        guard let observer = executionHooks.firstBlockStageDiagnostics else { return }
+        observer(QwenVisionTowerDiagnostic(
+            stage: stage, rows: rows, width: width,
+            values: Self.read(buffer, count: rows * width)))
+    }
+
+    private func observeTower(stage: String, buffer: MTLBuffer, rows: Int, width: Int) {
+        guard let observer = executionHooks.towerDiagnostics else { return }
+        observer(QwenVisionTowerDiagnostic(
+            stage: stage, rows: rows, width: width,
+            values: Self.read(buffer, count: rows * width)))
+    }
+
+    private func observeMerger(stage: String, buffer: MTLBuffer, width: Int) {
+        guard let observer = executionHooks.mergerDiagnostics else { return }
+        let row = executionHooks.mergerDiagnosticRow
+        let values = buffer.contents().assumingMemoryBound(to: Float.self)
+            .advanced(by: row * width)
+        observer(QwenVisionMergerDiagnostic(
+            stage: stage, row: row,
+            values: Array(UnsafeBufferPointer(start: values, count: width))))
     }
 
     private func encodeMerger(
@@ -627,13 +1078,16 @@ actor QwenVisionRuntime {
         scratch: QwenVisionScratch,
         source: QwenVisionTensorSource,
         command: MTLCommandBuffer,
-        weightScalarBytes: UInt32 = 2
+        weightScalarBytes: UInt32 = 2,
+        onlyStage: Int? = nil
     ) throws {
         var pack = parameters(
             rows: pixels.geometry.patchRows, paddedRows: scratch.paddedRows,
             inputWidth: config.hiddenSize, outputWidth: config.mergedHiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
-        var encoder = try self.encoder(command, pipeline: mergerPackPipeline)
+        var encoder: MTLComputeCommandEncoder
+        if onlyStage == nil || onlyStage == 0 {
+        encoder = try self.encoder(command, pipeline: mergerPackPipeline)
         encoder.setBytes(&pack, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.hiddenA, offset: 0, index: 1)
         try bind(source, "model.visual.merger.norm.weight", encoder, 2)
@@ -642,24 +1096,38 @@ actor QwenVisionRuntime {
         dispatch(encoder, mergerPackPipeline, pixels.geometry.patchRows)
         encoder.endEncoding()
 
+        }
         var fc1 = parameters(
             rows: pixels.geometry.mergedRows, paddedRows: pixels.geometry.mergedRows,
             inputWidth: config.mergedHiddenSize, outputWidth: config.mergedHiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
-        encoder = try self.encoder(command, pipeline: linearGELUPipeline)
+        if onlyStage == nil || onlyStage == 1 || onlyStage == 3 {
+        let fc1Pipeline = (onlyStage == 3 || sourceMergerGELUPipeline != nil)
+            ? linearPipeline : linearGELUPipeline
+        encoder = try self.encoder(command, pipeline: fc1Pipeline)
         encoder.setBytes(&fc1, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.mergerPacked, offset: 0, index: 1)
         try bind(source, "model.visual.merger.linear_fc1.weight", encoder, 2)
         try bind(source, "model.visual.merger.linear_fc1.bias", encoder, 3)
         encoder.setBuffer(scratch.mergerNormalized, offset: 0, index: 4)
-        dispatch(encoder, linearGELUPipeline,
+        dispatch(encoder, fc1Pipeline,
                  pixels.geometry.mergedRows * config.mergedHiddenSize)
         encoder.endEncoding()
+        if onlyStage != 3, let sourceMergerGELUPipeline {
+            encoder = try self.encoder(command, pipeline: sourceMergerGELUPipeline)
+            encoder.setBytes(&fc1, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
+            encoder.setBuffer(scratch.mergerNormalized, offset: 0, index: 1)
+            dispatch(encoder, sourceMergerGELUPipeline,
+                     pixels.geometry.mergedRows * config.mergedHiddenSize / 4)
+            encoder.endEncoding()
+        }
 
+        }
         var fc2 = parameters(
             rows: pixels.geometry.mergedRows, paddedRows: pixels.geometry.mergedRows,
             inputWidth: config.mergedHiddenSize, outputWidth: config.outputHiddenSize,
             geometry: pixels.geometry, weightScalarBytes: weightScalarBytes)
+        if onlyStage == nil || onlyStage == 2 {
         encoder = try self.encoder(command, pipeline: linearPipeline)
         encoder.setBytes(&fc2, length: MemoryLayout<QwenVisionKernelParameters>.stride, index: 0)
         encoder.setBuffer(scratch.mergerNormalized, offset: 0, index: 1)
@@ -669,6 +1137,7 @@ actor QwenVisionRuntime {
         dispatch(encoder, linearPipeline,
                  pixels.geometry.mergedRows * config.outputHiddenSize)
         encoder.endEncoding()
+        }
     }
 
     private func parameters(
@@ -696,7 +1165,7 @@ actor QwenVisionRuntime {
         _ index: Int
     ) throws {
         encoder.setBuffer(
-            lease.resident.buffer, offset: try lease.offset(of: name), index: index)
+            lease.buffer, offset: try lease.offset(of: name), index: index)
     }
 
     private func bind(

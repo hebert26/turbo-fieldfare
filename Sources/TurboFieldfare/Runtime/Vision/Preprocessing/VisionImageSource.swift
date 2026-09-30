@@ -127,6 +127,25 @@ package struct OpenedVisionImage {
         self.encodedBytes = encodedBytes
     }
 
+    /// Copies only the bytes of the already admitted, retained descriptor.
+    /// The caller can verify its recorded digest without reopening the path.
+    package func copyEncodedBytes(maximum: Int) throws -> Data {
+        guard encodedBytes > 0, encodedBytes <= maximum else {
+            throw VisionImageError.sourceTooLarge(bytes: encodedBytes, limit: maximum)
+        }
+        guard fileProvider.hasAdmittedLength() else {
+            throw VisionImageError.invalidSource("admitted encoded image length changed")
+        }
+        var data = Data(count: encodedBytes)
+        let read = data.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            fileProvider.read(into: bytes.baseAddress!, position: 0, count: encodedBytes)
+        }
+        guard read == encodedBytes, fileProvider.hasAdmittedLength() else {
+            throw VisionImageError.invalidSource("admitted encoded image changed or could not be read")
+        }
+        return data
+    }
+
 
     /// Whether the JPEG's entropy-coded scan is terminated by an end-of-image
     /// marker, which is the only question that separates a truncated file from
@@ -245,6 +264,13 @@ private final class VisionFileProvider {
 
     deinit {
         Darwin.close(descriptor)
+    }
+
+    func hasAdmittedLength() -> Bool {
+        var status = stat()
+        return fstat(descriptor, &status) == 0
+            && (status.st_mode & S_IFMT) == S_IFREG
+            && status.st_size == off_t(encodedBytes)
     }
 
     func read(into buffer: UnsafeMutableRawPointer, position: off_t, count: Int) -> Int {

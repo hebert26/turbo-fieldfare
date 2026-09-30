@@ -3,6 +3,7 @@ import Darwin
 import Foundation
 import Hub
 import Tokenizers
+import TurboFieldfareOfficialQwenSource
 
 public enum QwenTokenizerError: Error, Equatable, CustomStringConvertible {
     case missingFile(String)
@@ -121,6 +122,23 @@ public struct QwenTokenizer: Sendable {
             configPath: "tokenizer_config.json")
     }
 
+    /// The runtime calls this only after its full/trusted source policy gate.
+    /// Neither this method nor a codec built from it grants source admission.
+    /// The protected handle limits names to descriptor-listed sidecars and
+    /// rechecks retained file identities around each bounded read.
+    static func loadVerifiedOfficialSource(from source: OfficialSourceHandle) throws -> Self {
+        let tokenizerBytes = try source.readBoundedSidecar(
+            "tokenizer.json", maximumBytes: tokenizerJSONMaximumBytes)
+        let configBytes = try source.readBoundedSidecar(
+            "tokenizer_config.json", maximumBytes: tokenizerConfigJSONMaximumBytes)
+        try source.validateBinding()
+        let result = try decodeVerifiedBytes(
+            tokenizerBytes: tokenizerBytes, configBytes: configBytes,
+            tokenizerPath: "tokenizer.json", configPath: "tokenizer_config.json")
+        try source.validateAcceptedFiles()
+        return result
+    }
+
     private static func load(
         from directory: GTurboModelDirectory,
         tokenizerPath: String,
@@ -134,6 +152,15 @@ public struct QwenTokenizer: Sendable {
             from: directory,
             relativePath: configPath,
             maximumBytes: tokenizerConfigJSONMaximumBytes)
+        return try decodeVerifiedBytes(
+            tokenizerBytes: tokenizerBytes, configBytes: configBytes,
+            tokenizerPath: tokenizerPath, configPath: configPath)
+    }
+
+    private static func decodeVerifiedBytes(
+        tokenizerBytes: Data, configBytes: Data,
+        tokenizerPath: String, configPath: String
+    ) throws -> Self {
         try verifyDigest(
             tokenizerBytes, name: tokenizerPath, expected: tokenizerJSONSHA256)
         try verifyDigest(

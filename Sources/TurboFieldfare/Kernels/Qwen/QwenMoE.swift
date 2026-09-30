@@ -5,6 +5,7 @@ enum QwenMoEError: Error, Equatable, Sendable {
     case invalidConfiguration(field: String, value: Int)
     case invalidCount(field: String, expected: Int, actual: Int)
     case nonfiniteRouterValue(token: Int, expert: Int)
+    case sourceTopKSelectionFailed
     case duplicateExpertWithinToken(token: Int, expert: Int)
     case missingExpert(Int)
     case invalidExpertShape(expert: Int)
@@ -15,6 +16,13 @@ enum QwenMoEError: Error, Equatable, Sendable {
     case commandEncoderUnavailable
     case invalidPipelineLimit
     case routingKernelRejectedInput(token: Int)
+}
+
+/// Packed routing remains the default. Only the original-BF16 source runner
+/// opts into the pinned CPU operation order.
+enum QwenMoERoutingArithmetic: Equatable, Sendable {
+    case packed
+    case officialSourceCPU
 }
 
 struct QwenMoEConfiguration: Equatable, Sendable {
@@ -119,6 +127,15 @@ struct QwenMoESharedAffineBindings: @unchecked Sendable {
     }
 }
 
+/// Four independently admitted BF16 shared-expert projections. Names do not
+/// grant trust: QwenBF16Weights validates the actual header shape and role.
+struct QwenBF16SharedNames: Sendable {
+    let gate: String
+    let up: String
+    let down: String
+    let outputGate: String
+}
+
 final class QwenMoEScratch: @unchecked Sendable {
     let routedActivation: MTLBuffer
     let sharedGate: MTLBuffer
@@ -171,6 +188,13 @@ final class QwenMoE {
         var reserved2: UInt32 = 0
     }
 
+    private struct BF16RoutedParameters {
+        var hiddenSize: UInt32
+        var intermediateSize: UInt32
+        var scratchOffset: UInt32
+        var reserved: UInt32 = 0
+    }
+
     private struct RoutedWork {
         let mapped: QwenMappedExpert
         var gateUp: RoutedParameters
@@ -187,6 +211,8 @@ final class QwenMoE {
     private let affinePipeline: MTLComputePipelineState
     private let activationPipeline: MTLComputePipelineState
     private let sharedEpiloguePipeline: MTLComputePipelineState
+    private let bf16PipelineLock = NSLock()
+    private var bf16Pipelines: [String: MTLComputePipelineState] = [:]
 
     init(context: MetalContext, configuration: QwenMoEConfiguration) throws {
         self.configuration = configuration
@@ -201,8 +227,27 @@ final class QwenMoE {
         sharedEpiloguePipeline = try context.pipeline("qwen_moe_shared_epilogue")
     }
 
-    static func route(logits: [Float], configuration: QwenMoEConfiguration) throws
-        -> QwenMoERoutingDiagnostics {
+    /// BF16 MoE arithmetic is compiled separately so its rounding and IEEE
+    /// behavior do not change the packed shared shader library.
+    private func bf16Pipeline(_ name: String) throws -> MTLComputePipelineState {
+        bf16PipelineLock.lock()
+        defer { bf16PipelineLock.unlock() }
+        if let pipeline = bf16Pipelines[name] { return pipeline }
+        let library = try MetalContext.privateLibrary(
+            device: device, module: "qwen_moe", mathMode: .safe,
+            mathFloatingPointFunctions: .precise, includeQwenSourceMath: true)
+        guard let function = library.makeFunction(name: name) else {
+            throw MetalError.missingFunction(name)
+        }
+        let pipeline = try device.makeComputePipelineState(function: function)
+        bf16Pipelines[name] = pipeline
+        return pipeline
+    }
+
+    static func route(
+        logits: [Float], configuration: QwenMoEConfiguration,
+        arithmetic: QwenMoERoutingArithmetic = .packed
+    ) throws -> QwenMoERoutingDiagnostics {
         guard logits.count.isMultiple(of: configuration.expertCount) else {
             throw QwenMoEError.invalidCount(
                 field: "routerLogits", expected: configuration.expertCount,
@@ -225,22 +270,39 @@ final class QwenMoE {
             guard let maximum = values.max() else {
                 throw QwenMoEError.invalidCount(field: "routerLogits", expected: 1, actual: 0)
             }
-            let exponentials = values.map { Foundation.exp($0 - maximum) }
-            let denominator = exponentials.reduce(Float(0), +)
+            let exponentials = values.map {
+                arithmetic == .officialSourceCPU
+                    ? QwenOfficialSourceRouterArithmetic.exponential($0 - maximum)
+                    : Foundation.exp($0 - maximum)
+            }
+            let denominator = arithmetic == .officialSourceCPU
+                ? QwenOfficialSourceRouterArithmetic.softmaxSum(exponentials)
+                : exponentials.reduce(Float(0), +)
             guard denominator.isFinite, denominator > 0 else {
                 throw QwenMoEError.nonfiniteRouterValue(token: token, expert: 0)
             }
-            let probabilities = exponentials.map { $0 / denominator }
-            let selected = probabilities.indices.sorted { lhs, rhs in
-                if probabilities[lhs] != probabilities[rhs] {
-                    return probabilities[lhs] > probabilities[rhs]
-                }
-                // TurboFieldfare's defined exact-tie rule. This is not a claim
-                // about generic torch.topk ordering on other stacks.
-                return lhs < rhs
-            }.prefix(configuration.topK)
-            let ids = Array(selected)
-            let selectedSum = ids.reduce(Float(0)) { $0 + probabilities[$1] }
+            let probabilities: [Float]
+            if arithmetic == .officialSourceCPU {
+                let reciprocal: Float = 1 / denominator
+                probabilities = exponentials.map { $0 * reciprocal }
+            } else {
+                probabilities = exponentials.map { $0 / denominator }
+            }
+            let ids: [Int]
+            if arithmetic == .officialSourceCPU, configuration.expertCount == 256 {
+                ids = try QwenOfficialSourceRouterArithmetic.top8Indices(probabilities)
+            } else {
+                // Packed and small-fixture routing retain their defined tie rule.
+                ids = Array(probabilities.indices.sorted { lhs, rhs in
+                    if probabilities[lhs] != probabilities[rhs] {
+                        return probabilities[lhs] > probabilities[rhs]
+                    }
+                    return lhs < rhs
+                }.prefix(configuration.topK))
+            }
+            let selectedSum = arithmetic == .officialSourceCPU
+                ? QwenOfficialSourceRouterArithmetic.top8Sum(ids.map { probabilities[$0] })
+                : ids.reduce(Float(0)) { $0 + probabilities[$1] }
             guard selectedSum.isFinite, selectedSum > 0 else {
                 throw QwenMoEError.nonfiniteRouterValue(token: token, expert: ids[0])
             }
@@ -341,7 +403,9 @@ final class QwenMoE {
     func makeScratch() throws -> QwenMoEScratch {
         func buffer(elements: Int, label: String) throws -> MTLBuffer {
             let bytes = try Self.checkedMultiply(elements, MemoryLayout<Float>.stride, operation: label)
-            guard let result = device.makeBuffer(length: bytes, options: .storageModePrivate) else {
+            guard UInt32(exactly: elements) != nil,
+                  bytes <= device.maxBufferLength,
+                  let result = device.makeBuffer(length: bytes, options: .storageModePrivate) else {
                 throw QwenMoEError.bufferTooSmall(name: label, required: bytes, actual: 0)
             }
             result.label = label
@@ -349,7 +413,9 @@ final class QwenMoE {
         }
         return try QwenMoEScratch(
             routedActivation: buffer(
-                elements: configuration.topK * configuration.routedIntermediateSize,
+                elements: try Self.checkedMultiply(configuration.topK,
+                    configuration.routedIntermediateSize,
+                    operation: "qwen.moe.routedActivation elements"),
                 label: "qwen.moe.routedActivation"),
             sharedGate: buffer(elements: configuration.sharedIntermediateSize,
                                label: "qwen.moe.sharedGate"),
@@ -449,6 +515,295 @@ final class QwenMoE {
         try encodeSharedCommands(
             commandBuffer: commandBuffer, hidden: hidden,
             bindings: bindings, scratch: scratch, output: output)
+    }
+
+    private static func requireDistinctSharedWeights(_ weights: QwenBF16Weights,
+                                                     from buffers: [MTLBuffer]) throws {
+        let callerIDs = Set(buffers.map { ObjectIdentifier($0) })
+        guard weights.inspectedChunks.allSatisfy({
+            !callerIDs.contains(ObjectIdentifier($0.buffer))
+        }) else {
+            throw QwenMoEError.invalidAffineBinding("BF16 shared weight aliases caller buffer")
+        }
+    }
+
+    /// A separate BF16 shared path. Routed packed experts and the existing
+    /// packed shared encoder are unchanged. One token, FP32 intermediates.
+    /// The caller owns submission; discard the command buffer on any error.
+    func encodeSharedBF16(commandBuffer: MTLCommandBuffer,
+                          hidden: MTLBuffer,
+                          weights: QwenBF16Weights,
+                          names: QwenBF16SharedNames,
+                          scratch: QwenMoEScratch,
+                          output: MTLBuffer) throws {
+        try requireNotSubmitted(commandBuffer)
+        try Self.requireBuffer(hidden, named: "hidden", elements: configuration.hiddenSize,
+                               as: Float.self)
+        try Self.requireBuffer(output, named: "output", elements: configuration.hiddenSize,
+                               as: Float.self)
+        try Self.requireBuffer(scratch.sharedGate, named: "sharedGate",
+                               elements: configuration.sharedIntermediateSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedUp, named: "sharedUp",
+                               elements: configuration.sharedIntermediateSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedActivation, named: "sharedActivation",
+                               elements: configuration.sharedIntermediateSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedOutput, named: "sharedOutput",
+                               elements: configuration.hiddenSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedOutputGate, named: "sharedOutputGate",
+                               elements: 1, as: Float.self)
+        let buffers: [MTLBuffer] = [hidden, output, scratch.sharedGate, scratch.sharedUp,
+                                    scratch.sharedActivation, scratch.sharedOutput,
+                                    scratch.sharedOutputGate]
+        guard buffers.allSatisfy({ $0.device === device }),
+              Set(buffers.map { ObjectIdentifier($0) }).count == buffers.count else {
+            throw QwenMoEError.invalidAffineBinding("BF16 shared buffers alias or use another device")
+        }
+        try Self.requireDistinctSharedWeights(weights, from: buffers)
+        try weights.requireShape(names.gate, role: .sharedGate,
+                                 rows: configuration.sharedIntermediateSize,
+                                 columns: configuration.hiddenSize)
+        try weights.requireShape(names.up, role: .sharedUp,
+                                 rows: configuration.sharedIntermediateSize,
+                                 columns: configuration.hiddenSize)
+        try weights.requireShape(names.down, role: .sharedDown,
+                                 rows: configuration.hiddenSize,
+                                 columns: configuration.sharedIntermediateSize)
+        try weights.requireShape(names.outputGate, role: .sharedOutputGate,
+                                 rows: 1, columns: configuration.hiddenSize)
+        let activationPipeline = try bf16Pipeline("qwen_moe_silu_multiply_bf16")
+        let sharedEpiloguePipeline = try bf16Pipeline("qwen_moe_shared_epilogue_bf16")
+        try requireDispatchable(activationPipeline, count: configuration.sharedIntermediateSize)
+        try requireDispatchable(sharedEpiloguePipeline, count: configuration.hiddenSize)
+        try weights.encodeProjection(commandBuffer: commandBuffer, tensorName: names.gate,
+                                     input: hidden, tokenCount: 1, output: scratch.sharedGate)
+        try weights.encodeProjection(commandBuffer: commandBuffer, tensorName: names.up,
+                                     input: hidden, tokenCount: 1, output: scratch.sharedUp)
+        guard let activationEncoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var activationParameters = ElementParameters(
+            elementCount: UInt32(configuration.sharedIntermediateSize))
+        activationEncoder.setComputePipelineState(activationPipeline)
+        activationEncoder.setBytes(&activationParameters,
+                                   length: MemoryLayout<ElementParameters>.stride,
+                                   index: QwenMetalBufferIndex.parameters.rawValue)
+        activationEncoder.setBuffer(scratch.sharedGate, offset: 0,
+                                    index: QwenMetalBufferIndex.input.rawValue)
+        activationEncoder.setBuffer(scratch.sharedUp, offset: 0,
+                                    index: QwenMetalBufferIndex.weights.rawValue)
+        activationEncoder.setBuffer(scratch.sharedActivation, offset: 0,
+                                    index: QwenMetalBufferIndex.output.rawValue)
+        try dispatch(activationEncoder, pipeline: activationPipeline,
+                     count: configuration.sharedIntermediateSize)
+        activationEncoder.endEncoding()
+        try weights.encodeProjection(commandBuffer: commandBuffer, tensorName: names.down,
+                                     input: scratch.sharedActivation, tokenCount: 1,
+                                     output: scratch.sharedOutput)
+        try weights.encodeProjection(commandBuffer: commandBuffer,
+                                     tensorName: names.outputGate, input: hidden,
+                                     tokenCount: 1, output: scratch.sharedOutputGate)
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        var parameters = ElementParameters(elementCount: UInt32(configuration.hiddenSize))
+        encoder.setComputePipelineState(sharedEpiloguePipeline)
+        encoder.setBytes(&parameters, length: MemoryLayout<ElementParameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(scratch.sharedOutputGate, offset: 0,
+                          index: QwenMetalBufferIndex.weights.rawValue)
+        encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        encoder.setBuffer(scratch.sharedOutput, offset: 0,
+                          index: QwenMetalBufferIndex.scratch.rawValue)
+        try dispatch(encoder, pipeline: sharedEpiloguePipeline,
+                     count: configuration.hiddenSize)
+        encoder.endEncoding()
+    }
+
+    /// Actual resident BF16 routed experts, followed by the existing BF16
+    /// shared branch. No mapped slot may escape this completion-owned submit.
+    /// Input routing weights are the finite, normalized Top-8 result of the
+    /// existing FP32 router, in exactly `lease.experts` rank order.
+    @discardableResult
+    func submitExpertsBF16(hidden: MTLBuffer,
+                           lease: QwenBF16ExpertLease,
+                           routingWeights: MTLBuffer,
+                           sharedWeights: QwenBF16Weights,
+                           sharedNames: QwenBF16SharedNames,
+                           scratch: QwenMoEScratch,
+                           output: MTLBuffer) throws -> MTLCommandBuffer {
+        try lease.requireUsable()
+        guard lease.experts.count == configuration.topK else {
+            throw QwenMoEError.invalidCount(
+                field: "BF16 routed experts", expected: configuration.topK,
+                actual: lease.experts.count)
+        }
+        guard lease.experts.map(\.expertID) == lease.diagnostics.requestedExpertIDs else {
+            throw QwenMoEError.invalidAffineBinding(
+                "BF16 expert lease order differs from requested routing IDs")
+        }
+        let twiceIntermediate = try Self.checkedMultiply(
+            2, configuration.routedIntermediateSize, operation: "BF16 gate/up rows")
+        let gateCount = try Self.checkedMultiply(
+            twiceIntermediate, configuration.hiddenSize, operation: "BF16 gate/up elements")
+        let downCount = try Self.checkedMultiply(
+            configuration.hiddenSize, configuration.routedIntermediateSize,
+            operation: "BF16 down elements")
+        let activationCount = try Self.checkedMultiply(
+            configuration.topK, configuration.routedIntermediateSize,
+            operation: "BF16 activation elements")
+        guard UInt32(exactly: gateCount) != nil,
+              UInt32(exactly: downCount) != nil,
+              UInt32(exactly: activationCount) != nil else {
+            throw QwenMoEError.arithmeticOverflow(operation: "BF16 Metal scalar indexing")
+        }
+        let gateBytes = try Self.checkedMultiply(
+            gateCount, MemoryLayout<UInt16>.stride, operation: "BF16 gate/up bytes")
+        let downBytes = try Self.checkedMultiply(
+            downCount, MemoryLayout<UInt16>.stride, operation: "BF16 down bytes")
+        guard gateBytes <= device.maxBufferLength,
+              downBytes <= device.maxBufferLength else {
+            throw QwenMoEError.invalidExpertShape(expert: -1)
+        }
+        try Self.requireBuffer(hidden, named: "BF16 hidden",
+                               elements: configuration.hiddenSize, as: Float.self)
+        try Self.requireBuffer(output, named: "BF16 output",
+                               elements: configuration.hiddenSize, as: Float.self)
+        try Self.requireBuffer(routingWeights, named: "BF16 routingWeights",
+                               elements: configuration.topK, as: Float.self)
+        try Self.requireBuffer(scratch.routedActivation, named: "BF16 routedActivation",
+                               elements: activationCount, as: Float.self)
+        try Self.requireBuffer(scratch.sharedGate, named: "BF16 sharedGate",
+                               elements: configuration.sharedIntermediateSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedUp, named: "BF16 sharedUp",
+                               elements: configuration.sharedIntermediateSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedActivation, named: "BF16 sharedActivation",
+                               elements: configuration.sharedIntermediateSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedOutput, named: "BF16 sharedOutput",
+                               elements: configuration.hiddenSize, as: Float.self)
+        try Self.requireBuffer(scratch.sharedOutputGate, named: "BF16 sharedOutputGate",
+                               elements: 1, as: Float.self)
+        let allBuffers: [MTLBuffer] = [hidden, routingWeights, output,
+            scratch.routedActivation, scratch.sharedGate, scratch.sharedUp,
+            scratch.sharedActivation, scratch.sharedOutput, scratch.sharedOutputGate]
+        guard allBuffers.allSatisfy({ $0.device === device }),
+              Set(allBuffers.map { ObjectIdentifier($0) }).count == allBuffers.count,
+              routingWeights.storageMode == .shared,
+              sharedWeights.inspectedChunks.allSatisfy({ $0.buffer.device === device }) else {
+            throw QwenMoEError.invalidAffineBinding("BF16 device, alias or routing storage")
+        }
+        // Reject resident weights in every caller/mutable position before the
+        // lease can submit its initial output clear or any routed projection.
+        try Self.requireDistinctSharedWeights(sharedWeights, from: allBuffers)
+        var seen = Set<Int>()
+        for mapped in lease.experts {
+            guard mapped.expertID >= 0, mapped.expertID < configuration.expertCount,
+                  seen.insert(mapped.expertID).inserted,
+                  mapped.gateUp !== mapped.down,
+                  mapped.gateUp.device === device, mapped.down.device === device,
+                  mapped.gateUp.storageMode == .shared,
+                  mapped.down.storageMode == .shared,
+                  mapped.gateUpLength == gateBytes,
+                  mapped.downLength == downBytes,
+                  mapped.gateUp.length >= gateBytes,
+                  mapped.down.length >= downBytes,
+                  !allBuffers.contains(where: { $0 === mapped.gateUp || $0 === mapped.down }) else {
+                throw QwenMoEError.invalidExpertShape(expert: mapped.expertID)
+            }
+        }
+        let route = routingWeights.contents().assumingMemoryBound(to: Float.self)
+        var total: Float = 0
+        for rank in 0..<configuration.topK {
+            let weight = route[rank]
+            guard weight.isFinite, weight >= 0 else {
+                throw QwenMoEError.invalidAffineBinding("nonfinite/negative BF16 routing weight")
+            }
+            total += weight
+        }
+        guard total.isFinite, abs(total - 1) <= 0.001 else {
+            throw QwenMoEError.invalidAffineBinding("BF16 Top-8 weights not normalized")
+        }
+        // Shared shapes are checked before ownership transfers; its encoder
+        // repeats binding checks after transfer, with failure-safe commitment.
+        try sharedWeights.requireShape(sharedNames.gate, role: .sharedGate,
+                                       rows: configuration.sharedIntermediateSize,
+                                       columns: configuration.hiddenSize)
+        try sharedWeights.requireShape(sharedNames.up, role: .sharedUp,
+                                       rows: configuration.sharedIntermediateSize,
+                                       columns: configuration.hiddenSize)
+        try sharedWeights.requireShape(sharedNames.down, role: .sharedDown,
+                                       rows: configuration.hiddenSize,
+                                       columns: configuration.sharedIntermediateSize)
+        try sharedWeights.requireShape(sharedNames.outputGate, role: .sharedOutputGate,
+                                       rows: 1, columns: configuration.hiddenSize)
+        let gatePipeline = try bf16Pipeline("qwen_moe_routed_gate_up_bf16")
+        let downPipeline = try bf16Pipeline("qwen_moe_routed_down_add_bf16")
+        try requireDispatchable(gatePipeline, count: configuration.routedIntermediateSize)
+        try requireDispatchable(downPipeline, count: configuration.hiddenSize)
+        try requireDispatchable(clearPipeline, count: configuration.hiddenSize)
+        try requireDispatchable(try bf16Pipeline("qwen_moe_silu_multiply_bf16"),
+                                count: configuration.sharedIntermediateSize)
+        try requireDispatchable(try bf16Pipeline("qwen_moe_shared_epilogue_bf16"),
+                                count: configuration.hiddenSize)
+        return try lease.submit(on: queue) { command in
+            try encodeClear(commandBuffer: command, buffer: output,
+                            count: configuration.hiddenSize)
+            // The pinned eager expert loop visits ascending expert ID. Retain
+            // the original rank for the matching route weight and scratch row.
+            let orderedExperts = lease.experts.enumerated().sorted {
+                $0.element.expertID < $1.element.expertID
+            }
+            for (rank, mapped) in orderedExperts {
+                let offset = try Self.checkedMultiply(
+                    rank, configuration.routedIntermediateSize,
+                    operation: "BF16 routed scratch offset")
+                guard UInt32(exactly: offset) != nil else {
+                    throw QwenMoEError.arithmeticOverflow(operation: "BF16 routed scratch offset")
+                }
+                var parameters = BF16RoutedParameters(
+                    hiddenSize: UInt32(configuration.hiddenSize),
+                    intermediateSize: UInt32(configuration.routedIntermediateSize),
+                    scratchOffset: UInt32(offset))
+                guard let gateEncoder = command.makeComputeCommandEncoder() else {
+                    throw QwenMoEError.commandEncoderUnavailable
+                }
+                gateEncoder.setComputePipelineState(gatePipeline)
+                gateEncoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                                     index: QwenMetalBufferIndex.parameters.rawValue)
+                gateEncoder.setBuffer(hidden, offset: 0,
+                                      index: QwenMetalBufferIndex.input.rawValue)
+                gateEncoder.setBuffer(mapped.gateUp, offset: 0,
+                                      index: QwenMetalBufferIndex.weights.rawValue)
+                gateEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                      index: QwenMetalBufferIndex.scratch.rawValue)
+                gateEncoder.useResource(mapped.gateUp, usage: .read)
+                try dispatch(gateEncoder, pipeline: gatePipeline,
+                             count: configuration.routedIntermediateSize)
+                gateEncoder.endEncoding()
+
+                guard let downEncoder = command.makeComputeCommandEncoder() else {
+                    throw QwenMoEError.commandEncoderUnavailable
+                }
+                downEncoder.setComputePipelineState(downPipeline)
+                downEncoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                                     index: QwenMetalBufferIndex.parameters.rawValue)
+                downEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                      index: QwenMetalBufferIndex.input.rawValue)
+                downEncoder.setBuffer(mapped.down, offset: 0,
+                                      index: QwenMetalBufferIndex.weights.rawValue)
+                downEncoder.setBuffer(output, offset: 0,
+                                      index: QwenMetalBufferIndex.output.rawValue)
+                downEncoder.setBuffer(routingWeights,
+                                      offset: rank * MemoryLayout<Float>.stride,
+                                      index: QwenMetalBufferIndex.state.rawValue)
+                downEncoder.useResource(mapped.down, usage: .read)
+                try dispatch(downEncoder, pipeline: downPipeline,
+                             count: configuration.hiddenSize)
+                downEncoder.endEncoding()
+            }
+            try encodeSharedBF16(commandBuffer: command, hidden: hidden,
+                                 weights: sharedWeights, names: sharedNames,
+                                 scratch: scratch, output: output)
+        }
     }
 
     private func prepareSubmission(

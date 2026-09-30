@@ -40,12 +40,15 @@ struct AppQwenInstallationTests {
         }
     }
 
-    @Test func VerifiedQwenManifestAndReceiptBindToTheActualDirectory() throws {
+    @Test func OldPackedQwenWithMatchingOfficialIndexCannotSatisfyBF16Selection() throws {
         let entry = AppModelCatalog.entry(for: .qwen3_6)
         let directory = try Self.makeQwenInstall("complete")
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        #expect(AppModelInstallationProbe.status(at: directory, entry: entry) == .complete)
+        guard case .partial = AppModelInstallationProbe.status(at: directory, entry: entry) else {
+            Issue.record("old packed Qwen was accepted as the original BF16 source")
+            return
+        }
 
         let receiptURL = directory.appendingPathComponent(
             VerifiedInstallReceiptReader.fileName)
@@ -80,8 +83,11 @@ struct AppQwenInstallationTests {
         let directory = try Self.makeQwenInstall("text-only")
         defer { try? FileManager.default.removeItem(at: directory) }
 
-        #expect(AppModelInstallationProbe.status(
-            at: directory, entry: AppModelCatalog.entry(for: .qwen3_6)) == .complete)
+        guard case .partial = AppModelInstallationProbe.status(
+            at: directory, entry: AppModelCatalog.entry(for: .qwen3_6)) else {
+            Issue.record("old packed Qwen was accepted as the original BF16 source")
+            return
+        }
         #expect(AppVisionPackInstallationProbe.status(
             at: directory, entry: AppModelCatalog.entry(for: .qwen3_6)) == .missing)
     }
@@ -104,7 +110,7 @@ struct AppQwenInstallationTests {
         }
     }
 
-    @Test func LocalQwenInstallerKeepsPartialStateReachableAndDiscardable() async throws {
+    @Test func RegistrationDiscardDoesNotTouchOldPackedPartialFiles() async throws {
         let root = try Self.makeTemporaryRoot("qwen-local-installer")
         defer { try? FileManager.default.removeItem(at: root) }
         let location = AppModelLocation.Resolved(
@@ -113,6 +119,12 @@ struct AppQwenInstallationTests {
         let entry = AppModelCatalog.entry(for: .qwen3_6, location: location)
         let source = root.appendingPathComponent("official-source", isDirectory: true)
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let sourceShard = source.appendingPathComponent("model-00001-of-00026.safetensors")
+        try Data("original source".utf8).write(to: sourceShard)
+        let gemma = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        try FileManager.default.createDirectory(at: gemma, withIntermediateDirectories: true)
+        let gemmaSentinel = gemma.appendingPathComponent("keep.bin")
+        try Data("Gemma stays".utf8).write(to: gemmaSentinel)
         let installer = try LocalQwenModelInstallerClient(
             entry: entry, sourceDirectory: source, includesVision: false)
         let partial = URL(fileURLWithPath: location.textModelURL.path + ".partial",
@@ -122,20 +134,17 @@ struct AppQwenInstallationTests {
         try Data("{}".utf8).write(to: resume, options: .atomic)
 
         #expect(installer.sourceDirectory == source.standardizedFileURL)
-        #expect(installer.hasPartialInstall)
-        #expect(installer.canResume)
+        #expect(!installer.hasPartialInstall)
+        #expect(!installer.canResume)
         installer.cancel()
         #expect(FileManager.default.fileExists(atPath: partial.path),
                 "cancellation must leave a resumable partial install")
-        #expect(installer.canResume)
-        do {
-            try await installer.discardPartialInstall()
-            Issue.record("an unauthenticated partial was discarded")
-        } catch {
-            // Discard must authenticate the owned checkpoint before mutation.
-        }
+        #expect(!installer.canResume)
+        try await installer.discardPartialInstall()
         #expect(FileManager.default.fileExists(atPath: partial.path))
         #expect(FileManager.default.fileExists(atPath: resume.path))
+        #expect(try Data(contentsOf: sourceShard) == Data("original source".utf8))
+        #expect(try Data(contentsOf: gemmaSentinel) == Data("Gemma stays".utf8))
     }
 
     @Test func LocalQwenInstallerRejectsGemmaRoute() throws {
@@ -148,6 +157,133 @@ struct AppQwenInstallationTests {
                 entry: AppModelCatalog.entry(for: .gemma4),
                 sourceDirectory: source)
         }
+    }
+
+    @Test func staleStreamTerminationCannotCancelNewRegistration() async throws {
+        let root = try Self.makeTemporaryRoot("qwen-stream-owner")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("source", isDirectory: true)
+        try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
+        let location = AppModelLocation.Resolved(
+            textModelURL: root.appendingPathComponent("qwen.gturbo", isDirectory: true),
+            visionModelURL: root.appendingPathComponent("qwen.vision.gturbo", isDirectory: true))
+        let installer = try LocalQwenModelInstallerClient(
+            entry: AppModelCatalog.entry(for: .qwen3_6, location: location),
+            sourceDirectory: source, includesVision: false,
+            beforeRegistration: { try await Task.sleep(for: .seconds(30)) })
+        let first = installer.install(resume: false)
+        let firstConsumer = Task {
+            do {
+                for try await _ in first {}
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        #expect(installer.activeInstallID != nil)
+        let second = installer.install(resume: false)
+        let secondConsumer = Task {
+            do {
+                for try await _ in second {}
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+        let secondID = try #require(installer.activeInstallID)
+        #expect(await firstConsumer.value)
+        #expect(installer.activeInstallID == secondID)
+        installer.cancel()
+        #expect(await secondConsumer.value)
+    }
+
+    @Test func QwenProgressBurstDoesNotReplayStaleUpdatesBeforeInstallation() async throws {
+        let output = URL(fileURLWithPath: "/tmp/qwen-burst.gturbo", isDirectory: true)
+        let stream = AsyncThrowingStream<AppModelInstallEvent, Error>(
+            bufferingPolicy: LocalQwenModelInstallerClient.eventBufferingPolicy
+        ) { continuation in
+            continuation.yield(.checking)
+            for completed in 0..<8_192 {
+                continuation.yield(.copyingPayload(
+                    reusedBytes: 0,
+                    downloadedThisRunBytes: UInt64(completed),
+                    totalBytes: 8_192))
+            }
+            continuation.yield(.installed(output))
+            continuation.finish()
+        }
+
+        // The producer has already completed its burst when the consumer starts.
+        var events: [AppModelInstallEvent] = []
+        for try await event in stream {
+            events.append(event)
+        }
+
+        #expect(events == [.installed(output)])
+    }
+
+    @Test func QwenProgressBurstPreservesTerminalErrorForLateConsumer() async throws {
+        let stream = AsyncThrowingStream<AppModelInstallEvent, Error>(
+            bufferingPolicy: LocalQwenModelInstallerClient.eventBufferingPolicy
+        ) { continuation in
+            for completed in 0..<8_192 {
+                continuation.yield(.copyingPayload(
+                    reusedBytes: 0,
+                    downloadedThisRunBytes: UInt64(completed),
+                    totalBytes: 8_192))
+            }
+            continuation.finish(throwing: SyntheticInstallationError())
+        }
+
+        var events: [AppModelInstallEvent] = []
+        var terminalError: Error?
+        do {
+            for try await event in stream {
+                events.append(event)
+            }
+        } catch {
+            terminalError = error
+        }
+
+        #expect(terminalError is SyntheticInstallationError)
+        #expect(!events.contains {
+            if case .installed = $0 { return true }
+            return false
+        })
+    }
+
+    @Test func QwenProgressBurstPreservesCancellationForLateConsumer() async throws {
+        let stream = AsyncThrowingStream<AppModelInstallEvent, Error>(
+            bufferingPolicy: LocalQwenModelInstallerClient.eventBufferingPolicy
+        ) { continuation in
+            for completed in 0..<8_192 {
+                continuation.yield(.copyingPayload(
+                    reusedBytes: 0,
+                    downloadedThisRunBytes: UInt64(completed),
+                    totalBytes: 8_192))
+            }
+            continuation.finish(throwing: CancellationError())
+        }
+
+        var events: [AppModelInstallEvent] = []
+        var wasCancelled = false
+        do {
+            for try await event in stream {
+                events.append(event)
+            }
+        } catch is CancellationError {
+            wasCancelled = true
+        }
+
+        #expect(wasCancelled)
+        #expect(!events.contains {
+            if case .installed = $0 { return true }
+            return false
+        })
     }
 
     @Test func VisionReadinessDistinguishesUnsupportedLayoutFromMissingPack() throws {
@@ -281,3 +417,5 @@ struct AppQwenInstallationTests {
         return root
     }
 }
+
+private struct SyntheticInstallationError: Error, Equatable, Sendable {}

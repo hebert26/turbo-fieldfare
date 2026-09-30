@@ -16,7 +16,7 @@ import TurboFieldfare
         let runtime = try options.resolvedRuntimeConfiguration(forceLogitsHead: false)
         #expect(runtime == .production)
         #expect(options.resultSummary ==
-            "Cache 16 LFU, prefill 128, FP16 KV, RDADVISE off, full SHA-256")
+            "Cache 16 LFU, prefill 128, conversation state varies by model, RDADVISE off, full SHA-256")
     }
 
     @Test func everyPublicChoiceMapsToRuntime() throws {
@@ -100,6 +100,16 @@ import TurboFieldfare
             modelDirectory: directory,
             maxContextTokens: 4096,
             options: value) == baseline)
+    }
+
+    @Test func officialSourceRuntimeKeyKeepsPhysicalRegistrationPath() {
+        // This existing directory is rewritten to /var/folders by Foundation.
+        let physical = URL(fileURLWithPath: "/private/var/folders", isDirectory: true)
+        let key = AppLoadedRuntimeKey(
+            modelDirectory: physical, maxContextTokens: 8_192,
+            options: AppRuntimeOptions(), preservePhysicalPath: true)
+        #expect(key.modelDirectory.path == physical.path)
+        #expect(key.modelDirectory.path != physical.standardizedFileURL.path)
     }
     /// Refused at selection, not inside the first prefill chunk - which is
     /// after the model load and, on an image turn, after every attachment has

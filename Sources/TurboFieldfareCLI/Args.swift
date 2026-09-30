@@ -6,6 +6,18 @@ public enum CLIThinkingMode: String, Sendable, Equatable {
     case off
 }
 
+public enum CLISourceIntegrityMode: String, Sendable, Equatable {
+    case fullSHA256 = "full-sha256"
+    case trustedReceipt = "trusted-receipt"
+
+    var policy: ModelIntegrityPolicy {
+        switch self {
+        case .fullSHA256: .fullSha256
+        case .trustedReceipt: .sizeCheckTrustedReceipt
+        }
+    }
+}
+
 public struct Args: Equatable, Sendable {
     public var model: String
     public var prompt: String?
@@ -17,6 +29,7 @@ public struct Args: Equatable, Sendable {
     public var thinking: CLIThinkingMode
     public var toolsFile: String?
     public var showModelIdentity: Bool
+    public var sourceIntegrity: CLISourceIntegrityMode?
     public var maxNew: Int
     public var maxContext: Int
     public var temperature: Float
@@ -45,6 +58,7 @@ public struct Args: Equatable, Sendable {
                 thinking: CLIThinkingMode = .auto,
                 toolsFile: String? = nil,
                 showModelIdentity: Bool = false,
+                sourceIntegrity: CLISourceIntegrityMode? = nil,
                 maxNew: Int = 1_024,
                 maxContext: Int = 8192,
                 temperature: Float = 0.2,
@@ -70,6 +84,7 @@ public struct Args: Equatable, Sendable {
         self.thinking = thinking
         self.toolsFile = toolsFile
         self.showModelIdentity = showModelIdentity
+        self.sourceIntegrity = sourceIntegrity
         self.maxNew = maxNew
         self.maxContext = maxContext
         self.temperature = temperature
@@ -143,6 +158,8 @@ extension Args {
       --tools-file <path>       OpenAI-shaped Qwen function definitions for chat. Calls are
                                 returned for the caller to approve; the CLI never runs them.
       --show-model-identity     Print loaded family, model, revision, and format to stderr.
+      --source-integrity <full-sha256|trusted-receipt>
+                                Original BF16 source verification (default full-sha256).
       --max-new <int>            Generated-token limit (default 1024).
       --max-context <int>        Context limit in tokens (default 8192).
       --temperature <float>      Sampling temperature (default 0.2; 0 = greedy).
@@ -215,6 +232,7 @@ extension Args {
         var thinking: CLIThinkingMode = .auto
         var toolsFile: String?
         var showModelIdentity = false
+        var sourceIntegrity: CLISourceIntegrityMode?
         var maxNew = 1_024
         var maxContext = 8192
         var temperature: Float = 0.2
@@ -244,6 +262,12 @@ extension Args {
             case "--show-model-identity":
                 showModelIdentity = true
                 index += 1
+            case "--source-integrity":
+                let value = try takeValue(argv, &index, flag: flag)
+                guard let mode = CLISourceIntegrityMode(rawValue: value) else {
+                    throw ArgsError.invalidValue(flag: flag, value: value)
+                }
+                sourceIntegrity = mode
             case "--model":
                 model = try takeValue(argv, &index, flag: flag)
             case "--prompt":
@@ -410,6 +434,7 @@ extension Args {
                              thinking: thinking,
                              toolsFile: toolsFile,
                              showModelIdentity: showModelIdentity,
+                             sourceIntegrity: sourceIntegrity,
                              maxNew: maxNew,
                              maxContext: maxContext,
                              temperature: temperature,

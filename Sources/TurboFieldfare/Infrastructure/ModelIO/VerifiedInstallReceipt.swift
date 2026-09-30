@@ -1,10 +1,31 @@
 import Darwin
 import Foundation
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 public enum ModelIntegrityPolicy: Sendable, Equatable {
     case fullSha256
     case sizeCheckTrustedReceipt
+
+    /// Observable package-only mapping used by the public source bridge.
+    /// A missing-directory failure alone cannot demonstrate distinct policy
+    /// dispatch. This value cannot mint a receipt or bypass official pins.
+    package var officialSourcePolicy: OfficialSourceTrustPolicy {
+        switch self {
+        case .fullSha256: .fullSha256
+        case .sizeCheckTrustedReceipt: .sizeCheckTrustedReceipt
+        }
+    }
+
+    /// Explicit source-only policy bridge. This does not alter packed/Gemma
+    /// receipts or make a classified source loadable by ModelFamilyRuntime.
+    public func verifyOfficialSource(
+        at logicalModelURL: URL,
+        progress: @escaping (UInt64, UInt64) -> Void = { _, _ in }
+    ) throws -> OfficialSourceTrustReceipt {
+        try OfficialSourceTrust.verify(
+            at: logicalModelURL, policy: officialSourcePolicy, progress: progress)
+    }
 }
 
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {

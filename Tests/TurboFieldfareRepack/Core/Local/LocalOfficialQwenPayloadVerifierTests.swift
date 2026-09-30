@@ -1,5 +1,7 @@
+import Darwin
 import Foundation
 import Testing
+import TurboFieldfareOfficialQwenSource
 @testable import TurboFieldfareRepackCore
 
 /// The checksum document is metadata only. The shard callbacks below return
@@ -19,7 +21,10 @@ struct LocalOfficialQwenPayloadVerifierTests {
                 LocalOfficialQwenPayloadVerifier.checksumManifestSHA256)
         #expect(identity.shardBytes == LocalOfficialQwenPayloadVerifier.expectedShardBytes)
         #expect(identity.shardCount == LocalOfficialQwenPayloadVerifier.expectedShardCount)
-        #expect(identity.shardSetSHA256.count == 64)
+        // Independently calculated with Python hashlib from the literal pinned
+        // names/digests and 26 synthetic sizes of 2,765,529,876 bytes.
+        #expect(identity.shardSetSHA256 ==
+                "0563ff248ca173aed6fa2c8a730dbebec9d2d5eedbc87cdbd0932c0da76af4d1")
     }
 
     @Test func checksumDocumentMutationFailsBeforeAnyShardCallback() throws {
@@ -42,6 +47,35 @@ struct LocalOfficialQwenPayloadVerifierTests {
                 snapshotDirectory: fixture.root.path,
                 shardFilenames: fixture.shards,
                 operations: operations)
+        }
+        #expect(!inspected)
+    }
+
+    @Test func malformedChecksumDocumentIsRejectedBeforeAnyShardCallback() throws {
+        let fixture = try PayloadVerifierFixture.make()
+        defer { fixture.remove() }
+        var inspected = false
+        var operations = fixture.operations()
+        operations.readChecksumManifest = { _, _ in Data("malformed checksum metadata".utf8) }
+        operations.inspectAndHashFile = { path, _ in
+            inspected = true
+            return (fixture.size(for: path), fixture.expectedDigest(for: path))
+        }
+
+        do {
+            _ = try LocalOfficialQwenPayloadVerifier.verify(
+                snapshotDirectory: fixture.root.path,
+                shardFilenames: fixture.shards,
+                operations: operations)
+            Issue.record("expected malformed checksum bytes to fail the pinned fingerprint")
+        } catch let error as RepackError {
+            guard case .sourceFingerprintRejected(let path, _) = error else {
+                Issue.record("unexpected adapter error for malformed checksum metadata")
+                return
+            }
+            #expect(path == fixture.root.appendingPathComponent("SHA256SUMS").path)
+        } catch {
+            Issue.record("unexpected non-RepackError for malformed checksum metadata")
         }
         #expect(!inspected)
     }
@@ -149,15 +183,55 @@ struct LocalOfficialQwenPayloadVerifierTests {
         }
     }
 
+    @Test func sharedShortReadErrorMapsToExactRepackErrorValues() throws {
+        let fixture = try PayloadVerifierFixture.make()
+        defer { fixture.remove() }
+        let expectedPath = fixture.root.appendingPathComponent(fixture.shards[0]).path
+        var inspected = 0
+        var operations = fixture.operations()
+        operations.inspectAndHashFile = { _, _ in
+            inspected += 1
+            throw OfficialQwenPayloadVerificationError.preadShort(
+                path: expectedPath, expected: 512 * 1024, got: 7, errno: EIO)
+        }
+
+        do {
+            _ = try LocalOfficialQwenPayloadVerifier.verify(
+                snapshotDirectory: fixture.root.path,
+                shardFilenames: fixture.shards,
+                operations: operations)
+            Issue.record("expected shared short-read error to be mapped")
+        } catch let error as RepackError {
+            guard case .preadShort(let path, let expected, let got, let code) = error else {
+                Issue.record("shared short-read error mapped to the wrong RepackError case")
+                return
+            }
+            #expect(path == expectedPath)
+            #expect(expected == 512 * 1024)
+            #expect(got == 7)
+            #expect(code == EIO)
+        } catch {
+            Issue.record("shared short-read error escaped as a non-RepackError")
+        }
+        #expect(inspected == 1)
+    }
+
     @Test func cancellationStopsAtEverySyntheticShardBoundary() throws {
         let fixture = try PayloadVerifierFixture.make()
         defer { fixture.remove() }
-        for stopAfter in 1...fixture.shards.count {
-            var calls = 0
+        for stopAfterShard in 1...fixture.shards.count {
+            var completedShards = 0
+            var inspectedShards = 0
             var operations = fixture.operations()
+            operations.inspectAndHashFile = { path, progress in
+                inspectedShards += 1
+                let size = fixture.size(for: path)
+                try progress(size)
+                completedShards += 1
+                return (size, fixture.expectedDigest(for: path))
+            }
             operations.cancellationCheck = {
-                calls += 1
-                if calls == stopAfter { throw CancellationError() }
+                if completedShards >= stopAfterShard { throw CancellationError() }
             }
             #expect(throws: CancellationError.self) {
                 _ = try LocalOfficialQwenPayloadVerifier.verify(
@@ -165,7 +239,63 @@ struct LocalOfficialQwenPayloadVerifierTests {
                     shardFilenames: fixture.shards,
                     operations: operations)
             }
+            #expect(inspectedShards == stopAfterShard)
+            #expect(completedShards == stopAfterShard)
         }
+    }
+
+    @Test func syntheticProgressAdapterReportsMonotonicAggregateBytes() throws {
+        let fixture = try PayloadVerifierFixture.make()
+        defer { fixture.remove() }
+        var progress: [UInt64] = []
+
+        _ = try LocalOfficialQwenPayloadVerifier.verify(
+            snapshotDirectory: fixture.root.path,
+            shardFilenames: fixture.shards,
+            operations: fixture.operations(),
+            progress: { completed, total in
+                #expect(total == LocalOfficialQwenPayloadVerifier.expectedShardBytes)
+                progress.append(completed)
+            })
+
+        #expect(progress.count == 2 * fixture.shards.count)
+        #expect(progress.first == PayloadVerifierFixture.syntheticShardSize)
+        #expect(progress.last == LocalOfficialQwenPayloadVerifier.expectedShardBytes)
+        #expect(zip(progress, progress.dropFirst()).allSatisfy { pair in pair.0 <= pair.1 })
+        #expect(progress.allSatisfy { $0 <= LocalOfficialQwenPayloadVerifier.expectedShardBytes })
+    }
+
+    @Test func overflowingSyntheticProgressMapsToConfigurationInvalid() throws {
+        let fixture = try PayloadVerifierFixture.make()
+        defer { fixture.remove() }
+        var inspected = 0
+        var operations = fixture.operations()
+        operations.inspectAndHashFile = { path, progress in
+            inspected += 1
+            if inspected == 1 {
+                let size = fixture.size(for: path)
+                try progress(size)
+                return (size, fixture.expectedDigest(for: path))
+            }
+            try progress(UInt64.max)
+            return (fixture.size(for: path), fixture.expectedDigest(for: path))
+        }
+
+        do {
+            _ = try LocalOfficialQwenPayloadVerifier.verify(
+                snapshotDirectory: fixture.root.path,
+                shardFilenames: fixture.shards,
+                operations: operations)
+            Issue.record("expected overflowing progress arithmetic to be rejected")
+        } catch let error as RepackError {
+            guard case .configurationInvalid = error else {
+                Issue.record("unexpected adapter error for overflowing progress")
+                return
+            }
+        } catch {
+            Issue.record("unexpected non-RepackError for overflowing progress")
+        }
+        #expect(inspected == 2)
     }
 
     @Test func sourceMutationBetweenValidationAndPublicationFailsIdentityCheck() throws {
@@ -194,6 +324,8 @@ struct LocalOfficialQwenPayloadVerifierTests {
 }
 
 private struct PayloadVerifierFixture {
+    static let syntheticShardSize: UInt64 = 2_765_529_876
+
     let root: URL
     let checksumData: Data
     let shards: [String]
@@ -233,9 +365,8 @@ private struct PayloadVerifierFixture {
     }
 
     func size(for path: String) -> UInt64 {
-        let name = (path as NSString).lastPathComponent
-        return name == "model-00001-of-00026.safetensors"
-            ? LocalOfficialQwenPayloadVerifier.expectedShardBytes : 0
+        _ = path
+        return Self.syntheticShardSize
     }
 
     func remove() { try? FileManager.default.removeItem(at: root) }

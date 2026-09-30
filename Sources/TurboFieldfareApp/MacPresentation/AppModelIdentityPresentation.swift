@@ -31,6 +31,7 @@ public struct AppModelIdentityPresentation: Equatable, Sendable {
     ) -> Self {
         let loaded = loadedIdentity(
             selected: selected,
+            installationStatus: installationStatus,
             loadState: loadState,
             transition: transition,
             readiness: readiness)
@@ -88,12 +89,22 @@ public struct AppModelIdentityPresentation: Equatable, Sendable {
 
     private static func loadedIdentity(
         selected: AppModelCatalogEntry,
+        installationStatus: AppModelInstallationStatus,
         loadState: AppModelLoadState,
         transition: AppModel.ModelSelectionTransition,
         readiness: AppLoadedModelReadiness?
     ) -> (name: String, detail: String)? {
         guard transition == .idle, loadState.isReady, let readiness else { return nil }
         switch readiness {
+        case .qwenSource(let identity):
+            guard selected.family == .qwen3_6,
+                  installationStatus == .complete,
+                  identity.kind.rawValue == "official-safetensors-bf16-v1" else {
+                return nil
+            }
+            return (
+                name: selected.displayName,
+                detail: "Original BF16 source · verified registration \(identity.contentDigest)")
         case .gemma:
             guard selected.family == .gemma4 else { return nil }
             return (

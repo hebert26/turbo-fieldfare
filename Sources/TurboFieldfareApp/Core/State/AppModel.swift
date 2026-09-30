@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Synchronization
 import TurboFieldfare
@@ -5,6 +6,7 @@ import TurboFieldfareRepackCore
 import TurboFieldfare
 import Observation
 import TurboFieldfareDecodeProtocol
+import TurboFieldfareOfficialQwenSource
 
 @MainActor
 @Observable
@@ -173,6 +175,8 @@ public final class AppModel {
     private let installer: any AppModelInstallerClient
     private let visionInstaller: any AppVisionPackInstallerClient
     private let catalogEntryProvider: (AppModelID) -> AppModelCatalogEntry
+    private var qwenRegistrationURL: URL?
+    private let installationStatusProvider: (URL, AppModelCatalogEntry) -> AppModelInstallationStatus
     private var localQwenInstaller: LocalQwenModelInstallerClient?
     private var pendingLocalQwenInstaller: LocalQwenModelInstallerClient?
     public private(set) var qwenSourceDirectory: URL?
@@ -283,6 +287,9 @@ public final class AppModel {
         attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
         visionRuntimeSupported: Bool = true,
         settingsPersistenceEnabled: Bool = false,
+        installationStatusProvider: @escaping (URL, AppModelCatalogEntry) -> AppModelInstallationStatus = {
+            AppModelInstallationProbe.status(at: $0, entry: $1)
+        },
         catalogEntryProvider: @escaping (AppModelID) -> AppModelCatalogEntry
     ) {
         let settingsDirectory = (modelDirectory ?? AppModelLocation.defaultURL())
@@ -292,10 +299,22 @@ public final class AppModel {
             ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: settingsDirectory)
             : MacAppSettings()
         let selectedModelID = settings.selectedModelID
-        let directory = (modelDirectory
-            ?? catalogEntryProvider(selectedModelID).location.textModelURL)
-            .standardizedFileURL
-        let selectedEntry = catalogEntryProvider(selectedModelID)
+        let savedRegistration = settings.qwenRegistrationPath.map {
+            AppModelLocation.qwenRegistrationResolved(
+                logicalURL: URL(fileURLWithPath: $0, isDirectory: true)).textModelURL
+        }
+        let selectedEntry: AppModelCatalogEntry
+        if selectedModelID == .qwen3_6, let savedRegistration {
+            selectedEntry = AppModelCatalog.entry(
+                for: .qwen3_6,
+                location: AppModelLocation.qwenRegistrationResolved(
+                    logicalURL: savedRegistration))
+        } else {
+            selectedEntry = catalogEntryProvider(selectedModelID)
+        }
+        let directory = (selectedModelID == .qwen3_6 && savedRegistration != nil
+            ? selectedEntry.location.textModelURL
+            : (modelDirectory ?? selectedEntry.location.textModelURL))
         self.selectedModelID = selectedModelID
         self.modelPathText = directory.path
         // The app always releases the image tower after each image. Keeping it
@@ -320,9 +339,7 @@ public final class AppModel {
         self.showPromptExamples = settings.showPromptExamples
         self.loadModelOnLaunch = settings.loadModelOnLaunch
         self.agentModeEnabled = settings.agentModeEnabled
-        self.installationStatus = AppModelInstallationProbe.status(
-            at: directory,
-            entry: selectedEntry)
+        self.installationStatus = installationStatusProvider(directory, selectedEntry)
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(
             at: directory,
             entry: selectedEntry)
@@ -330,12 +347,28 @@ public final class AppModel {
         self.installer = installer
         self.visionInstaller = visionInstaller
         self.catalogEntryProvider = catalogEntryProvider
+        self.qwenRegistrationURL = savedRegistration
+        self.installationStatusProvider = installationStatusProvider
         self.memorySampler = memorySampler
         self.attachmentStore = attachmentStore
         self.isVisionRuntimeSupported = visionRuntimeSupported
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
         self.installETAClock = installETAClock
         self.installETAOrigin = installETAClock.now
+        if let path = settings.qwenSourceRoot {
+            let source = Self.physicalSourceURL(
+                URL(fileURLWithPath: path, isDirectory: true))
+            self.qwenSourceDirectory = source
+            self.qwenSourceIncludesVision = true
+            self.localQwenInstaller = try? LocalQwenModelInstallerClient(
+                entry: catalogEntry(for: .qwen3_6), sourceDirectory: source)
+            if FileManager.default.fileExists(atPath: source.path) {
+                self.qwenSourceConfigurationState = .ready(source)
+            } else {
+                self.qwenSourceConfigurationState = .failed(
+                    "The saved Qwen source folder moved. Restore it at its registered path or select it again to create a new registration.")
+            }
+        }
         // Staged images of runs that were killed before they could clean up;
         // nothing else ever removes them.
         AppImageAttachmentStore.sweepAbandoned()
@@ -346,7 +379,7 @@ public final class AppModel {
     public var isRunning: Bool { runState == .running }
 
     public var modelCatalogEntries: [AppModelCatalogEntry] {
-        AppModelID.allCases.map(catalogEntryProvider).filter {
+        AppModelID.allCases.map(catalogEntry(for:)).filter {
             $0.id == selectedModelID
                 || isModelInstallable($0.id)
                 || installationStatus(for: $0.id) == .complete
@@ -354,7 +387,23 @@ public final class AppModel {
     }
 
     public var selectedModelEntry: AppModelCatalogEntry {
-        catalogEntryProvider(selectedModelID)
+        catalogEntry(for: selectedModelID)
+    }
+
+    private func catalogEntry(for id: AppModelID) -> AppModelCatalogEntry {
+        guard id == .qwen3_6, let qwenRegistrationURL else {
+            return catalogEntryProvider(id)
+        }
+        return AppModelCatalog.entry(
+            for: id,
+            location: AppModelLocation.qwenRegistrationResolved(
+                logicalURL: qwenRegistrationURL))
+    }
+
+    private func resolvedModelURL(_ url: URL) -> URL {
+        selectedModelID == .qwen3_6
+            ? AppModelLocation.qwenRegistrationResolved(logicalURL: url).textModelURL
+            : url.standardizedFileURL
     }
 
     public var isModelSelectionInProgress: Bool {
@@ -371,10 +420,8 @@ public final class AppModel {
     }
 
     public func installationStatus(for modelID: AppModelID) -> AppModelInstallationStatus {
-        let entry = catalogEntryProvider(modelID)
-        return AppModelInstallationProbe.status(
-            at: entry.location.textModelURL,
-            entry: entry)
+        let entry = catalogEntry(for: modelID)
+        return installationStatusProvider(entry.location.textModelURL, entry)
     }
 
     public func isModelSelectable(_ modelID: AppModelID) -> Bool {
@@ -382,7 +429,7 @@ public final class AppModel {
     }
 
     public func isModelInstallable(_ modelID: AppModelID) -> Bool {
-        let entry = catalogEntryProvider(modelID)
+        let entry = catalogEntry(for: modelID)
         return entry.isInstallable
             || (modelID == .qwen3_6 && localQwenInstaller != nil)
     }
@@ -391,19 +438,35 @@ public final class AppModel {
         _ sourceDirectory: URL,
         includesVision: Bool = true
     ) {
-        guard canSelectModel else { return }
-        let sourceDirectory = sourceDirectory.standardizedFileURL
+        guard canSelectModel, !loadState.isReady else { return }
+        let sourceDirectory = Self.physicalSourceURL(sourceDirectory)
         if let existing = localQwenInstaller ?? pendingLocalQwenInstaller,
            existing.hasPartialInstall,
            (existing.sourceDirectory.path != sourceDirectory.path
                 || existing.includesVision != includesVision) {
             error = .modelLoadFailed(
-                "Discard or resume the saved Qwen conversion before choosing a different source folder.")
+                "The saved Qwen registration is busy. Wait for verification before choosing another source folder.")
             return
         }
         do {
+            let current = catalogEntry(for: .qwen3_6).location.textModelURL
+            var currentInfo = stat()
+            if lstat(current.path, &currentInfo) == 0 {
+                let existing = try? OfficialSourceRegistration.inspect(at: current)
+                if existing?.sourceRoot != sourceDirectory.path {
+                    let sibling = current.deletingLastPathComponent()
+                        .appendingPathComponent(
+                            "qwen3.6-35b-a3b-\(UUID().uuidString.lowercased()).gturbo",
+                            isDirectory: true)
+                    qwenRegistrationURL = sibling
+                    if selectedModelID == .qwen3_6 {
+                        modelPathText = sibling.path
+                        installationStatus = .missing
+                    }
+                }
+            }
             let client = try LocalQwenModelInstallerClient(
-                entry: catalogEntryProvider(.qwen3_6),
+                entry: catalogEntry(for: .qwen3_6),
                 sourceDirectory: sourceDirectory,
                 includesVision: includesVision)
             installReadinessGeneration &+= 1
@@ -431,6 +494,7 @@ public final class AppModel {
                     self.localQwenInstaller = client
                     self.pendingLocalQwenInstaller = nil
                     self.qwenSourceConfigurationState = .ready(client.sourceDirectory)
+                    self.persistSettings()
                     self.qwenSourceConfigurationTask = nil
                     if self.selectedModelID == .qwen3_6 {
                         self.installReadiness = requirement.canInstall
@@ -443,7 +507,7 @@ public final class AppModel {
                     guard let self,
                           generation == self.qwenSourceConfigurationGeneration else { return }
                     self.localQwenInstaller = nil
-                    let message = "The Qwen source folder failed verification: \(error)"
+                    let message = "The Qwen source folder is unavailable: \(error)"
                     self.qwenSourceConfigurationState = .failed(message)
                     self.qwenSourceConfigurationTask = nil
                     self.error = .modelLoadFailed(message)
@@ -463,7 +527,7 @@ public final class AppModel {
         guard canSelectModel else { return }
         guard (localQwenInstaller ?? pendingLocalQwenInstaller)?.hasPartialInstall != true else {
             error = .modelLoadFailed(
-                "Discard or resume the saved Qwen conversion before clearing its source folder.")
+                "Wait for Qwen source verification before clearing its folder.")
             return
         }
         qwenSourceConfigurationGeneration &+= 1
@@ -479,10 +543,17 @@ public final class AppModel {
         qwenSourceDirectory = nil
         qwenSourceIncludesVision = false
         qwenSourceConfigurationState = .notConfigured
+        persistSettings()
         if selectedModelID == .qwen3_6 {
             refreshInstallReadiness()
             refreshVisionInstallReadiness()
         }
+    }
+
+    private static func physicalSourceURL(_ url: URL) -> URL {
+        guard let physical = realpath(url.path, nil) else { return url }
+        defer { free(physical) }
+        return URL(fileURLWithPath: String(cString: physical), isDirectory: true)
     }
 
     public var isModelAvailable: Bool { loadState.isReady }
@@ -681,7 +752,7 @@ public final class AppModel {
         case .reservingOutput: return "Reserving storage"
         case .copyingPayload:
             return selectedModelID == .qwen3_6
-                ? "Converting model"
+                ? "Verifying original BF16 source"
                 : "Downloading model"
         case .hashingOutput(let file): return "Verifying \(file)"
         case .finalizing: return "Finalizing installation"
@@ -691,8 +762,8 @@ public final class AppModel {
             }
             return "Verifying image support \(Int(fraction * 100))%"
         case .cancelling: return "Cancelling"
-        case .discarding: return "Discarding download"
-        case .cancelled: return "Download paused"
+        case .discarding: return selectedModelID == .qwen3_6 ? "Clearing registration" : "Discarding download"
+        case .cancelled: return selectedModelID == .qwen3_6 ? "Verification cancelled" : "Download paused"
         case .readyToActivate: return "Ready to activate"
         case .recoverable: return "Saved download needs attention"
         case .installed: return "Model installed"
@@ -817,7 +888,7 @@ public final class AppModel {
     }
 
     public var presentation: AppPresentationState {
-        AppPresentationState.resolve(AppPresentationSnapshot(
+        var presentation = AppPresentationState.resolve(AppPresentationSnapshot(
             requiresInstallation: requiresModelInstallation,
             installState: installState,
             installReadiness: installReadiness,
@@ -831,6 +902,10 @@ public final class AppModel {
             lastStopReason: diagnostics?.stopReason,
             isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress,
             terminalError: hasHandledTerminalEvent ? error : nil))
+        if selectedModelID == .qwen3_6, case .copyingPayload = installState {
+            presentation.label = "Verifying source"
+        }
+        return presentation
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -857,7 +932,8 @@ public final class AppModel {
         AppLoadedRuntimeKey(modelDirectory: URL(fileURLWithPath: modelPathText),
                             maxContextTokens: maxContextTokens,
                             options: runtimeOptions,
-                            forceLogitsHead: currentForceLogitsHead)
+                            forceLogitsHead: currentForceLogitsHead,
+                            preservePhysicalPath: selectedModelID == .qwen3_6)
     }
 
     private var currentForceLogitsHead: Bool {
@@ -870,7 +946,7 @@ public final class AppModel {
     public func selectModel(_ modelID: AppModelID) {
         guard canSelectModel, modelID != selectedModelID else { return }
         guard isModelSelectable(modelID) else {
-            let entry = catalogEntryProvider(modelID)
+            let entry = catalogEntry(for: modelID)
             modelSelectionTransition = .failed(
                 modelID,
                 "\(entry.displayName) is unavailable until a verified model is present.")
@@ -925,7 +1001,7 @@ public final class AppModel {
         endConversationForReleasedKV()
         clearImages()
 
-        let entry = catalogEntryProvider(modelID)
+        let entry = catalogEntry(for: modelID)
         selectedModelID = modelID
         modelPathText = entry.location.textModelURL.path
         applyPersistedSettings(
@@ -939,9 +1015,7 @@ public final class AppModel {
         visionInstallReadiness = .checking
         activeRunRuntimeKey = nil
         loadState = .notLoaded
-        installationStatus = AppModelInstallationProbe.status(
-            at: entry.location.textModelURL,
-            entry: entry)
+        installationStatus = installationStatusProvider(entry.location.textModelURL, entry)
         visionInstallationStatus = AppVisionPackInstallationProbe.status(
             at: entry.location.textModelURL,
             entry: entry)
@@ -965,7 +1039,7 @@ public final class AppModel {
 
     public func setModelURL(_ url: URL) {
         guard canSelectModel else { return }
-        let path = url.standardizedFileURL.path
+        let path = resolvedModelURL(url).path
         guard path != modelPathText else { return }
 
         modelPathText = path
@@ -1001,9 +1075,8 @@ public final class AppModel {
         diagnostics = nil
         error = nil
         phase = .idle
-        installationStatus = AppModelInstallationProbe.status(
-            at: URL(fileURLWithPath: path),
-            entry: selectedModelEntry)
+        installationStatus = installationStatusProvider(
+            URL(fileURLWithPath: path), selectedModelEntry)
         visionInstallationStatus = AppVisionPackInstallationProbe.status(
             at: URL(fileURLWithPath: path),
             entry: selectedModelEntry)
@@ -1351,7 +1424,8 @@ public final class AppModel {
         let runtimeKey = AppLoadedRuntimeKey(modelDirectory: directory,
                                              maxContextTokens: maxContext,
                                              options: runtimeOptions,
-                                             forceLogitsHead: forceLogitsHead)
+                                             forceLogitsHead: forceLogitsHead,
+                                             preservePhysicalPath: selectedModelID == .qwen3_6)
         let entry = selectedModelEntry
         let requiredSelectionID = pendingSelectionLoadID
         // The session is loaded with the same normalized options a run sends.
@@ -1434,9 +1508,8 @@ public final class AppModel {
     ) async {
         guard generation == loadGeneration,
               selectedModelID == entry.id else { return }
-        let installationIsVerified = AppModelInstallationProbe.status(
-            at: runtimeKey.modelDirectory,
-            entry: entry) == .complete
+        let installationIsVerified = installationStatusProvider(
+            runtimeKey.modelDirectory, entry) == .complete
         let readinessMatches = Self.readiness(
             readiness,
             matches: entry,
@@ -1489,6 +1562,15 @@ public final class AppModel {
                     modelID: identity.modelID,
                     revision: identity.sourceRevision,
                     sourceIndexSHA256: identity.sourceIndexSHA256)
+        case .qwenSource(let identity):
+            guard entry.family == .qwen3_6,
+                  identity.kind == .officialSafetensorsBF16V1,
+                  let descriptor = try? OfficialSourceRegistration.inspect(
+                    at: runtimeKey.modelDirectory) else { return false }
+            return descriptor.repository == entry.sourceIdentity.repoID
+                && descriptor.revision == entry.sourceIdentity.revision
+                && descriptor.storageProfile == OfficialQwenSourceIdentity.pinned.storageProfile
+                && descriptor.contentSHA256 == identity.contentDigest
         }
     }
 
@@ -1706,9 +1788,9 @@ public final class AppModel {
         visionInstallCancellationRequested = false
         visionInstallTask?.cancel()
         visionInstaller.cancel()
-        let textModelDirectory = URL(
+        let textModelDirectory = resolvedModelURL(URL(
             fileURLWithPath: modelPathText,
-            isDirectory: true).standardizedFileURL
+            isDirectory: true))
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
         visionInstallState = .checking
@@ -1741,8 +1823,8 @@ public final class AppModel {
 
     public func activateVisionPack() {
         guard canActivateVisionPack else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         visionInstallCancellationRequested = false
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
@@ -1797,8 +1879,8 @@ public final class AppModel {
 
     public func discardVisionPackDownload() {
         guard canDiscardVisionPackDownload else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         visionInstallCancellationRequested = false
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
@@ -1830,8 +1912,8 @@ public final class AppModel {
     public func removeVisionPack() {
         isConfirmingVisionPackRemoval = false
         guard canRemoveVisionPack else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         visionInstallCancellationRequested = false
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
@@ -1853,12 +1935,12 @@ public final class AppModel {
 
     public func refreshInstallReadiness() {
         refreshInstallReadiness(
-            at: URL(fileURLWithPath: modelPathText, isDirectory: true).standardizedFileURL)
+            at: resolvedModelURL(URL(fileURLWithPath: modelPathText, isDirectory: true)))
     }
 
     public func recheckModelAtCurrentLocation() {
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         modelPathText = directory.path
         refreshInstallReadiness(at: directory)
         refreshVisionInstallReadiness(at: directory)
@@ -1869,9 +1951,7 @@ public final class AppModel {
         let readinessGeneration = installReadinessGeneration
         installReadinessTask?.cancel()
         installReadinessTask = nil
-        installationStatus = AppModelInstallationProbe.status(
-            at: outputDirectory,
-            entry: selectedModelEntry)
+        installationStatus = installationStatusProvider(outputDirectory, selectedModelEntry)
         guard !isModelInstalled else { return }
         guard isModelInstallable(selectedModelID) else {
             installReadiness = .failed(
@@ -1920,8 +2000,8 @@ public final class AppModel {
 
     public func refreshVisionInstallReadiness() {
         refreshVisionInstallReadiness(
-            at: URL(fileURLWithPath: modelPathText, isDirectory: true)
-                .standardizedFileURL)
+            at: resolvedModelURL(
+                URL(fileURLWithPath: modelPathText, isDirectory: true)))
     }
 
     private func refreshVisionInstallReadiness(at textModelDirectory: URL) {
@@ -2032,9 +2112,9 @@ public final class AppModel {
             visionInstallTask = nil
         case .installed:
             resetVisionInstallETA()
-            let textModelDirectory = URL(
+            let textModelDirectory = resolvedModelURL(URL(
                 fileURLWithPath: modelPathText,
-                isDirectory: true).standardizedFileURL
+                isDirectory: true))
             visionInstallationStatus = AppVisionPackInstallationProbe.status(
                 at: textModelDirectory,
                 entry: selectedModelEntry)
@@ -2091,9 +2171,9 @@ public final class AppModel {
         resetVisionInstallETA()
         visionInstallTask = nil
         let hasSavedDownload = hasPartialVisionPackDownload
-        let textModelDirectory = URL(
+        let textModelDirectory = resolvedModelURL(URL(
             fileURLWithPath: modelPathText,
-            isDirectory: true).standardizedFileURL
+            isDirectory: true))
         // A download that finished and verifies is activatable whatever went
         // wrong afterwards. Reporting it as "needs attention" hid the Activate
         // button behind a Resume that only repeats work already done. The one
@@ -2132,7 +2212,7 @@ public final class AppModel {
         }
     }
 
-    private func applyInstallEvent(_ event: AppModelInstallEvent, generation: UInt64) {
+    func applyInstallEvent(_ event: AppModelInstallEvent, generation: UInt64) {
         guard generation == installGeneration else { return }
         switch event {
         case .checking:
@@ -2173,10 +2253,8 @@ public final class AppModel {
                 generation: generation)
         case .installed(let directory):
             resetInstallETA()
-            let directory = directory.standardizedFileURL
-            installationStatus = AppModelInstallationProbe.status(
-                at: directory,
-                entry: selectedModelEntry)
+            let directory = resolvedModelURL(directory)
+            installationStatus = installationStatusProvider(directory, selectedModelEntry)
             guard installationStatus == .complete else {
                 finishInstallFailure(
                     RepackError.configurationInvalid(detail: "completed install did not pass metadata validation"),
@@ -2317,6 +2395,8 @@ public final class AppModel {
         settings.loadModelOnLaunch = loadModelOnLaunch
         settings.agentModeEnabled = agentModeEnabled
         settings.selectedModelID = selectedModelID
+        settings.qwenSourceRoot = qwenSourceDirectory?.path
+        settings.qwenRegistrationPath = catalogEntry(for: .qwen3_6).location.textModelURL.path
         settings.setToolThinkingEnabled(
             runtimeOptions.toolThinkingEnabled,
             for: selectedModelID)
@@ -2359,8 +2439,8 @@ public final class AppModel {
             appliedLoadSequence = sequence
         }
         if case .ready(let directory, _) = state,
-           directory.standardizedFileURL.path
-            != URL(fileURLWithPath: modelPathText).standardizedFileURL.path {
+           resolvedModelURL(directory).path
+            != resolvedModelURL(URL(fileURLWithPath: modelPathText)).path {
             return
         }
         loadState = state
@@ -2712,7 +2792,8 @@ public final class AppModel {
             modelDirectory: request.modelDirectory,
             maxContextTokens: request.maxContextTokens,
             options: request.runtimeOptions,
-            forceLogitsHead: !request.isPureGreedy)
+            forceLogitsHead: !request.isPureGreedy,
+            preservePhysicalPath: selectedModelID == .qwen3_6)
         isCancellationPending = false
         agentCancellationIssued = false
         liveTokenCount = 0

@@ -39,6 +39,88 @@ import Testing
         #expect(!configuration.tiedWordEmbeddings)
     }
 
+    @Test func classifiesOfficialSourceMetadataWithoutPayloadRuntime() throws {
+        let rootPath = IndependentOfficialSourceFixture.nonexistentSourceRoot
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("official-source-inspect-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(
+            at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try IndependentOfficialSourceFixture.markerData(sourceRoot: rootPath).write(
+            to: directory.appendingPathComponent(OfficialSourceDescriptor.markerFilename))
+
+        let inspected = try ModelFamilyGenerationSession.inspect(directoryURL: directory)
+        #expect(inspected.family == .qwen3_6)
+        #expect(inspected.verifiedIdentity == nil)
+    }
+
+    @Test func classifiesReceiptBearingOfficialSourceWithoutConstructingRuntime() throws {
+        let fixture = try TinyOfficialSourceIntegrityFixture.make(includeReceipt: true)
+        defer { fixture.remove() }
+        #expect(FileManager.default.fileExists(atPath: fixture.sourceRoot.path))
+        #expect(FileManager.default.fileExists(atPath: fixture.receiptURL.path))
+        #expect(try Data(contentsOf: fixture.firstShardURL) == Data("abc".utf8))
+        #expect(fixture.shardBytes < 4_096)
+        let trustedReceipt = try fixture.verifyTrustedReopen()
+        #expect(trustedReceipt.shardBytes == fixture.shardBytes)
+
+        let admission = try ModelFamilyAdmission.classify(directoryURL: fixture.modelDirectory)
+        guard case let .qwenOfficialSource(descriptor) = admission else {
+            Issue.record("expected receipt-bearing official-source admission")
+            return
+        }
+        #expect(descriptor.sourceRoot == fixture.sourceRoot.path)
+        #expect(descriptor.repository == IndependentOfficialSourceFixture.repository)
+
+        // Both operations are metadata-only; this intentionally constructs no
+        // MetalContext, Model, weight mapping, or payload runtime.
+        let inspected = try ModelFamilyGenerationSession.inspect(
+            directoryURL: fixture.modelDirectory)
+        #expect(inspected.family == .qwen3_6)
+        #expect(inspected.verifiedIdentity == nil)
+    }
+
+    @Test func rejectsSourceOnlyRegistrationFieldsOnPackedManifest() throws {
+        var root = try #require(JSONSerialization.jsonObject(
+            with: Self.officialQwenMetadata()) as? [String: Any])
+        root["kind"] = OfficialSourceDescriptor.descriptorKind
+        root["sourceRoot"] = "/tmp/nonexistent-source-root"
+        root["contentSHA256"] = String(repeating: "a", count: 64)
+        let directory = try Self.writeMetadataDirectory(
+            data: JSONSerialization.data(withJSONObject: root))
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        #expect {
+            _ = try ModelFamilyAdmission.classify(directoryURL: directory)
+        } throws: { error in
+            guard case ModelError.indexCorrupt = error else { return false }
+            return true
+        }
+    }
+
+    @Test func rejectsSourceOnlyRegistrationFieldsOnGemmaV1ManifestWithoutMarker() throws {
+        let (directory, _) = try ManifestReaderTests.writeToyManifest(
+            ["quant": ManifestReaderTests.quant()], config: .gemma4_26B_A4B)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let manifestURL = directory.appendingPathComponent("manifest.json")
+        var root = try #require(JSONSerialization.jsonObject(
+            with: Data(contentsOf: manifestURL)) as? [String: Any])
+        root["kind"] = OfficialSourceDescriptor.descriptorKind
+        root["sourceRoot"] = "/tmp/nonexistent-source-root"
+        root["contentSHA256"] = String(repeating: "a", count: 64)
+        try JSONSerialization.data(withJSONObject: root).write(to: manifestURL)
+        #expect(!FileManager.default.fileExists(
+            atPath: directory.appendingPathComponent(OfficialSourceDescriptor.markerFilename).path))
+
+        #expect {
+            _ = try ModelFamilyAdmission.classify(directoryURL: directory)
+        } throws: { error in
+            guard case ModelError.indexCorrupt = error else { return false }
+            return true
+        }
+    }
+
     @Test func rejectsWrongFamilyIdentityBeforePayloadMapping() throws {
         let data = try Self.officialQwenMetadata()
         var root = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])

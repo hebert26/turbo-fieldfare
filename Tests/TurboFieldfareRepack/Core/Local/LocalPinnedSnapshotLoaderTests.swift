@@ -711,6 +711,25 @@ import Testing
     }
   }
 
+  @Test func duplicateAndEscapedEquivalentIndexKeysAreRejected() throws {
+    let duplicateIndexes = [
+      #"{"metadata":{"format":"pt"},"weight_map":{"a.weight":"model-00001-of-00002.safetensors","a.weight":"model-00001-of-00002.safetensors"}}"#,
+      #"{"weight_map":{"a.weight":"model-00001-of-00002.safetensors"},"weight\u005fmap":{"a.weight":"model-00001-of-00002.safetensors"}}"#,
+    ]
+
+    for (index, raw) in duplicateIndexes.enumerated() {
+      let container = try Self.buildTiny(
+        tag: "duplicate-index-\(index)", indexOverride: Data(raw.utf8))
+      defer { try? FileManager.default.removeItem(atPath: container.parent) }
+      let error = try #require(Self.rejection(container.directory, container.identity))
+      guard case .indexJsonInvalid(let path, _) = error else {
+        Issue.record("unexpected error for duplicate index \(index): \(error)")
+        continue
+      }
+      #expect(path == container.path(Self.indexFilename))
+    }
+  }
+
   @Test func emptyWeightMapIsRejected() throws {
     let container = try Self.buildTiny(
       tag: "empty-index", indexOverride: try Self.indexBytes(weightMap: [:]))

@@ -1,0 +1,54 @@
+{
+  "command": [
+    "bash",
+    "Scripts/build-libjpeg-turbo.sh"
+  ],
+  "exitCode": 0,
+  "elapsedSeconds": 36.12249398231506,
+  "completedUTC": "2026-09-30T11:24:17.717221+00:00",
+  "clang": "Apple clang version 21.0.0 (clang-2100.1.1.101)\nTarget: arm64-apple-darwin25.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin\n",
+  "libraries": [
+    {
+      "BinaryPath": "libjpeg-ios-simulator.a",
+      "HeadersPath": "Headers",
+      "LibraryIdentifier": "ios-arm64_x86_64-simulator",
+      "LibraryPath": "libjpeg-ios-simulator.a",
+      "SupportedArchitectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "SupportedPlatform": "ios",
+      "SupportedPlatformVariant": "simulator"
+    },
+    {
+      "BinaryPath": "libjpeg.a",
+      "HeadersPath": "Headers",
+      "LibraryIdentifier": "ios-arm64",
+      "LibraryPath": "libjpeg.a",
+      "SupportedArchitectures": [
+        "arm64"
+      ],
+      "SupportedPlatform": "ios"
+    },
+    {
+      "BinaryPath": "libjpeg-macos.a",
+      "HeadersPath": "Headers",
+      "LibraryIdentifier": "macos-arm64_x86_64",
+      "LibraryPath": "libjpeg-macos.a",
+      "SupportedArchitectures": [
+        "arm64",
+        "x86_64"
+      ],
+      "SupportedPlatform": "macos"
+    }
+  ],
+  "checksumsVerified": 22,
+  "ignoredFiles": [],
+  "settings": {
+    "WITH_SIMD": false,
+    "ENABLE_SHARED": false,
+    "ENABLE_STATIC": true,
+    "build": "20240124",
+    "libjpegVersion": "3.0.2"
+  }
+}

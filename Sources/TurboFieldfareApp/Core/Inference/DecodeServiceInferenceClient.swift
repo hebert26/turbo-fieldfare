@@ -719,17 +719,25 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         let loadID: UUID
         let family: DecodeModelFamily
         let modelIdentity: DecodeModelIdentity?
+        let sourceIdentity: DecodeSourceIdentity?
         let toolThinkingEnabled: Bool?
 
         var readiness: AppLoadedModelReadiness? {
             switch family {
             case .gemma4:
-                guard let toolThinkingEnabled, modelIdentity == nil else { return nil }
+                guard let toolThinkingEnabled, modelIdentity == nil,
+                      sourceIdentity == nil else { return nil }
                 return .gemma(toolThinkingEnabled: toolThinkingEnabled)
             case .qwen3_6:
-                guard let modelIdentity, modelIdentity.family == .qwen3_6,
-                      toolThinkingEnabled == nil else { return nil }
-                return .qwen(identity: modelIdentity)
+                guard toolThinkingEnabled == nil else { return nil }
+                if let modelIdentity, sourceIdentity == nil,
+                   modelIdentity.family == .qwen3_6 {
+                    return .qwen(identity: modelIdentity)
+                }
+                if let sourceIdentity, modelIdentity == nil {
+                    return .qwenSource(identity: sourceIdentity)
+                }
+                return nil
             }
         }
     }
@@ -2101,7 +2109,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             switch event.kind {
             case .loadCancelled:
                 guard event.loadedFamily == nil, event.loadID == nil,
-                      event.modelIdentity == nil, event.conversationEpoch == nil else {
+                      event.modelIdentity == nil, event.sourceIdentity == nil,
+                      event.conversationEpoch == nil else {
                     invalidateConnection(
                         admittedBy: attempt, responses: handles.responses,
                         error: AppInferenceError.modelLoadFailed(
@@ -2114,7 +2123,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                 throw CancellationError()
             case .failed:
                 guard event.loadedFamily == nil, event.loadID == nil,
-                      event.modelIdentity == nil, event.conversationEpoch == nil else {
+                      event.modelIdentity == nil, event.sourceIdentity == nil,
+                      event.conversationEpoch == nil else {
                     invalidateConnection(
                         admittedBy: attempt, responses: handles.responses,
                         error: AppInferenceError.modelLoadFailed(
@@ -2188,7 +2198,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                    terminal.loadAttemptID == attemptID,
                    terminal.kind == .loadCancelled || terminal.kind == .failed,
                    terminal.loadedFamily == nil, terminal.loadID == nil,
-                   terminal.modelIdentity == nil, terminal.conversationEpoch == nil {
+                   terminal.modelIdentity == nil, terminal.sourceIdentity == nil,
+                   terminal.conversationEpoch == nil {
                     handles.lifetime?.noteProtocolCleanup()
                     finishLoading(attempt)
                 } else if isCurrent(attempt, responses: handles.responses) {
@@ -2561,6 +2572,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                             kind: .measurement, generationID: generationID,
                             loadedFamily: binding.family, loadID: binding.loadID,
                             modelIdentity: binding.modelIdentity,
+                            sourceIdentity: binding.sourceIdentity,
                             conversationEpoch: request.conversationEpoch)
                         status.measurementCaptureID = capture.stepID
                         status.measurementBatchJSON = "{\"receiver_admission_refused\":1}"
@@ -3163,6 +3175,7 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                   acknowledgement.loadedFamily == nil,
                   acknowledgement.loadID == nil,
                   acknowledgement.modelIdentity == nil,
+                  acknowledgement.sourceIdentity == nil,
                   acknowledgement.conversationEpoch == nil,
                   lifetime.isAuthoritativeIdle else {
                 throw AppInferenceError.modelLoadFailed(
@@ -3239,20 +3252,21 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             throw AppInferenceError.modelLoadFailed(
                 "decode service readiness omitted its loaded family or incarnation")
         }
+        try event.validateBackingIdentity()
         let binding = LoadedBinding(
             loadID: loadID, family: family, modelIdentity: event.modelIdentity,
+            sourceIdentity: event.sourceIdentity,
             toolThinkingEnabled: event.toolThinkingEnabled)
         switch family {
         case .gemma4:
-            guard event.modelIdentity == nil,
+            guard event.modelIdentity == nil, event.sourceIdentity == nil,
                   event.toolThinkingEnabled == requestedToolThinking else {
                 throw AppInferenceError.modelLoadFailed(
                     "Gemma readiness identity or thinking mode was inconsistent")
             }
         case .qwen3_6:
-            guard let identity = event.modelIdentity,
-                  identity.family == .qwen3_6,
-                  event.toolThinkingEnabled == nil else {
+            guard event.toolThinkingEnabled == nil,
+                  binding.readiness != nil else {
                 throw AppInferenceError.modelLoadFailed(
                     "Qwen readiness omitted or mismatched its verified identity")
             }
@@ -3265,9 +3279,26 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         binding: LoadedBinding,
         expectedEpoch: UUID?
     ) -> Bool {
-        event.loadedFamily == binding.family
-            && event.loadID == binding.loadID
-            && event.modelIdentity == binding.modelIdentity
+        matches(event, family: binding.family, loadID: binding.loadID,
+                modelIdentity: binding.modelIdentity,
+                sourceIdentity: binding.sourceIdentity,
+                expectedEpoch: expectedEpoch)
+    }
+
+    /// The receiver uses this exact identity comparison for every bound frame.
+    /// Kept internal so tests can check stale source frames without a process.
+    static func matches(
+        _ event: DecodeServiceEvent,
+        family: DecodeModelFamily,
+        loadID: UUID,
+        modelIdentity: DecodeModelIdentity?,
+        sourceIdentity: DecodeSourceIdentity?,
+        expectedEpoch: UUID?
+    ) -> Bool {
+        event.loadedFamily == family
+            && event.loadID == loadID
+            && event.modelIdentity == modelIdentity
+            && event.sourceIdentity == sourceIdentity
             && event.conversationEpoch == expectedEpoch
     }
 

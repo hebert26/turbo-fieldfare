@@ -1,6 +1,7 @@
 import Foundation
 import Metal
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
@@ -140,6 +141,56 @@ public struct QwenArchConfig: Sendable, Equatable {
     public let visionStartTokenID: Int
     public let visionEndTokenID: Int
 
+    /// Source sidecar geometry, without synthesizing a packed v2 wire value.
+    /// Physical authentication and descriptor binding belong to the caller.
+    init(officialConfigJSON data: Data) throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let source = try decoder.decode(OfficialQwenConfig.self, from: data)
+        let text = source.textConfig
+        guard source.modelType == "qwen3_5_moe",
+              text.modelType.hasPrefix("qwen3_5_moe"),
+              text.dtype == "bfloat16", text.mambaSsmDtype == "float32",
+              text.numHiddenLayers > 0,
+              text.layerTypes.count == text.numHiddenLayers,
+              text.layerTypes.allSatisfy({ $0 == "linear_attention" || $0 == "full_attention" }),
+              !text.tieWordEmbeddings, text.hiddenAct == "silu",
+              text.attnOutputGate, text.ropeParameters.ropeTheta.isFinite,
+              text.ropeParameters.ropeTheta > 0,
+              text.rmsNormEps == 1e-6 else {
+            throw ModelError.indexCorrupt(detail: "invalid official Qwen source configuration")
+        }
+        hiddenSize = text.hiddenSize
+        numLayers = text.numHiddenLayers
+        fullAttentionLayerMask = text.layerTypes.map { $0 == "full_attention" ? 1 : 0 }
+        numAttentionHeads = text.numAttentionHeads
+        numKeyValueHeads = text.numKeyValueHeads
+        headDimension = text.headDim
+        attentionOutputGate = text.attnOutputGate
+        linearConvolutionKernel = text.linearConvKernelDim
+        linearKeyHeads = text.linearNumKeyHeads
+        linearKeyHeadDimension = text.linearKeyHeadDim
+        linearValueHeads = text.linearNumValueHeads
+        linearValueHeadDimension = text.linearValueHeadDim
+        recurrentStateIsFP32 = true
+        partialRotaryFactor = text.partialRotaryFactor
+        ropeTheta = text.ropeParameters.ropeTheta
+        mropeSections = text.ropeParameters.mropeSection
+        numberOfExperts = text.numExperts
+        expertsPerToken = text.numExpertsPerTok
+        routedExpertIntermediateSize = text.moeIntermediateSize
+        sharedExpertIntermediateSize = text.sharedExpertIntermediateSize
+        vocabularySize = text.vocabSize
+        tiedWordEmbeddings = text.tieWordEmbeddings
+        hiddenActivation = text.hiddenAct
+        bosTokenID = text.bosTokenId
+        eosTokenID = text.eosTokenId
+        imageTokenID = source.imageTokenId
+        videoTokenID = source.videoTokenId
+        visionStartTokenID = source.visionStartTokenId
+        visionEndTokenID = source.visionEndTokenId
+    }
+
     init(wire: GTurboQwenArchitectureV2) {
         hiddenSize = wire.hiddenSize
         numLayers = wire.numLayers
@@ -173,6 +224,48 @@ public struct QwenArchConfig: Sendable, Equatable {
     }
 }
 
+private struct OfficialQwenConfig: Decodable {
+    struct Rope: Decodable {
+        let ropeTheta: Double
+        let mropeSection: [Int]
+    }
+    struct Text: Decodable {
+        let modelType: String
+        let dtype: String
+        let mambaSsmDtype: String
+        let hiddenSize: Int
+        let numHiddenLayers: Int
+        let layerTypes: [String]
+        let numAttentionHeads: Int
+        let numKeyValueHeads: Int
+        let headDim: Int
+        let attnOutputGate: Bool
+        let linearConvKernelDim: Int
+        let linearNumKeyHeads: Int
+        let linearKeyHeadDim: Int
+        let linearNumValueHeads: Int
+        let linearValueHeadDim: Int
+        let partialRotaryFactor: Double
+        let ropeParameters: Rope
+        let numExperts: Int
+        let numExpertsPerTok: Int
+        let moeIntermediateSize: Int
+        let sharedExpertIntermediateSize: Int
+        let vocabSize: Int
+        let tieWordEmbeddings: Bool
+        let hiddenAct: String
+        let rmsNormEps: Double
+        let bosTokenId: Int
+        let eosTokenId: Int
+    }
+    let modelType: String
+    let textConfig: Text
+    let imageTokenId: Int
+    let videoTokenId: Int
+    let visionStartTokenId: Int
+    let visionEndTokenId: Int
+}
+
 public enum LoadedModelArchitecture: Sendable, Equatable {
     case gemma4(ArchConfig)
     case qwen3_6(QwenArchConfig)
@@ -193,6 +286,18 @@ public struct LoadedTensorRegion: Sendable, Equatable {
     public let shape: [UInt64]
     public let storage: LoadedTensorStorage
     public let quantizationCategory: String?
+
+    /// An observed BF16 source header region. An actual protected handle
+    /// issued the token; this initializer cannot invent a shard or offset.
+    init(admittedSourceTensor token: OfficialSourceHandle.TensorRange) {
+        name = token.admittedTensorName
+        file = token.admittedShardName
+        offset = token.admittedAbsoluteOffset
+        size = token.admittedByteCount
+        shape = token.shape
+        storage = .bf16
+        quantizationCategory = nil
+    }
 
     init(wire: GTurboTensorRegionV2) {
         name = wire.name
@@ -251,6 +356,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case indexCorrupt(detail: String)
     case posixFailed(call: String, errno: Int32)
     case trustedReceiptInvalid(detail: String)
+    case sourceBackingUnsupported
 
     public var description: String {
         switch self {
@@ -282,6 +388,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "\(c) failed with errno \(e)"
         case .trustedReceiptInvalid(let detail):
             return "trusted install receipt invalid: \(detail)"
+        case .sourceBackingUnsupported:
+            return "official BF16 source is admitted as metadata only; loading is not supported yet"
         }
     }
 }

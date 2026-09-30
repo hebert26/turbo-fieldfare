@@ -2,6 +2,7 @@ import CryptoKit
 import Foundation
 import Synchronization
 import TurboFieldfare
+import TurboFieldfareOfficialQwenSource
 
 public enum ServerInferenceEvent: Equatable, Sendable {
     case content(String)
@@ -374,6 +375,7 @@ public struct ServerModelIdentity: Sendable, Equatable {
     public let family: LoadedRuntimeFamily
     public let sourceRevision: String?
     public let verifiedIdentity: LoadedRuntimeIdentity?
+    public let sourceIdentity: LoadedRuntimeSourceIdentity?
 
     public static func resolve(
         admission: ModelFamilyGenerationAdmission,
@@ -383,7 +385,8 @@ public struct ServerModelIdentity: Sendable, Equatable {
         case .gemma4:
             return ServerModelIdentity(
                 apiModelID: assertedModelID ?? ServerArguments.legacyDefaultModelID,
-                family: .gemma4, sourceRevision: nil, verifiedIdentity: nil)
+                family: .gemma4, sourceRevision: nil, verifiedIdentity: nil,
+                sourceIdentity: nil)
         case .qwen3_6:
             guard let verified = admission.verifiedIdentity else {
                 throw ServerArgumentError.invalid(
@@ -397,8 +400,26 @@ public struct ServerModelIdentity: Sendable, Equatable {
                 apiModelID: verified.modelID,
                 family: .qwen3_6,
                 sourceRevision: verified.sourceRevision,
-                verifiedIdentity: verified)
+                verifiedIdentity: verified,
+                sourceIdentity: nil)
         }
+    }
+
+    /// A marker-only admission cannot enter this route. The caller must first
+    /// load a source session with its retained trust receipt.
+    public static func resolveSource(
+        loadedIdentity: LoadedRuntimeSourceIdentity,
+        assertedModelID: String?
+    ) throws -> ServerModelIdentity {
+        let pinned = OfficialQwenSourceIdentity.pinned
+        if let assertedModelID, assertedModelID != pinned.repository {
+            throw ServerArgumentError.invalid(
+                "--model-id does not match the official BF16 source model ID")
+        }
+        return ServerModelIdentity(
+            apiModelID: pinned.repository, family: .qwen3_6,
+            sourceRevision: pinned.revision, verifiedIdentity: nil,
+            sourceIdentity: loadedIdentity)
     }
 }
 
@@ -464,21 +485,33 @@ public enum ServerModelLoader {
                 maxContext: maxContext,
                 runtimeConfiguration: runtimeConfiguration,
                 visionPackURL: visionPackURL)
-            guard session.family == .qwen3_6,
-                  let loadedIdentity = session.verifiedIdentity else {
+            guard session.family == .qwen3_6 else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+            if let loadedSource = session.sourceIdentity {
+                guard session.verifiedIdentity == nil else {
+                    throw ModelFamilyGenerationError.modelIdentityChanged
+                }
+                let capability = try await session.inspectLoadedSourceVisionCompanion()
+                return try finishLoadedSource(
+                    identity: loadedSource, assertedModelID: assertedModelID,
+                    visionCapability: capability,
+                    driver: RealServerQwenGenerationDriver(
+                        session: session, modelDirectory: modelDirectory,
+                        maxContext: maxContext, visionPackURL: visionPackURL),
+                    visionResidencyPolicy: visionResidencyPolicy)
+            }
+            guard let loadedIdentity = session.verifiedIdentity else {
                 throw ModelFamilyGenerationError.modelIdentityChanged
             }
             let loadedAdmission = ModelFamilyGenerationAdmission(
                 family: session.family, verifiedIdentity: loadedIdentity)
             let identity = try ServerModelIdentity.resolve(
-                admission: loadedAdmission,
-                assertedModelID: assertedModelID)
+                admission: loadedAdmission, assertedModelID: assertedModelID)
             let capability = try ModelFamilyGenerationSession
                 .inspectQwenVisionCompanion(
-                    directoryURL: modelDirectory,
-                    loadedIdentity: loadedIdentity,
-                    visionPackURL: visionPackURL)
-                .rawValue
+                    directoryURL: modelDirectory, loadedIdentity: loadedIdentity,
+                    visionPackURL: visionPackURL).rawValue
             let driver = RealServerQwenGenerationDriver(
                 session: session,
                 modelDirectory: modelDirectory,
@@ -491,6 +524,25 @@ public enum ServerModelLoader {
                 backend: backend, identity: identity,
                 visionCapability: capability)
         }
+    }
+
+    /// Shared production composition after source load and companion check.
+    /// The internal test route supplies a synthetic verifier receipt and a
+    /// separate tiny driver; neither can enter the public loader as weights.
+    static func finishLoadedSource(
+        identity: LoadedRuntimeSourceIdentity,
+        assertedModelID: String?,
+        visionCapability: ModelFamilyVisionCompanionStatus,
+        driver: any ServerQwenGenerationDriver,
+        visionResidencyPolicy: VisionResidencyPolicy
+    ) throws -> LoadedServerModel {
+        let served = try ServerModelIdentity.resolveSource(
+            loadedIdentity: identity, assertedModelID: assertedModelID)
+        let backend = ServerQwenModelSession(
+            driver: driver, visionResidencyPolicy: visionResidencyPolicy)
+        return LoadedServerModel(
+            backend: backend, identity: served,
+            visionCapability: visionCapability.rawValue)
     }
 }
 
@@ -515,13 +567,20 @@ private struct RealServerQwenGenerationDriver: ServerQwenGenerationDriver {
         _ request: ModelFamilyGenerationRequest
     ) async throws -> ModelFamilyGenerationPreflight {
         try Task.checkCancellation()
-        let result = try ModelFamilyGenerationSession.preflightQwen(
-            directoryURL: modelDirectory,
-            prompt: request.prompt,
-            imagesByID: request.imagesByID,
-            visionPackURL: visionPackURL,
-            visionResidency: request.visionResidency,
-            maxContext: maxContext)
+        let result: ModelFamilyGenerationPreflight
+        if session.sourceIdentity != nil {
+            result = try await session.preflightLoadedSource(
+                prompt: request.prompt, imagesByID: request.imagesByID,
+                visionResidency: request.visionResidency)
+        } else {
+            result = try ModelFamilyGenerationSession.preflightQwen(
+                directoryURL: modelDirectory,
+                prompt: request.prompt,
+                imagesByID: request.imagesByID,
+                visionPackURL: visionPackURL,
+                visionResidency: request.visionResidency,
+                maxContext: maxContext)
+        }
         try Task.checkCancellation()
         return result
     }
@@ -623,6 +682,11 @@ public actor ServerQwenModelSession: ServerInferenceBackend {
         if error is CancellationError { return error }
         if let value = error as? ServerRequestError { return value }
         if let value = error as? ModelFamilyGenerationError {
+            if value == .sourceVisionUnavailable || value == .verifiedVisionUnavailable {
+                return ServerRequestError.invalid(
+                    message: value.description,
+                    param: "messages", code: "vision_unavailable")
+            }
             return ServerRequestError.invalid(
                 message: value.description,
                 param: "messages", code: "invalid_request")

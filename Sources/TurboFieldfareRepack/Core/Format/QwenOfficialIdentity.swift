@@ -1,4 +1,5 @@
 import Foundation
+import TurboFieldfareOfficialQwenSource
 
 /// Metadata that must match the pinned official Qwen 3.6 source before it can
 /// be accepted by a later repack planning phase. This type deliberately holds
@@ -57,16 +58,26 @@ enum QwenOfficialValidationError: Error, Sendable, Equatable {
 /// Validates the immutable source identity for Qwen/Qwen3.6-35B-A3B.
 enum QwenOfficialIdentity {
     static func validate(_ metadata: QwenOfficialSourceMetadata) throws {
-        guard metadata.repository == "Qwen/Qwen3.6-35B-A3B" else {
-            throw QwenOfficialValidationError.invalidRepository
-        }
-        guard metadata.revision == "995ad96eacd98c81ed38be0c5b274b04031597b0",
-              metadata.revision.count == 40,
-              metadata.revision.allSatisfy({ $0.isASCII && ($0.isNumber || ("a"..."f").contains($0)) }) else {
-            throw QwenOfficialValidationError.invalidRevision
-        }
-        guard metadata.sidecarSHA256 == expectedSidecarSHA256 else {
-            throw QwenOfficialValidationError.invalidSidecarDigests
+        // Preserve the RepackCore metadata shape and error cases while sharing
+        // its repository/revision/sidecar pins with the BF16 source contract.
+        let pinned = OfficialQwenSourceIdentity.pinned
+        let source = OfficialQwenSourceIdentity(
+            repository: metadata.repository,
+            revision: metadata.revision,
+            storageProfile: pinned.storageProfile,
+            sidecarSHA256: metadata.sidecarSHA256,
+            shards: pinned.shards)
+        do {
+            try OfficialQwenIdentity.validate(source)
+        } catch let error as OfficialQwenIdentityError {
+            switch error {
+            case .invalidRepository: throw QwenOfficialValidationError.invalidRepository
+            case .invalidRevision: throw QwenOfficialValidationError.invalidRevision
+            case .invalidSidecarDigests: throw QwenOfficialValidationError.invalidSidecarDigests
+            // These fields are supplied by the pinned value above, never by a RepackCore caller.
+            case .invalidStorageProfile, .invalidShards:
+                throw QwenOfficialValidationError.invalidSidecarDigests
+            }
         }
 
         let configuration = metadata.configuration
@@ -106,13 +117,4 @@ enum QwenOfficialIdentity {
             ? "full_attention" : "linear_attention"
     }
 
-    private static let expectedSidecarSHA256 = [
-        "config.json": "93a4693fa9d8392fbfccd4b3c9873f4bfdcb14fdede978b123d07d19675efe99",
-        "configuration.json": "c1b09db419119513247e9b8b912c4b9897106c9b20c6cada7e107d993c5435eb",
-        "generation_config.json": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
-        "model.safetensors.index.json": "41b9356101ebf8e7519e150dc811f80c4226e727301fbb032b890f006ed0be83",
-        "preprocessor_config.json": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
-        "tokenizer.json": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42",
-        "tokenizer_config.json": "5186f0defcd7f232382c7f0aebcd2252d073bb921ab240e407b7ae8745d2b29b"
-    ]
 }
