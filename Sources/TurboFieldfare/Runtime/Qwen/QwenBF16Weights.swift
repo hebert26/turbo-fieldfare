@@ -412,54 +412,72 @@ final class QwenBF16Weights: @unchecked Sendable {
         commandBuffer.addCompletedHandler { _ in _ = lease.buffers.count }
         // Callers own submission and keep input/output immutable until completion.
         // No waitUntilCompleted or early buffer reuse.
-        let headEncoder: MTLComputeCommandEncoder?
         if tensor.spec.role == .head, chunks.count > 1 {
-            // Each chunk writes its own complete output rows. Input and all
-            // weight chunks are read-only, so these dispatches have no mutual
-            // dependencies. The dot kernel and its reduction order stay fixed.
-            guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) else {
+            try encodeConcurrentHead(commandBuffer: commandBuffer, tensor: tensor,
+                chunks: chunks, pipeline: pipeline, input: input,
+                tokenCount: tokenCount, output: output, parallelStreams: parallelStreams)
+            return
+        }
+        for chunk in chunks {
+            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
                 throw QwenBF16WeightError.commandBufferUnavailable
             }
-            headEncoder = encoder
-        } else { headEncoder = nil }
-        defer { headEncoder?.endEncoding() }
+            encodeChunk(encoder, tensor: tensor, chunk: chunk, pipeline: pipeline,
+                input: input, tokenCount: tokenCount, output: output, parallelStreams: parallelStreams)
+            encoder.endEncoding()
+        }
+    }
+
+    // Keep this small ownership boundary out of encodeProjection's pipeline
+    // selection. Swift 6.3 CopyPropagation crashed after inlining the former
+    // optional-encoder/defer merge. This helper itself remains optimized.
+    @inline(never)
+    private func encodeConcurrentHead(commandBuffer: MTLCommandBuffer, tensor: Tensor,
+                                      chunks: [Chunk], pipeline: MTLComputePipelineState,
+                                      input: MTLBuffer, tokenCount: Int,
+                                      output: MTLBuffer, parallelStreams: Bool) throws {
+        // Each complete chunk writes disjoint output rows and only reads its
+        // immutable weights/input. No cross-chunk reduction or dependency.
+        guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) else {
+            throw QwenBF16WeightError.commandBufferUnavailable
+        }
+        defer { encoder.endEncoding() }
         for chunk in chunks {
-            let encoder: MTLComputeCommandEncoder
-            if let headEncoder { encoder = headEncoder }
-            else {
-                guard let separate = commandBuffer.makeComputeCommandEncoder() else {
-                    throw QwenBF16WeightError.commandBufferUnavailable
-                }
-                encoder = separate
-            }
-            var params = Parameters(rows: UInt32(tensor.spec.rows),
-                                    columns: UInt32(tensor.spec.columns),
-                                    firstRow: UInt32(chunk.firstRow),
-                                    rowsInChunk: UInt32(chunk.rowCount),
-                                    tokenCount: UInt32(tokenCount))
-            encoder.setComputePipelineState(pipeline)
-            encoder.setBytes(&params, length: MemoryLayout<Parameters>.stride,
-                             index: QwenMetalBufferIndex.parameters.rawValue)
-            encoder.setBuffer(input, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
-            encoder.setBuffer(chunk.buffer, offset: 0,
-                              index: QwenMetalBufferIndex.weights.rawValue)
-            encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
-            encoder.useResource(chunk.buffer, usage: .read)
-            if parallelStreams {
-                // Full groups are required for all 64 partials and all barriers.
-                // Grid.x remains rows, so no rows*64 index multiplication occurs.
-                encoder.dispatchThreadgroups(
-                    MTLSize(width: chunk.rowCount, height: tokenCount, depth: 1),
-                    threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
-            } else {
-                let width = tensor.spec.role == .embedding ? tensor.spec.columns : chunk.rowCount
-                let groupWidth = min(width, pipeline.threadExecutionWidth,
-                                     pipeline.maxTotalThreadsPerThreadgroup)
-                encoder.dispatchThreads(MTLSize(width: width, height: tokenCount, depth: 1),
-                                        threadsPerThreadgroup: MTLSize(width: groupWidth, height: 1,
-                                                                       depth: 1))
-            }
-            if headEncoder == nil { encoder.endEncoding() }
+            encodeChunk(encoder, tensor: tensor, chunk: chunk, pipeline: pipeline,
+                input: input, tokenCount: tokenCount, output: output, parallelStreams: parallelStreams)
+        }
+    }
+
+    private func encodeChunk(_ encoder: MTLComputeCommandEncoder,
+                             tensor: Tensor, chunk: Chunk, pipeline: MTLComputePipelineState,
+                             input: MTLBuffer, tokenCount: Int,
+                             output: MTLBuffer, parallelStreams: Bool) {
+        var params = Parameters(rows: UInt32(tensor.spec.rows),
+                                columns: UInt32(tensor.spec.columns),
+                                firstRow: UInt32(chunk.firstRow),
+                                rowsInChunk: UInt32(chunk.rowCount),
+                                tokenCount: UInt32(tokenCount))
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBytes(&params, length: MemoryLayout<Parameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        encoder.setBuffer(input, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+        encoder.setBuffer(chunk.buffer, offset: 0,
+                          index: QwenMetalBufferIndex.weights.rawValue)
+        encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        encoder.useResource(chunk.buffer, usage: .read)
+        if parallelStreams {
+            // Full groups are required for all 64 partials and all barriers.
+            // Grid.x remains rows, so no rows*64 index multiplication occurs.
+            encoder.dispatchThreadgroups(
+                MTLSize(width: chunk.rowCount, height: tokenCount, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 64, height: 1, depth: 1))
+        } else {
+            let width = tensor.spec.role == .embedding ? tensor.spec.columns : chunk.rowCount
+            let groupWidth = min(width, pipeline.threadExecutionWidth,
+                                 pipeline.maxTotalThreadsPerThreadgroup)
+            encoder.dispatchThreads(MTLSize(width: width, height: tokenCount, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: groupWidth, height: 1,
+                                                                   depth: 1))
         }
     }
 }
