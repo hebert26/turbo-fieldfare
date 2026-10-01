@@ -528,7 +528,7 @@ final class QwenBF16PairedExpertCache: @unchecked Sendable {
         }
     }
 
-    private static let maximumConcurrentMissPairs = 4
+    private static let maximumConcurrentMissPairs = 8
 
     let slotCount: Int
     let expertCount: Int

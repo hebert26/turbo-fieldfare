@@ -641,7 +641,7 @@ package final class OfficialSourceHandle {
     private func validateRetainedFile(_ fd: Int32, shardName: String,
                                       identity: FileIdentity) throws {
         try validateBinding()
-        guard try Self.entryNames(sourceFD, path: sourcePath).contains(shardName) else {
+        guard try Self.containsEntryName(sourceFD, path: sourcePath, name: shardName) else {
             throw OfficialSourceHandleError.replaced("source shard name changed: \(shardName)")
         }
         let held = try Self.fileIdentity(fd, path: shardName)
@@ -779,13 +779,33 @@ package final class OfficialSourceHandle {
     }
 
     private static func checkLayout(_ fd: Int32, path: String) throws {
-        let names = try entryNames(fd, path: path)
-        guard names.contains(OfficialSourceDescriptor.markerFilename),
-              names.isSubset(of: [OfficialSourceDescriptor.markerFilename,
-                                  OfficialSourceTrust.receiptFilename]) else {
+        let markerName = OfficialSourceDescriptor.markerFilename
+        let receiptName = OfficialSourceTrust.receiptFilename
+        var hasMarker = false
+        var hasReceipt = false
+        var hasUnexpectedEntry = false
+        // Both permitted names are ASCII. Non-ASCII/malformed entries retain
+        // the original repaired UTF-8 String comparisons below.
+        try scanDirectoryEntries(fd, path: path) { bytes in
+            if bytes.allSatisfy({ $0 < 0x80 }) {
+                if isDotEntry(bytes) { return }
+                if bytes.elementsEqual(markerName.utf8) { hasMarker = true }
+                else if bytes.elementsEqual(receiptName.utf8) { hasReceipt = true }
+                else { hasUnexpectedEntry = true }
+            } else {
+                let name = String(decoding: bytes, as: UTF8.self)
+                if name == "." || name == ".." { return }
+                if name == markerName { hasMarker = true }
+                else if name == receiptName { hasReceipt = true }
+                else { hasUnexpectedEntry = true }
+            }
+        }
+        // The complete scan, errno and final identity checks run even after
+        // an unexpected entry. Their original error priority is preserved.
+        guard hasMarker, !hasUnexpectedEntry else {
             throw OfficialSourceHandleError.replaced("registration layout changed")
         }
-        if names.contains(OfficialSourceTrust.receiptFilename) {
+        if hasReceipt {
             let name = OfficialSourceTrust.receiptFilename
             var info = stat()
             guard fstatat(fd, name, &info, AT_SYMLINK_NOFOLLOW) == 0 else {
@@ -799,6 +819,46 @@ package final class OfficialSourceHandle {
     }
 
     private static func entryNames(_ fd: Int32, path: String) throws -> Set<String> {
+        var names = Set<String>()
+        try scanDirectoryEntries(fd, path: path) { bytes in
+            let name = String(decoding: bytes, as: UTF8.self)
+            if name != "." && name != ".." { names.insert(name) }
+        }
+        return names
+    }
+
+    /// Complete membership scan without a Set or decoded ASCII entry Strings.
+    /// Non-ASCII expected names use the original general String/Set behavior.
+    private static func containsEntryName(_ fd: Int32, path: String,
+                                          name: String) throws -> Bool {
+        guard name.utf8.allSatisfy({ $0 < 0x80 }) else {
+            return try entryNames(fd, path: path).contains(name)
+        }
+        var found = false
+        try scanDirectoryEntries(fd, path: path) { bytes in
+            if bytes.allSatisfy({ $0 < 0x80 }) {
+                if !isDotEntry(bytes), bytes.elementsEqual(name.utf8) { found = true }
+            } else {
+                // Swift String equality includes canonical Unicode equivalence.
+                // Preserve it, including the original malformed UTF-8 repair.
+                let decoded = String(decoding: bytes, as: UTF8.self)
+                if decoded != ".", decoded != "..", decoded == name { found = true }
+            }
+        }
+        return found
+    }
+
+    private static func isDotEntry(_ bytes: UnsafeRawBufferPointer) -> Bool {
+        (bytes.count == 1 && bytes[0] == 46)
+            || (bytes.count == 2 && bytes[0] == 46 && bytes[1] == 46)
+    }
+
+    /// The visitor may record predicates, but cannot stop a scan or throw.
+    /// Its bytes are borrowed only until the next readdir call.
+    private static func scanDirectoryEntries(
+        _ fd: Int32, path: String,
+        visit: (UnsafeRawBufferPointer) -> Void
+    ) throws {
         // A duplicate shares the retained directory's cursor with concurrent readers.
         // Opening "." relative to the retained descriptor gives this scan its own cursor
         // without resolving a caller-controlled path or following a replacement symlink.
@@ -818,20 +878,18 @@ package final class OfficialSourceHandle {
             throw error
         }
         defer { closedir(stream) }
-        var names = Set<String>()
         errno = 0
         while let entry = readdir(stream) {
-            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw -> String in
-                String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+            withUnsafeBytes(of: entry.pointee.d_name) { raw in
+                let count = raw.firstIndex(of: 0) ?? raw.count
+                visit(UnsafeRawBufferPointer(start: raw.baseAddress, count: count))
             }
-            if name != "." && name != ".." { names.insert(name) }
             errno = 0
         }
         guard errno == 0 else { throw OfficialSourceHandleError.io(path: path, errno: errno) }
         guard try directoryIdentity(fd, path: path) == directoryIdentity(scanFD, path: path) else {
             throw OfficialSourceHandleError.replaced("directory stream changed: \(path)")
         }
-        return names
     }
 
     private static func openError(_ path: String) -> OfficialSourceHandleError {

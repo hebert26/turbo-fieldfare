@@ -242,8 +242,8 @@ import Testing
         #expect(concurrency.initialPairCountReached)
         #expect(concurrency.maxActivePairs >= 2,
                 "distinct miss pairs must overlap in the bounded loader")
-        #expect(concurrency.maxActivePairs <= 4,
-                "the loader must cap concurrent miss pairs at four")
+        #expect(concurrency.maxActivePairs <= 8,
+                "the loader must cap concurrent miss pairs at eight")
         for mapped in lease.experts {
             assertMappedPair(mapped, literals: literals, expert: mapped.expertID)
             #expect(recorder.count(.publish(expert: mapped.expertID)) == 1)
@@ -348,7 +348,7 @@ import Testing
         #expect(recorder.count(.publish(expert: 2)) == 1)
     }
 
-    @Test func secondMissBatchFailurePreservesAllMissesAndRetriesInRequestOrder() async throws {
+    @Test func multipleMissReadFailuresPreserveAllMissesAndRetryInRequestOrder() async throws {
         let literals = ExpertCacheLiterals()
         let source = try literals.makeSource()
         defer { source.remove() }
@@ -376,7 +376,7 @@ import Testing
         var caught: InjectedBatchReadFailure?
         do {
             let unexpected = try await coordinator.map(expertIDs: Array(0..<slotCount))
-            Issue.record("a second-batch read failure must reject the complete plan")
+            Issue.record("a miss-read failure must reject the complete plan")
             try? unexpected.cancel()
         } catch let error as InjectedBatchReadFailure {
             caught = error
@@ -385,7 +385,7 @@ import Testing
         }
         #expect(caught == InjectedBatchReadFailure(expert: 4, stream: .gateUp))
         #expect(recorder.publishedExperts().isEmpty,
-                "completed first-batch pairs must remain unpublished after a later failure")
+                "completed sibling reads must remain unpublished after a concurrent failure")
         for expert in 0..<slotCount {
             #expect(recorder.count(.before(expert: expert, stream: .gateUp)) == 1)
             #expect(recorder.count(.before(expert: expert, stream: .down)) == 1)
@@ -407,19 +407,19 @@ import Testing
                 "retry publication must follow the original request order")
     }
 
-    @Test func cancellationBetweenMissBatchesPublishesNothingAndRetriesAllPairs() async throws {
+    @Test func cancellationDuringMissReadsPublishesNothingAndRetriesAllPairs() async throws {
         let literals = ExpertCacheLiterals()
         let source = try literals.makeSource()
         defer { source.remove() }
         let context = try MetalContext()
         let configuration = try literals.configuration()
         let recorder = CheckpointLog()
-        let secondBatchGate = BlockingCheckpoint()
+        let batchGate = BlockingCheckpoint()
         let hooks = QwenBF16ExpertReadHooks { checkpoint in
             recorder.record(checkpoint)
             if case .beforeProtectedRead(let expert, let stream) = checkpoint,
                expert == 4 && stream == .gateUp {
-                secondBatchGate.pause()
+                batchGate.pause()
             }
         }
         let slotCount = 8
@@ -430,25 +430,25 @@ import Testing
             readHooks: hooks)
         let mapping = Task { try await coordinator.map(expertIDs: Array(0..<slotCount)) }
         defer {
-            secondBatchGate.open()
+            batchGate.open()
             mapping.cancel()
         }
 
-        #expect(await secondBatchGate.waitUntilEntered(),
-                "cancellation must be injected at the second miss batch")
+        #expect(await batchGate.waitUntilEntered(),
+                "cancellation must be injected during a miss batch")
         mapping.cancel()
-        secondBatchGate.open()
+        batchGate.open()
         do {
             let unexpected = try await mapping.value
-            Issue.record("canceled miss batches must not return a lease")
+            Issue.record("canceled miss reads must not return a lease")
             try? unexpected.cancel()
         } catch is CancellationError {
             // Expected after all reads in the canceled batch have settled.
         } catch {
-            Issue.record("expected cancellation after the second batch, got \(error)")
+            Issue.record("expected cancellation after the miss reads, got \(error)")
         }
         #expect(recorder.publishedExperts().isEmpty,
-                "cancellation between batches must publish no pair")
+                "cancellation during miss reads must publish no pair")
 
         let retry = try await coordinator.map(expertIDs: Array(0..<slotCount))
         defer { try? retry.cancel() }
