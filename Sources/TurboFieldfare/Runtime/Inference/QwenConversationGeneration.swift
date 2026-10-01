@@ -58,6 +58,9 @@ public struct QwenConversationGenerationResult: Sendable, Equatable {
     /// Present only for a committed, trust-gated original-source turn. This
     /// local source identity is not a whole-shard payload-authenticity claim.
     public let sourceIdentity: LoadedRuntimeSourceIdentity?
+    /// Actual encoded feature rows used by this successful source image turn.
+    /// Nil for text-only turns and paths that do not report this observation.
+    public let producedVisionFeatureRows: Int?
 
     public init(
         reason: StopReason,
@@ -67,7 +70,8 @@ public struct QwenConversationGenerationResult: Sendable, Equatable {
         decodeSeconds: Double,
         metrics: ConversationStateMetrics,
         acceptedGeneratedTokenIDs: [Int32],
-        sourceIdentity: LoadedRuntimeSourceIdentity? = nil
+        sourceIdentity: LoadedRuntimeSourceIdentity? = nil,
+        producedVisionFeatureRows: Int? = nil
     ) {
         self.reason = reason
         self.promptTokens = promptTokens
@@ -77,6 +81,7 @@ public struct QwenConversationGenerationResult: Sendable, Equatable {
         self.metrics = metrics
         self.acceptedGeneratedTokenIDs = acceptedGeneratedTokenIDs
         self.sourceIdentity = sourceIdentity
+        self.producedVisionFeatureRows = producedVisionFeatureRows
     }
 }
 

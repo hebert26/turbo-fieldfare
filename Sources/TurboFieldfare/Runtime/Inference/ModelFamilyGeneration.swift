@@ -79,6 +79,9 @@ public struct ModelFamilyGenerationResult: Sendable, Equatable {
     public let prefillSeconds: Double
     public let decodeSeconds: Double
     public let cacheSummary: RoutedExpertCacheSummary?
+    /// Actual encoded feature rows used by a successful original-source image generation.
+    /// Nil for all other generation paths.
+    public let producedVisionFeatureRows: Int?
 
     public init(
         reason: StopReason,
@@ -99,7 +102,8 @@ public struct ModelFamilyGenerationResult: Sendable, Equatable {
         newTokens: Int,
         prefillSeconds: Double,
         decodeSeconds: Double,
-        cacheSummary: RoutedExpertCacheSummary?
+        cacheSummary: RoutedExpertCacheSummary?,
+        producedVisionFeatureRows: Int? = nil
     ) {
         self.reason = reason
         self.promptTokens = promptTokens
@@ -107,6 +111,7 @@ public struct ModelFamilyGenerationResult: Sendable, Equatable {
         self.prefillSeconds = prefillSeconds
         self.decodeSeconds = decodeSeconds
         self.cacheSummary = cacheSummary
+        self.producedVisionFeatureRows = producedVisionFeatureRows
     }
 }
 
@@ -600,7 +605,8 @@ public actor ModelFamilyGenerationSession {
             model: model, codec: codec, sourceIdentity: identity,
             context: context, maxContext: maxContext,
             expertSlotCount: runtimeConfiguration.expertCacheSlots,
-            modelDirectoryURL: modelDirectoryURL, visionPackURL: visionPackURL)
+            modelDirectoryURL: modelDirectoryURL, visionPackURL: visionPackURL,
+            prefillConfig: runtimeConfiguration.prefillConfig)
     }
 
     public func generate(
@@ -1162,7 +1168,8 @@ private extension ModelFamilyGenerationSession {
                 model: model, codec: codec, sourceIdentity: identity,
                 context: context, maxContext: maxContext,
                 expertSlotCount: runtimeConfiguration.expertCacheSlots,
-                modelDirectoryURL: modelDirectoryURL, visionPackURL: visionPackURL)
+                modelDirectoryURL: modelDirectoryURL, visionPackURL: visionPackURL,
+            prefillConfig: runtimeConfiguration.prefillConfig)
             let result = try await session.generate(
                 QwenConversationGenerationRequest(
                     turn: .user(user), systemPrompt: systemPrompt,
@@ -1182,7 +1189,8 @@ private extension ModelFamilyGenerationSession {
                 reason: result.reason, promptTokens: result.promptTokens,
                 newTokens: result.newTokens, prefillSeconds: result.prefillSeconds,
                 decodeSeconds: result.decodeSeconds,
-                cacheSummary: cacheSummary)
+                cacheSummary: cacheSummary,
+                producedVisionFeatureRows: result.producedVisionFeatureRows)
         }
         guard request.imagesByID.isEmpty else {
             throw ModelFamilyGenerationError.verifiedVisionUnavailable
@@ -1238,11 +1246,17 @@ private extension ModelFamilyGenerationSession {
             maxContext: maxContext)
         let scratch = try RawCompletionScratch(context: context, vocab: vocab)
         let prefillStarted = Date()
-        for (position, token) in prompt.tokenIDs.enumerated() {
-            try Task.checkCancellation()
-            let raw = try await producer.produce(token: token, position: position)
+        if runtimeConfiguration.prefillConfig.mode == .off {
+            for (position, token) in prompt.tokenIDs.enumerated() {
+                try Task.checkCancellation()
+                let raw = try await producer.produce(token: token, position: position)
+                try QwenSourceSamplerBoundary.publishFP32Logits(raw, into: scratch.logits, vocabularySize: vocab)
+                onEvent(.prefill(done: position + 1, total: prompt.tokenIDs.count))
+            }
+        } else {
+            let raw = try await producer.prefill(tokenIDs: prompt.tokenIDs, position: 0,
+                onProgress: { done, total in onEvent(.prefill(done: done, total: total)) })
             try QwenSourceSamplerBoundary.publishFP32Logits(raw, into: scratch.logits, vocabularySize: vocab)
-            onEvent(.prefill(done: position + 1, total: prompt.tokenIDs.count))
         }
         let decodeStarted = Date()
         let prefillSeconds = decodeStarted.timeIntervalSince(prefillStarted)

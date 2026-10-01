@@ -190,6 +190,7 @@ final class QwenGatedDeltaNet {
     private let layoutPipeline: MTLComputePipelineState
     private let convolutionPipeline: MTLComputePipelineState
     private let recurrencePipeline: MTLComputePipelineState
+    private let cachedRecurrencePipeline: MTLComputePipelineState?
     private let gatedNormPipeline: MTLComputePipelineState
     private let useOfficialSourceMath: Bool
 
@@ -210,11 +211,13 @@ final class QwenGatedDeltaNet {
             layoutPipeline = try pipeline("qwen_linear_layout")
             convolutionPipeline = try pipeline("qwen_linear_causal_conv")
             recurrencePipeline = try pipeline("qwen_source_linear_recurrence_fp32")
+            cachedRecurrencePipeline = try pipeline("qwen_source_linear_recurrence_cached_128")
             gatedNormPipeline = try pipeline("qwen_source_linear_gated_rmsnorm")
         } else {
             layoutPipeline = try context.pipeline("qwen_linear_layout")
             convolutionPipeline = try context.pipeline("qwen_linear_causal_conv")
             recurrencePipeline = try context.pipeline("qwen_linear_recurrence_fp32")
+            cachedRecurrencePipeline = nil
             gatedNormPipeline = try context.pipeline("qwen_linear_gated_rmsnorm")
         }
     }
@@ -579,8 +582,19 @@ final class QwenGatedDeltaNet {
                 initialToken: initialToken ? 1 : 0,
                 queryScale: Float(pow(dimension, -0.5)),
                 queryDivisor: Float(sqrt(dimension)))
-            try encode(commandBuffer: commandBuffer, pipeline: recurrencePipeline, count: heads,
-                       parameters: &parameters, buffers: buffers)
+            // Cached columns have disjoint state. Preserve ordered key sums in
+            // each column while distributing the 128 columns across one group.
+            if tokenCount == 1, !initialToken,
+               configuration.keyHeadDimension == 128,
+               configuration.valueHeadDimension == 128,
+               let pipeline = cachedRecurrencePipeline,
+               pipeline.maxTotalThreadsPerThreadgroup >= 128 {
+                try encode(commandBuffer: commandBuffer, pipeline: pipeline, count: heads * 128,
+                           parameters: &parameters, buffers: buffers, groupWidth: 128)
+            } else {
+                try encode(commandBuffer: commandBuffer, pipeline: recurrencePipeline, count: heads,
+                           parameters: &parameters, buffers: buffers)
+            }
             return
         }
         var parameters = RecurrenceParameters(
@@ -629,7 +643,8 @@ final class QwenGatedDeltaNet {
         pipeline: MTLComputePipelineState,
         count: Int,
         parameters: inout T,
-        buffers: [(MTLBuffer, Int)]
+        buffers: [(MTLBuffer, Int)],
+        groupWidth: Int? = nil
     ) throws {
         guard commandBuffer.status == .notEnqueued else {
             throw QwenGatedDeltaNetError.commandBufferAlreadySubmitted
@@ -648,7 +663,7 @@ final class QwenGatedDeltaNet {
         guard maximum > 0 else { encoder.endEncoding(); throw QwenGatedDeltaNetError.invalidPipelineLimit }
         encoder.dispatchThreads(
             MTLSize(width: count, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: min(count, maximum), height: 1, depth: 1))
+            threadsPerThreadgroup: MTLSize(width: groupWidth ?? min(count, maximum), height: 1, depth: 1))
         encoder.endEncoding()
     }
 

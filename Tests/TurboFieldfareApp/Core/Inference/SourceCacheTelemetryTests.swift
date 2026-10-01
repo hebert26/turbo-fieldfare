@@ -1,0 +1,358 @@
+import Darwin
+import Foundation
+import Metal
+import Synchronization
+import Testing
+import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
+@testable import TurboFieldfare
+@testable import TurboFieldfareAppCore
+
+/// P24's source-cache telemetry test uses a tiny, locally generated source
+/// registration. It exercises the protected BF16 source reader and the real
+/// source runner, while keeping original weights out of the test.
+@Suite(.serialized) struct SourceCacheTelemetryTests {
+    @Test func sourceAllocationIsVisibleThroughClientAndSurvivesReset() async throws {
+        let fixture = try SourceCacheTelemetryFixture.make()
+        defer { fixture.remove() }
+        let context = try MetalContext()
+        let model = try QwenOfficialSourceModel.loadSyntheticFixture(
+            registrationURL: fixture.registrationURL,
+            context: context,
+            residencyBudgetBytes: fixture.residencyBudgetBytes)
+        let generation = try await QwenOfficialSourceConversationGenerationSession(
+            fixtureModel: model, context: context, maxContext: 8,
+            expertSlotCount: fixture.expertSlotCount)
+        let session = RealInferenceSession()
+        try await session.installQwenOfficialSourceFixture(
+            model: model, generation: generation,
+            key: fixture.sessionKey, context: context)
+        let client = RealInferenceClient(session: session)
+
+        #expect(client.currentExpertCacheBytes == 0)
+        let config = GenerationConfig(
+            maxNewTokens: 1, temperature: 0, topK: nil, topP: nil,
+            repetitionPenalty: 1, seed: 0, stopStrings: [], extraStopTokens: [])
+        let result = try await generation.generatePreparedTurn(
+            promptTokenIDs: [0, 1], config: config)
+        #expect(result.metrics.retainedTokenIDs.count >= 2)
+
+        let summary = try #require(generation.currentRoutedExpertCacheSummary)
+        #expect(summary.allocatedBytes > 0)
+        #expect(summary.allocatedBytes == fixture.expectedCacheBytes)
+        #expect(summary.peakAllocatedBytes == summary.allocatedBytes)
+        #expect(summary.misses > 0)
+        #expect(client.currentExpertCacheBytes == summary.allocatedBytes)
+
+        try await generation.reset()
+        #expect(client.currentExpertCacheBytes == summary.allocatedBytes)
+        #expect(generation.currentRoutedExpertCacheSummary == summary)
+
+        await session.unload()
+        #expect(client.currentExpertCacheBytes == nil)
+    }
+
+    @Test func failedProtectedMapStillPublishesAllocationWithoutFalseHitOrMiss() async throws {
+        let fixture = try SourceCacheTelemetryFixture.make()
+        defer { fixture.remove() }
+        let context = try MetalContext()
+        let model = try QwenOfficialSourceModel.loadSyntheticFixture(
+            registrationURL: fixture.registrationURL,
+            context: context,
+            residencyBudgetBytes: fixture.residencyBudgetBytes)
+        let generation = try await QwenOfficialSourceConversationGenerationSession(
+            fixtureModel: model, context: context, maxContext: 8,
+            expertSlotCount: fixture.expertSlotCount,
+            hooks: QwenOfficialSourceTransactionHooks(
+                beforeProtectedExpertRead: { _, _, _ in
+                    throw SourceCacheTelemetryFailure.protectedRead
+                }))
+        let session = RealInferenceSession()
+        try await session.installQwenOfficialSourceFixture(
+            model: model, generation: generation,
+            key: fixture.sessionKey, context: context)
+        let client = RealInferenceClient(session: session)
+
+        var observedFailure: SourceCacheTelemetryFailure?
+        do {
+            _ = try await generation.generatePreparedTurn(
+                promptTokenIDs: [0], config: GenerationConfig(maxNewTokens: 1))
+        } catch let error as SourceCacheTelemetryFailure {
+            observedFailure = error
+        } catch {
+            Issue.record("protected source map threw an unexpected error: \(error)")
+        }
+        #expect(observedFailure == .protectedRead)
+
+        let summary = try #require(generation.currentRoutedExpertCacheSummary)
+        // The injected read fails in the first layer, before the second
+        // coordinator can be constructed. The published allocation therefore
+        // covers one layer while hit and miss counters remain zero.
+        #expect(summary.allocatedBytes == fixture.expectedLayerCacheBytes)
+        #expect(summary.peakAllocatedBytes == fixture.expectedLayerCacheBytes)
+        #expect(summary.hits == 0)
+        #expect(summary.misses == 0)
+        #expect(client.currentExpertCacheBytes == fixture.expectedLayerCacheBytes)
+
+        await session.unload()
+        #expect(client.currentExpertCacheBytes == nil)
+    }
+
+    @Test func replacingSourceInstallationDropsOldTelemetryOwnerBeforeNewAllocation() async throws {
+        let fixture = try SourceCacheTelemetryFixture.make()
+        defer { fixture.remove() }
+        let context = try MetalContext()
+        let model = try QwenOfficialSourceModel.loadSyntheticFixture(
+            registrationURL: fixture.registrationURL,
+            context: context,
+            // Keep the first generation resident while installing and warming
+            // its replacement. This test owns the replacement transition, so
+            // both cache reservations must fit concurrently.
+            residencyBudgetBytes: fixture.residencyBudgetBytes
+                + fixture.expectedCacheBytes)
+        let first = try await QwenOfficialSourceConversationGenerationSession(
+            fixtureModel: model, context: context, maxContext: 8,
+            expertSlotCount: fixture.expertSlotCount)
+        let second = try await QwenOfficialSourceConversationGenerationSession(
+            fixtureModel: model, context: context, maxContext: 8,
+            expertSlotCount: fixture.expertSlotCount)
+        let session = RealInferenceSession()
+        try await session.installQwenOfficialSourceFixture(
+            model: model, generation: first,
+            key: fixture.sessionKey, context: context)
+        let client = RealInferenceClient(session: session)
+        let config = GenerationConfig(maxNewTokens: 1)
+        _ = try await first.generatePreparedTurn(promptTokenIDs: [0], config: config)
+        #expect(client.currentExpertCacheBytes == fixture.expectedCacheBytes)
+
+        try await session.installQwenOfficialSourceFixture(
+            model: model, generation: second,
+            key: fixture.sessionKey, context: context)
+        #expect(client.currentExpertCacheBytes == 0)
+        #expect(first.currentRoutedExpertCacheSummary?.allocatedBytes
+            == fixture.expectedCacheBytes)
+
+        _ = try await second.generatePreparedTurn(promptTokenIDs: [1], config: config)
+        #expect(client.currentExpertCacheBytes == fixture.expectedCacheBytes)
+        await session.unload()
+        #expect(client.currentExpertCacheBytes == nil)
+    }
+}
+
+private enum SourceCacheTelemetryFailure: Error {
+    case protectedRead
+}
+
+/// The app test target cannot import the core test target's fixture module, so
+/// this helper emits only the two real safetensors shards needed by the source
+/// admission seam. Every tensor is deterministic BF16 data and no model bytes
+/// are copied from the original checkpoint.
+private struct SourceCacheTelemetryFixture {
+    private struct Tensor {
+        let name: String
+        let shape: [Int]
+        let words: [UInt16]
+
+        var byteCount: UInt64 { UInt64(words.count * MemoryLayout<UInt16>.stride) }
+    }
+
+    let root: URL
+    let registrationURL: URL
+    let sessionKey: SessionLoadKey
+    let residencyBudgetBytes: UInt64
+    let expectedLayerCacheBytes: UInt64
+    let expectedCacheBytes: UInt64
+    let expertSlotCount = Self.topK
+
+    private static let identity = OfficialQwenSourceIdentity.pinned
+    private static let hidden = 8
+    private static let vocabulary = 5
+    private static let experts = 9
+    private static let topK = 8
+    private static let routedIntermediate = 2
+
+    func remove() { try? FileManager.default.removeItem(at: root) }
+
+    static func make() throws -> Self {
+        let manager = FileManager.default
+        // OfficialSourceHandle rejects source roots that retain macOS's
+        // /var -> /private/var alias. Use the same realpath pattern as the
+        // accepted source fixture rather than Foundation URL normalization.
+        var canonicalTemporaryParent = [CChar](repeating: 0, count: Int(PATH_MAX))
+        guard realpath(manager.temporaryDirectory.path, &canonicalTemporaryParent) != nil else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        let temporaryParentBytes = canonicalTemporaryParent.prefix { $0 != 0 }
+            .map { UInt8(bitPattern: $0) }
+        let temporaryParent = URL(
+            fileURLWithPath: String(decoding: temporaryParentBytes, as: UTF8.self),
+            isDirectory: true)
+        let root = temporaryParent.appendingPathComponent(
+            "source-cache-telemetry-\(UUID().uuidString)", isDirectory: true)
+        try manager.createDirectory(at: root, withIntermediateDirectories: false,
+                                    attributes: [.posixPermissions: 0o700])
+        do {
+            let sourceRoot = root.appendingPathComponent("source", isDirectory: true)
+            try manager.createDirectory(at: sourceRoot, withIntermediateDirectories: false,
+                                        attributes: [.posixPermissions: 0o700])
+            var canonicalSourceRoot = [CChar](repeating: 0, count: Int(PATH_MAX))
+            guard realpath(sourceRoot.path, &canonicalSourceRoot) != nil else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            let sourcePathBytes = canonicalSourceRoot.prefix { $0 != 0 }
+                .map { UInt8(bitPattern: $0) }
+            let canonicalSourceRootURL = URL(
+                fileURLWithPath: String(decoding: sourcePathBytes, as: UTF8.self),
+                isDirectory: true)
+            let registrationParent = root.appendingPathComponent("models", isDirectory: true)
+            try manager.createDirectory(at: registrationParent, withIntermediateDirectories: false,
+                                        attributes: [.posixPermissions: 0o700])
+            let registrationURL = registrationParent.appendingPathComponent(
+                "fixture.gturbo", isDirectory: true)
+            let tensors = makeTensors()
+            let routedNames = Set(tensors.filter { $0.name.contains("mlp.experts.") }
+                .map(\.name))
+            var mapping: [String: String] = [:]
+            let shardNames = [identity.shards[0].filename, identity.shards[1].filename]
+            for tensor in tensors {
+                mapping[tensor.name] = routedNames.contains(tensor.name)
+                    ? shardNames[1] : shardNames[0]
+            }
+            try configJSON().write(
+                to: canonicalSourceRootURL.appendingPathComponent("config.json"),
+                options: .withoutOverwriting)
+            let index: [String: Any] = ["weight_map": mapping]
+            try JSONSerialization.data(withJSONObject: index, options: [.sortedKeys]).write(
+                to: canonicalSourceRootURL.appendingPathComponent("model.safetensors.index.json"),
+                options: .withoutOverwriting)
+            let resident = tensors.filter { !routedNames.contains($0.name) }
+            let routed = tensors.filter { routedNames.contains($0.name) }
+            try writeShard(resident, to: canonicalSourceRootURL.appendingPathComponent(shardNames[0]))
+            try writeShard(routed, to: canonicalSourceRootURL.appendingPathComponent(shardNames[1]))
+
+            let descriptor = try OfficialSourceDescriptor(
+                repository: identity.repository, revision: identity.revision,
+                storageProfile: identity.storageProfile, sidecarSHA256: identity.sidecarSHA256,
+                shards: identity.shards.map {
+                    OfficialSourceDescriptor.Shard(filename: $0.filename, sha256: $0.sha256)
+                }, sourceRoot: canonicalSourceRootURL.path)
+            _ = try OfficialSourceRegistration.register(
+                markerData: JSONEncoder().encode(descriptor), at: registrationURL)
+
+            let residentBF16Bytes = resident.reduce(UInt64(0)) { $0 + $1.byteCount }
+            // QwenBF16Weights keeps matrices as BF16 and decodes its vectors
+            // into FP32 storage. The raw vector words are therefore not an
+            // additional resident allocation.
+            let decodedVectorElements: UInt64 = 76
+            let rawVectorBytes = decodedVectorElements * UInt64(MemoryLayout<UInt16>.stride)
+            let decodedVectorBytes = decodedVectorElements * UInt64(MemoryLayout<Float>.stride)
+            let residentBytes = residentBF16Bytes - rawVectorBytes + decodedVectorBytes
+            let pairBytes = UInt64(hidden * routedIntermediate * 6)
+            let expectedLayerCacheBytes = pairBytes * UInt64(topK)
+            let expectedCacheBytes = expectedLayerCacheBytes * 2
+            let budget = residentBytes + expectedCacheBytes
+            let key = SessionLoadKey(
+                directory: registrationURL, maxContext: 8,
+                options: AppRuntimeOptions(), forceLogitsHead: false)
+            return Self(root: root, registrationURL: registrationURL, sessionKey: key,
+                        residencyBudgetBytes: budget,
+                        expectedLayerCacheBytes: expectedLayerCacheBytes,
+                        expectedCacheBytes: expectedCacheBytes)
+        } catch {
+            try? manager.removeItem(at: root)
+            throw error
+        }
+    }
+
+    private static func configJSON() throws -> Data {
+        let root: [String: Any] = [
+            "model_type": "qwen3_5_moe",
+            "text_config": [
+                "model_type": "qwen3_5_moe_text", "dtype": "bfloat16",
+                "mamba_ssm_dtype": "float32", "hidden_size": hidden,
+                "num_hidden_layers": 2,
+                "layer_types": ["full_attention", "linear_attention"],
+                "num_attention_heads": 2, "num_key_value_heads": 1, "head_dim": 4,
+                "attn_output_gate": true, "linear_conv_kernel_dim": 4,
+                "linear_num_key_heads": 1, "linear_key_head_dim": 2,
+                "linear_num_value_heads": 1, "linear_value_head_dim": 2,
+                "partial_rotary_factor": 0.5,
+                "rope_parameters": ["rope_theta": 10_000, "mrope_section": [1]],
+                "num_experts": experts, "num_experts_per_tok": topK,
+                "moe_intermediate_size": routedIntermediate,
+                "shared_expert_intermediate_size": 2, "vocab_size": vocabulary,
+                "tie_word_embeddings": false, "hidden_act": "silu",
+                "rms_norm_eps": 1e-6, "bos_token_id": 0, "eos_token_id": 4,
+            ],
+            "image_token_id": 3, "video_token_id": 2,
+            "vision_start_token_id": 0, "vision_end_token_id": 4,
+        ]
+        return try JSONSerialization.data(withJSONObject: root, options: [.sortedKeys])
+    }
+
+    private static func makeTensors() -> [Tensor] {
+        var result: [Tensor] = []
+        func add(_ name: String, _ shape: [Int], fill: UInt16 = 0) {
+            result.append(Tensor(name: name, shape: shape,
+                                 words: [UInt16](repeating: fill, count: shape.reduce(1, *))))
+        }
+        add("model.language_model.embed_tokens.weight", [vocabulary, hidden])
+        add("lm_head.weight", [vocabulary, hidden])
+        add("model.language_model.norm.weight", [hidden], fill: 0x3f80)
+        for layer in 0..<2 {
+            let prefix = "model.language_model.layers.\(layer)."
+            add(prefix + "input_layernorm.weight", [hidden], fill: 0x3f80)
+            add(prefix + "post_attention_layernorm.weight", [hidden], fill: 0x3f80)
+            var router = [UInt16](repeating: 0, count: experts * hidden)
+            for expert in 0..<topK { router[expert * hidden] = 0x3f80 }
+            router[(experts - 1) * hidden] = 0xbf80
+            result.append(Tensor(name: prefix + "mlp.gate.weight", shape: [experts, hidden], words: router))
+            add(prefix + "mlp.shared_expert.gate_proj.weight", [2, hidden])
+            add(prefix + "mlp.shared_expert.up_proj.weight", [2, hidden])
+            add(prefix + "mlp.shared_expert.down_proj.weight", [hidden, 2])
+            add(prefix + "mlp.shared_expert_gate.weight", [1, hidden])
+            add(prefix + "mlp.experts.gate_up_proj", [experts, 2 * routedIntermediate, hidden])
+            add(prefix + "mlp.experts.down_proj", [experts, hidden, routedIntermediate])
+            if layer == 0 {
+                add(prefix + "self_attn.q_proj.weight", [16, hidden])
+                add(prefix + "self_attn.k_proj.weight", [4, hidden])
+                add(prefix + "self_attn.v_proj.weight", [4, hidden])
+                add(prefix + "self_attn.o_proj.weight", [hidden, 8])
+                add(prefix + "self_attn.q_norm.weight", [4], fill: 0x3f80)
+                add(prefix + "self_attn.k_norm.weight", [4], fill: 0x3f80)
+            } else {
+                let linear = prefix + "linear_attn."
+                add(linear + "in_proj_qkv.weight", [6, hidden])
+                add(linear + "in_proj_z.weight", [2, hidden])
+                add(linear + "in_proj_b.weight", [1, hidden])
+                add(linear + "in_proj_a.weight", [1, hidden])
+                add(linear + "out_proj.weight", [hidden, 2])
+                add(linear + "conv1d.weight", [6, 1, 4])
+                add(linear + "norm.weight", [2], fill: 0x3f80)
+                add(linear + "A_log", [1])
+                add(linear + "dt_bias", [1])
+            }
+        }
+        return result
+    }
+
+    private static func writeShard(_ tensors: [Tensor], to url: URL) throws {
+        var payload = Data()
+        var header: [String: [String: Any]] = [:]
+        for tensor in tensors.sorted(by: { $0.name < $1.name }) {
+            let start = payload.count
+            payload.append(Data(repeating: 0, count: tensor.words.count * 2))
+            header[tensor.name] = [
+                "dtype": "BF16", "shape": tensor.shape,
+                "data_offsets": [start, payload.count],
+            ]
+        }
+        var headerData = try JSONSerialization.data(withJSONObject: header, options: [.sortedKeys])
+        headerData.append(Data(repeating: 0x20, count: (8 - headerData.count % 8) % 8))
+        var headerLength = UInt64(headerData.count).littleEndian
+        var file = Data(bytes: &headerLength, count: MemoryLayout<UInt64>.size)
+        file.append(headerData)
+        file.append(payload)
+        try file.write(to: url, options: .withoutOverwriting)
+    }
+}

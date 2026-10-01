@@ -16,6 +16,7 @@ enum QwenLinearAttentionStateError: Error, Equatable, Sendable {
     case commandBufferAlreadySubmitted
     case invalidSnapshotGeometry
     case invalidSnapshotLayers
+    case invalidSnapshotOwner
     case invalidPosition
     case deferredGPUUseActive
 }
@@ -122,11 +123,32 @@ struct QwenLinearAttentionUpdate: @unchecked Sendable {
 /// Cancellation never mutates committed buffers. Submitted staging remains
 /// retained until Metal reports actual completion.
 final class QwenLinearAttentionState: @unchecked Sendable {
+    /// Opaque rollback state. Its owner retains immutable committed buffers,
+    /// never staging buffers or caller-provided mutable state.
+    final class RetainedCheckpoint: @unchecked Sendable {
+        fileprivate struct Layer {
+            let convolutionHistory: MTLBuffer
+            let recurrentMatrix: MTLBuffer
+            let position: Int
+        }
+
+        fileprivate let owner: UUID
+        fileprivate let layers: [Int: Layer]
+
+        fileprivate init(owner: UUID, layers: [Int: Layer]) {
+            self.owner = owner
+            self.layers = layers
+        }
+    }
+
     private struct LayerStorage {
         var convolutionHistory: MTLBuffer
         var recurrentMatrix: MTLBuffer
         var position: Int
         var pending: PendingUpdate?
+        // Once retained, these buffers may never be written in place. A fresh
+        // GPU commit or detached CPU mutation replaces this storage instead.
+        var checkpointRetained = false
     }
 
     private struct PendingUpdate {
@@ -145,6 +167,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
     let geometry: QwenLinearAttentionGeometry
 
     private let device: MTLDevice
+    private let checkpointOwner = UUID()
     private let lock = NSLock()
     private var layers: [Int: LayerStorage]
     private var nextIdentifier: UInt64 = 1
@@ -266,6 +289,44 @@ final class QwenLinearAttentionState: @unchecked Sendable {
         }
     }
 
+    func retainCheckpoint() throws -> RetainedCheckpoint {
+        try withLock {
+            try requireNoActiveUse()
+            var retained: [Int: RetainedCheckpoint.Layer] = [:]
+            retained.reserveCapacity(linearLayerIndices.count)
+            for layer in linearLayerIndices {
+                var storage = try requireLayer(layer)
+                retained[layer] = RetainedCheckpoint.Layer(
+                    convolutionHistory: storage.convolutionHistory,
+                    recurrentMatrix: storage.recurrentMatrix,
+                    position: storage.position)
+                storage.checkpointRetained = true
+                layers[layer] = storage
+            }
+            return RetainedCheckpoint(owner: checkpointOwner, layers: retained)
+        }
+    }
+
+    func restore(_ checkpoint: RetainedCheckpoint) throws {
+        try withLock {
+            try requireNoActiveUse()
+            guard checkpoint.owner == checkpointOwner else {
+                throw QwenLinearAttentionStateError.invalidSnapshotOwner
+            }
+            var restored: [Int: LayerStorage] = [:]
+            for layer in linearLayerIndices {
+                guard let retained = checkpoint.layers[layer] else {
+                    throw QwenLinearAttentionStateError.invalidSnapshotLayers
+                }
+                restored[layer] = LayerStorage(
+                    convolutionHistory: retained.convolutionHistory,
+                    recurrentMatrix: retained.recurrentMatrix,
+                    position: retained.position, pending: nil, checkpointRetained: true)
+            }
+            layers = restored
+        }
+    }
+
     func restore(_ snapshot: QwenLinearAttentionSnapshot) throws {
         try withLock {
             try requireNoActiveUse()
@@ -284,26 +345,39 @@ final class QwenLinearAttentionState: @unchecked Sendable {
                     throw QwenLinearAttentionStateError.invalidSnapshotGeometry
                 }
             }
+            // Prepare every required detachment before changing any bytes or
+            // positions. Allocation failure leaves all committed state intact.
+            var prepared: [Int: LayerStorage] = [:]
             for layer in linearLayerIndices {
-                guard let state = snapshot.layers[layer], var storage = layers[layer] else { continue }
+                prepared[layer] = try storageForMutation(try requireLayer(layer), layer: layer)
+            }
+            for layer in linearLayerIndices {
+                guard let state = snapshot.layers[layer], var storage = prepared[layer] else { continue }
                 Self.write(state.convolutionHistory, to: storage.convolutionHistory)
                 Self.write(state.recurrentMatrix, to: storage.recurrentMatrix)
                 storage.position = snapshot.positions[layer] ?? 0
                 storage.pending = nil
-                layers[layer] = storage
+                prepared[layer] = storage
             }
+            layers = prepared
         }
     }
 
     func reset() throws {
         try withLock {
             try requireNoActiveUse()
+            var prepared: [Int: LayerStorage] = [:]
             for layer in linearLayerIndices {
-                guard let storage = layers[layer] else { continue }
+                prepared[layer] = try storageForMutation(try requireLayer(layer), layer: layer)
+            }
+            for layer in linearLayerIndices {
+                guard var storage = prepared[layer] else { continue }
                 memset(storage.convolutionHistory.contents(), 0, storage.convolutionHistory.length)
                 memset(storage.recurrentMatrix.contents(), 0, storage.recurrentMatrix.length)
-                layers[layer]?.position = 0
+                storage.position = 0
+                prepared[layer] = storage
             }
+            layers = prepared
         }
     }
 
@@ -481,6 +555,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             }
             storage.convolutionHistory = pending.convolutionHistory
             storage.recurrentMatrix = pending.recurrentMatrix
+            storage.checkpointRetained = false
             storage.position = position
             storage.pending = nil
             layers[update.layer] = storage
@@ -540,6 +615,7 @@ final class QwenLinearAttentionState: @unchecked Sendable {
         if succeeded && !pending.discardRequested {
             storage.convolutionHistory = pending.convolutionHistory
             storage.recurrentMatrix = pending.recurrentMatrix
+            storage.checkpointRetained = false
         }
         storage.pending = nil
         layers[layer] = storage
@@ -577,6 +653,28 @@ final class QwenLinearAttentionState: @unchecked Sendable {
             throw QwenLinearAttentionStateError.notLinearAttentionLayer(layer)
         }
         return storage
+    }
+
+    /// CPU reset/restore must detach any buffers ever retained by a checkpoint.
+    /// The conservative marker needs no callback or lock during checkpoint ARC
+    /// release, and is cleared only when new unretained buffers replace it.
+    private func storageForMutation(_ storage: LayerStorage, layer: Int) throws -> LayerStorage {
+        guard storage.checkpointRetained else { return storage }
+        guard let history = device.makeBuffer(length: storage.convolutionHistory.length,
+                                               options: .storageModeShared) else {
+            throw QwenLinearAttentionStateError.allocationFailed(
+                layer: layer, kind: "history detachment", bytes: storage.convolutionHistory.length)
+        }
+        guard let recurrent = device.makeBuffer(length: storage.recurrentMatrix.length,
+                                                 options: .storageModeShared) else {
+            throw QwenLinearAttentionStateError.allocationFailed(
+                layer: layer, kind: "recurrent detachment", bytes: storage.recurrentMatrix.length)
+        }
+        var detached = storage
+        detached.convolutionHistory = history
+        detached.recurrentMatrix = recurrent
+        detached.checkpointRetained = false
+        return detached
     }
 
     private func requireNoActiveUse() throws {

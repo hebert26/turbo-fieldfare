@@ -26,6 +26,21 @@ import Testing
     private static let activationCaptureEnvironmentKey =
         "TURBO_FIELDFARE_P23_CAPTURE_ACTIVATIONS"
 
+    @Test func groupedRecorderTracksConsumedTokensBeforeRawLogits() {
+        let capture = P23ImageTextCapture()
+        capture.begin(promptTokenCount: 3)
+        capture.consumedInput(position: 0, token: 10, featureRow: nil, positionValues: nil)
+        capture.consumedInput(position: 1, token: 11, featureRow: nil, positionValues: nil)
+        capture.consumedInput(position: 2, token: 12, featureRow: nil, positionValues: nil)
+        capture.raw(position: 2, token: 12, logits: [0])
+        let first = capture.snapshot()
+        #expect(first.tokenIDs == [0: 10, 1: 11, 2: 12])
+        #expect(!first.duplicate)
+
+        capture.raw(position: 2, token: 12, logits: [0])
+        #expect(capture.snapshot().duplicate)
+    }
+
     @Test func candidateRouteSelectionUsesCutoffMembershipWithoutTieOrder() {
         var scores = [Float](repeating: 0, count: 256)
         for (index, value) in [10, 9, 8, 7, 6, 5, 4, 3, 3, 2].enumerated() {
@@ -271,6 +286,7 @@ import Testing
         let environment = ProcessInfo.processInfo.environment
         let captureActivations = environment[Self.activationCaptureEnvironmentKey] != "0"
         let captureMode = captureActivations ? "full-activations" : "routes-raw-sample-only"
+        let prefillMode = captureActivations ? "token-major" : "grouped"
         let omittedDiagnosticArtifacts: [String] = captureActivations
             ? [] : ["final-hidden", "final-norm"]
         func required(_ key: String) throws -> String {
@@ -373,6 +389,20 @@ import Testing
 
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false)
         let capture = P23ImageTextCapture()
+        let groupedCapture: QwenSourceGroupedPrefillCapture?
+        if captureActivations {
+            groupedCapture = nil
+        } else {
+            groupedCapture = QwenSourceGroupedPrefillCapture(
+                observeConsumedInput: { position, token, featureRow, mropePosition in
+                    capture.consumedInput(position: position, token: token,
+                                          featureRow: featureRow,
+                                          positionValues: mropePosition?.values)
+                },
+                observeFinalRawLogits: { position, token, logits in
+                    capture.raw(position: position, token: token, logits: logits)
+                })
+        }
         let activationObserver: (@Sendable (Int, Int, String, [Float]) -> Void)?
         if captureActivations {
             activationObserver = { @Sendable (position: Int, layer: Int, stage: String, values: [Float]) in
@@ -401,7 +431,8 @@ import Testing
         let session = try await QwenOfficialSourceConversationGenerationSession(
             model: model, codec: codec, sourceIdentity: identity,
             context: context, maxContext: 1024, expertSlotCount: 16,
-            modelDirectoryURL: registration, visionPackURL: companion, hooks: hooks)
+            modelDirectoryURL: registration, visionPackURL: companion,
+            hooks: hooks, groupedCapture: groupedCapture)
         #expect(hooks.requiresSeparateGPUStages == captureActivations)
         if !captureActivations {
             #expect(!hooks.requiresSeparateGPUStages)
@@ -441,6 +472,9 @@ import Testing
             let observed = capture.snapshot()
             if !captureActivations {
                 #expect(observed.activations.isEmpty)
+                let diagnostics = try #require(await session.groupedPrefillDiagnostics())
+                #expect(diagnostics.mode == .grouped)
+                #expect(diagnostics.tokenCount == visionCase.tokenIds.count)
             }
             let consumedContinuationCount = max(0, result.acceptedGeneratedTokenIDs.count - 1)
             guard result.promptTokens == visionCase.tokenIds.count,
@@ -791,6 +825,7 @@ import Testing
                     "finalNormSHA256": normSHA256.map { $0 as Any } ?? NSNull(),
                     "finalNormDiagnosticFailureCount": normFailureCount.map { $0 as Any } ?? NSNull(),
                     "captureMode": captureMode,
+                    "prefillMode": prefillMode,
                     "omittedDiagnosticArtifacts": omittedDiagnosticArtifacts,
                     "routes": routeReceipts,
                 ])
@@ -819,6 +854,7 @@ import Testing
                 "decodeSeconds": result.decodeSeconds,
                 "elapsedSeconds": seconds(elapsed),
                 "captureMode": captureMode,
+                "prefillMode": prefillMode,
                 "omittedDiagnosticArtifacts": omittedDiagnosticArtifacts,
                 "steps": stepReceipts,
                 "passed": passed,
@@ -848,6 +884,7 @@ import Testing
             "temperature": 0,
             "maxNewTokens": 2,
             "captureMode": captureMode,
+            "prefillMode": prefillMode,
             "omittedDiagnosticArtifacts": omittedDiagnosticArtifacts,
             "tolerance": ["absolute": 1e-7, "relative": 1e-6, "extraULP": 0],
             "elapsedSeconds": seconds(totalStarted.duration(to: .now)),
@@ -867,6 +904,7 @@ private final class P23ImageTextCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var promptTokenCount = 0
     private var tokenIDs: [Int: Int32] = [:]
+    private var rawTokens: [Int: Int32] = [:]
     private var consumedInputs: [Int: P23ImageTextConsumedInput] = [:]
     private var rawLogits: [Int: P23ImageTextRaw] = [:]
     private var activations: [Int: [String: [Float]]] = [:]
@@ -878,6 +916,7 @@ private final class P23ImageTextCapture: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         self.promptTokenCount = promptTokenCount
         tokenIDs.removeAll(keepingCapacity: true)
+        rawTokens.removeAll(keepingCapacity: true)
         consumedInputs.removeAll(keepingCapacity: true)
         rawLogits.removeAll(keepingCapacity: true)
         activations.removeAll(keepingCapacity: true)
@@ -896,7 +935,12 @@ private final class P23ImageTextCapture: @unchecked Sendable {
 
     func raw(position: Int, token: Int32, logits: [Float]) {
         lock.lock(); defer { lock.unlock() }
-        if tokenIDs.updateValue(token, forKey: position) != nil { duplicate = true }
+        if let existing = tokenIDs[position] {
+            if existing != token { duplicate = true }
+        } else {
+            tokenIDs[position] = token
+        }
+        if rawTokens.updateValue(token, forKey: position) != nil { duplicate = true }
         if position == promptTokenCount - 1 || position == promptTokenCount {
             if rawLogits.updateValue(P23ImageTextRaw(token: token, logits: logits),
                                      forKey: position) != nil { duplicate = true }
@@ -907,6 +951,11 @@ private final class P23ImageTextCapture: @unchecked Sendable {
                        positionValues: [Int32]?) {
         lock.lock(); defer { lock.unlock() }
         guard position >= 0, position <= promptTokenCount else { return }
+        if let existing = tokenIDs[position] {
+            if existing != token { duplicate = true }
+        } else {
+            tokenIDs[position] = token
+        }
         if consumedInputs.updateValue(P23ImageTextConsumedInput(
             token: token, featureRow: featureRow, position: positionValues),
             forKey: position) != nil { duplicate = true }

@@ -402,6 +402,82 @@ kernel void qwen_source_linear_recurrence_fp32(
     }
 }
 
+// One group owns a cached head, and each lane owns one value column. The
+// column's state, sixteen-key partials and final eight-partial sum retain the
+// serial kernel's order. No state element is shared between columns.
+kernel void qwen_source_linear_recurrence_cached_128(
+    constant QwenSourceLinearRecurrenceParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
+    device const float* query [[buffer(QwenMetalBufferIndexInput)]],
+    device const float* key [[buffer(QwenMetalBufferIndexWeights)]],
+    device const float* value [[buffer(QwenMetalBufferIndexScales)]],
+    device const float* logDecay [[buffer(QwenMetalBufferIndexBiases)]],
+    device float* output [[buffer(QwenMetalBufferIndexOutput)]],
+    device const float* beta [[buffer(QwenMetalBufferIndexScratch)]],
+    device float* state [[buffer(QwenMetalBufferIndexState)]],
+    uint head [[threadgroup_position_in_grid]],
+    uint v [[thread_index_in_threadgroup]]) {
+#pragma clang fp contract(off)
+    // Uniform checks precede the barrier. The host dispatches exactly 128
+    // lanes per head and selects only a noninitial one-token 128x128 state.
+    if (head >= p.headCount || p.tokenCount != 1u || p.initialToken != 0u
+        || p.keyDimension != 128u || p.valueDimension != 128u) return;
+    const uint stateBase = head * p.keyDimension * p.valueDimension;
+    const uint qBase = head * p.keyDimension;
+    const uint vBase = head * p.valueDimension;
+    threadgroup float headQInverse;
+    threadgroup float headKInverse;
+    threadgroup float headDecay;
+    if (v == 0u) {
+        const float qSquares = qwenSourceLinearSquareSum(query, qBase, p.keyDimension);
+        const float kSquares = qwenSourceLinearSquareSum(key, qBase, p.keyDimension);
+        headQInverse = 1.0f / sqrt(qSquares + p.epsilon);
+        headKInverse = 1.0f / sqrt(kSquares + p.epsilon);
+#ifdef QWEN_PINNED_SOURCE_EXP
+        headDecay = qwenSourceExpFloatBitScale(logDecay[head]);
+#else
+        headDecay = exp(logDecay[head]);
+#endif
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const float qInverse = headQInverse;
+    const float kInverse = headKInverse;
+    const float decay = headDecay;
+    float prediction = 0.0f, predictionCorrection = 0.0f;
+    float predictionBlock = 0.0f;
+    for (uint k = 0; k < p.keyDimension; ++k) {
+        const uint index = stateBase + k * p.valueDimension + v;
+        const float normalizedKey = key[qBase + k] * kInverse;
+        state[index] *= decay;
+        const float predictionProduct = state[index] * normalizedKey;
+        predictionBlock = predictionBlock + predictionProduct;
+        if ((k & 15u) == 15u) {
+            prediction = prediction + predictionBlock;
+            predictionBlock = 0.0f;
+        }
+    }
+    prediction += predictionCorrection;
+    const float delta = (value[vBase + v] - prediction) * beta[head];
+    for (uint k = 0; k < p.keyDimension; ++k) {
+        const uint index = stateBase + k * p.valueDimension + v;
+        const float normalizedKey = key[qBase + k] * kInverse;
+        const float update = normalizedKey * delta;
+        state[index] = state[index] + update;
+    }
+    float sum = 0.0f, correction = 0.0f;
+    float block = 0.0f;
+    for (uint k = 0; k < p.keyDimension; ++k) {
+        const float normalizedQuery = query[qBase + k] * qInverse;
+        const float scaledQuery = normalizedQuery / p.queryDivisor;
+        const float product = state[stateBase + k * p.valueDimension + v] * scaledQuery;
+        block = block + product;
+        if ((k & 15u) == 15u) {
+            sum = sum + block;
+            block = 0.0f;
+        }
+    }
+    output[vBase + v] = sum + correction;
+}
+
 kernel void qwen_source_linear_gated_rmsnorm(
     constant QwenLinearGatedNormParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
     device const float* input [[buffer(QwenMetalBufferIndexInput)]],

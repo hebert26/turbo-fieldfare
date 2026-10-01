@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import Synchronization
 
 struct QwenOfficialSourceRunnerDiagnosticSnapshot: Sendable, Equatable {
     let position: Int
@@ -16,6 +17,32 @@ struct QwenOfficialSourceCacheDiagnostics: Sendable, Equatable {
     let allocatedBytes: UInt64
     let routedExpertCount: Int
     let summary: RoutedExpertCacheSummary
+}
+
+/// Explicit grouped observations have different timing from token publication:
+/// input rows are formed first, routes are layer-major, and only final logits emit.
+struct QwenSourceGroupedPrefillCapture: Sendable {
+    let observeRoute: (@Sendable (Int, Int, [Float], [Int], [Float], Float) -> Void)?
+    let observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)?
+    let observeFinalRawLogits: (@Sendable (Int, Int32, [Float]) -> Void)?
+
+    init(observeRoute: (@Sendable (Int, Int, [Float], [Int], [Float], Float) -> Void)? = nil,
+         observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)? = nil,
+         observeFinalRawLogits: (@Sendable (Int, Int32, [Float]) -> Void)? = nil) {
+        self.observeRoute = observeRoute
+        self.observeConsumedInput = observeConsumedInput
+        self.observeFinalRawLogits = observeFinalRawLogits
+    }
+}
+
+struct QwenSourceGroupedPrefillDiagnostics: Sendable, Equatable {
+    enum Mode: Sendable, Equatable { case grouped, tokenMajor }
+    let mode: Mode
+    let tokenCount: Int
+    var completedLayers: Int = 0
+    var mappedUniqueExperts: [Int: Int] = [:]
+    var mappingHits: UInt64 = 0
+    var mappingMisses: UInt64 = 0
 }
 
 /// The original-BF16 source decoder. One actor owns position and the persistent
@@ -52,14 +79,22 @@ actor QwenOfficialSourceRunner {
         let position: Int
     }
     private var turnCheckpoint: TurnCheckpoint?
+    private var lastPrefillDiagnostics: QwenSourceGroupedPrefillDiagnostics?
     private var committedPosition = 0
     private var inFlight = false
+    private var prefillInFlight = false
     private var unusable = false
     private var lastRoutedExpertCount = 0
     private var allocatedCacheBytes: UInt64 = 0
     private var peakAllocatedCacheBytes: UInt64 = 0
     private var successfulCacheHits: UInt64 = 0
     private var successfulCacheMisses: UInt64 = 0
+    // Read-only accounting is available without awaiting decode or retaining buffers.
+    private nonisolated let cacheSummarySnapshot = Mutex<RoutedExpertCacheSummary?>(nil)
+
+    nonisolated var currentRoutedExpertCacheSummary: RoutedExpertCacheSummary? {
+        cacheSummarySnapshot.withLock { $0 }
+    }
 
     var position: Int { committedPosition }
     var isUnusable: Bool { unusable }
@@ -189,6 +224,12 @@ actor QwenOfficialSourceRunner {
         moe = try QwenMoE(context: context, configuration: moeConfiguration)
         self.expertSlotCount = expertSlotCount
         self.expertCacheStorage = expertCacheStorage
+        cacheSummarySnapshot.withLock {
+            $0 = RoutedExpertCacheSummary(
+                configuredSlots: expertSlotCount, effectiveSlots: expertSlotCount,
+                policy: model.expertCachePolicy.rawValue, allocatedBytes: 0,
+                peakAllocatedBytes: 0, hits: 0, misses: 0)
+        }
     }
 
     func cacheDiagnostics() -> QwenOfficialSourceCacheDiagnostics {
@@ -198,6 +239,11 @@ actor QwenOfficialSourceRunner {
             allocatedBytes: allocatedCacheBytes,
             routedExpertCount: lastRoutedExpertCount,
             summary: routedExpertCacheSummary())
+    }
+
+    private func publishCacheSummary() {
+        let summary = routedExpertCacheSummary()
+        cacheSummarySnapshot.withLock { $0 = summary }
     }
 
     func routedExpertCacheSummary() -> RoutedExpertCacheSummary {
@@ -212,7 +258,16 @@ actor QwenOfficialSourceRunner {
     func produce(token: Int32, position: Int,
                  featureRow: [Float]? = nil,
                  mropePosition: QwenMRoPEPosition? = nil) async throws -> [Float] {
-        guard !inFlight, !unusable else { throw QwenTextRunnerError.operationInProgress }
+        try await produceToken(token: token, position: position, featureRow: featureRow,
+                               mropePosition: mropePosition, withinPrefill: false)
+    }
+
+    private func produceToken(token: Int32, position: Int,
+                              featureRow: [Float]?, mropePosition: QwenMRoPEPosition?,
+                              withinPrefill: Bool) async throws -> [Float] {
+        guard !inFlight, !unusable, !prefillInFlight || withinPrefill else {
+            throw QwenTextRunnerError.operationInProgress
+        }
         guard position == committedPosition else {
             throw QwenTextRunnerError.invalidPosition(expected: committedPosition, actual: position)
         }
@@ -233,7 +288,7 @@ actor QwenOfficialSourceRunner {
         defer { inFlight = false }
         try Task.checkCancellation()
         try model.revalidateSource()
-        let linearSnapshot = try linearState.clone()
+        let linearCheckpoint = try linearState.retainCheckpoint()
         let fullSnapshot = try fullKV.snapshot()
         do {
             let initial: [Float]
@@ -293,7 +348,11 @@ actor QwenOfficialSourceRunner {
                 // A transactional token failure must rewind directly to the
                 // turn baseline. Rewinding only the token branches KV lineage
                 // and invalidates the earlier turn snapshot.
-                try linearState.restore(turnCheckpoint?.linear ?? linearSnapshot)
+                if let baseline = turnCheckpoint {
+                    try linearState.restore(baseline.linear)
+                } else {
+                    try linearState.restore(linearCheckpoint)
+                }
                 try fullKV.restore(turnCheckpoint?.full ?? fullSnapshot)
                 if let baseline = turnCheckpoint {
                     committedPosition = baseline.position
@@ -308,10 +367,337 @@ actor QwenOfficialSourceRunner {
         }
     }
 
+    func groupedPrefillDiagnostics() -> QwenSourceGroupedPrefillDiagnostics? {
+        lastPrefillDiagnostics
+    }
+
+    /// Prompt-only execution. Decode retains produce's one-token contract.
+    /// The optional capture explicitly observes provisional grouped work.
+    func prefill(tokenIDs: [Int32], position: Int,
+                 featureRowAt: (@Sendable (Int) throws -> [Float]?)? = nil,
+                 mropePositions: [QwenMRoPEPosition]? = nil,
+                 groupedCapture: QwenSourceGroupedPrefillCapture? = nil,
+                 onProgress: @Sendable (Int, Int) async -> Void = { _, _ in }) async throws -> [Float] {
+        guard !inFlight, !unusable, !prefillInFlight else {
+            throw QwenTextRunnerError.operationInProgress
+        }
+        guard position == committedPosition else {
+            throw QwenTextRunnerError.invalidPosition(expected: committedPosition, actual: position)
+        }
+        guard !tokenIDs.isEmpty, position >= 0,
+              tokenIDs.count <= fullKV.maxContext - position,
+              mropePositions == nil || mropePositions?.count == tokenIDs.count else {
+            throw QwenTextRunnerError.invalidState(detail: "source prefill context/positions")
+        }
+        let width = model.architecture.hiddenSize
+        let topK = model.architecture.expertsPerToken
+        for (index, token) in tokenIDs.enumerated() {
+            try Task.checkCancellation()
+            guard token >= 0, Int(token) < model.architecture.vocabularySize else {
+                throw QwenTextRunnerError.invalidToken(id: token)
+            }
+            if let feature = try featureRowAt?(index) {
+                guard token == Int32(model.visionArchitecture.imageTokenID),
+                      feature.count == width, feature.allSatisfy(\.isFinite),
+                      mropePositions != nil else {
+                    throw QwenTextRunnerError.invalidState(detail: "source prefill image row geometry")
+                }
+            }
+        }
+        let rowElements = try prefillProduct(tokenIDs.count, width)
+        let routeElements = try prefillProduct(tokenIDs.count, topK)
+        // Count both work-list representations, IDs, weights and final logits.
+        // Prepared owners and the existing rollback baseline retain their own budgets.
+        let matrixBytes = try prefillProduct(try prefillProduct(rowElements, 4), 3)
+        let routeStride = MemoryLayout<Int>.stride + MemoryLayout<Float>.stride
+            + 2 * MemoryLayout<QwenBF16GroupedExpertWork>.stride + MemoryLayout<Bool>.stride
+        let routeBytes = try prefillProduct(routeElements, routeStride)
+        let (workspaceBytes, workspaceOverflow) = matrixBytes.addingReportingOverflow(routeBytes)
+        let (boundedBytes, finalOverflow) = workspaceBytes.addingReportingOverflow(
+            try prefillProduct(model.architecture.vocabularySize, MemoryLayout<Float>.stride))
+        // Explicit capture replaces only the legacy per-token raw/input
+        // observers during this prompt. Decode keeps those hooks unchanged.
+        let tokenMajor = groupedCapture == nil
+            ? hooks.requiresTokenMajorPrefill : hooks.requiresOrderedPrefillStages
+        let grouped = !tokenMajor && !workspaceOverflow && !finalOverflow
+            && boundedBytes <= 128 * 1024 * 1024
+            && rowElements <= Int(UInt32.max)
+            && rowElements * MemoryLayout<Float>.stride <= context.device.maxBufferLength
+        lastPrefillDiagnostics = QwenSourceGroupedPrefillDiagnostics(
+            mode: grouped ? .grouped : .tokenMajor, tokenCount: tokenIDs.count)
+
+        let ownsCheckpoint = turnCheckpoint == nil
+        if ownsCheckpoint { try beginTurn() }
+        prefillInFlight = true
+        defer { prefillInFlight = false }
+        if !grouped {
+            do {
+                var logits: [Float] = []
+                for (index, token) in tokenIDs.enumerated() {
+                    logits = try await produceToken(token: token, position: position + index,
+                        featureRow: try featureRowAt?(index),
+                        mropePosition: mropePositions?[index], withinPrefill: true)
+                    await onProgress(index + 1, tokenIDs.count)
+                }
+                try Task.checkCancellation()
+                if ownsCheckpoint {
+                    // Release the batch gate only for this synchronous final
+                    // validation. No suspension follows successful release.
+                    prefillInFlight = false
+                    do { try finishTurn() }
+                    catch { prefillInFlight = true; throw error }
+                }
+                return logits
+            } catch {
+                // produce restores the active turn baseline and refreshes lineage.
+                // Token recovery may already have failed closed. Its error
+                // includes that failure, and another restore would obscure it
+                // with invalidTransaction. An open runner still must restore.
+                if ownsCheckpoint, !unusable {
+                    do {
+                        try await restoreTurnBaselineCore(withinPrefill: true)
+                        turnCheckpoint = nil
+                    } catch let rollbackError {
+                        throw QwenTextRunnerError.execution(
+                            detail: "source prefill failed: \(error); rollback failed: \(rollbackError)")
+                    }
+                }
+                throw error
+            }
+        }
+
+        inFlight = true
+        defer { inFlight = false }
+        do {
+            try Task.checkCancellation()
+            try model.revalidateSource()
+            let residualRows = try buffer(elements: rowElements,
+                stride: MemoryLayout<Float>.stride, label: "source prefill residual rows")
+            let inputRows = try buffer(elements: rowElements,
+                stride: MemoryLayout<Float>.stride, label: "source prefill expert inputs")
+            let outputRows = try buffer(elements: rowElements,
+                stride: MemoryLayout<Float>.stride, label: "source prefill routed outputs")
+            let routingWeights = try buffer(elements: routeElements,
+                stride: MemoryLayout<Float>.stride, label: "source prefill route weights")
+            let residual = residualRows.contents().assumingMemoryBound(to: Float.self)
+            let inputs = inputRows.contents().assumingMemoryBound(to: Float.self)
+            let routeValues = routingWeights.contents().assumingMemoryBound(to: Float.self)
+            let scratch = try moe.makeScratch()
+            for (index, token) in tokenIDs.enumerated() {
+                try Task.checkCancellation()
+                let feature = try featureRowAt?(index)
+                let row: [Float]
+                if let feature {
+                    guard token == Int32(model.visionArchitecture.imageTokenID),
+                          mropePositions != nil else {
+                        throw QwenTextRunnerError.invalidState(detail: "source prefill image row geometry")
+                    }
+                    row = feature
+                } else { row = try await embedding(token) }
+                guard row.count == width, row.allSatisfy(\.isFinite) else {
+                    throw QwenTextRunnerError.execution(detail: "source prefill embedding row")
+                }
+                for column in 0..<width { residual[index * width + column] = row[column] }
+                groupedCapture?.observeConsumedInput?(
+                    position + index, token, feature, mropePositions?[index])
+            }
+            for layer in model.layers.indices {
+                try Task.checkCancellation()
+                let row = model.layers[layer]
+                var routingExpertIDs = [Int](repeating: 0, count: routeElements)
+                var workByExpert: [Int: [QwenBF16GroupedExpertWork]] = [:]
+                for index in tokenIDs.indices {
+                    try Task.checkCancellation()
+                    let hidden = Array(UnsafeBufferPointer(
+                        start: residual.advanced(by: index * width), count: width))
+                    let normalized = try qwenOfficialSourceRMSNorm(hidden, row.inputNorm)
+                    let mixer: [Float]
+                    if let full = fullSteps[layer] {
+                        mixer = try await full.append(hidden: normalized,
+                            mropePosition: mropePositions?[index],
+                            mropeSections: model.architecture.mropeSections)
+                    } else if let linear = linearSteps[layer] {
+                        mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1)
+                    } else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                    guard mixer.count == width else {
+                        throw QwenTextRunnerError.stateArchitectureMismatch
+                    }
+                    let afterMixer = zip(hidden, mixer).map(+)
+                    let post = try qwenOfficialSourceRMSNorm(afterMixer, row.postNorm)
+                    for column in 0..<width {
+                        residual[index * width + column] = afterMixer[column]
+                        inputs[index * width + column] = post[column]
+                    }
+                    let logits = try await projection(row.weights, row.routerName,
+                        input: post, outputCount: model.architecture.experts)
+                    let routing = try QwenMoE.route(logits: logits,
+                        configuration: moeConfiguration, arithmetic: .officialSourceCPU)
+                    guard let ids = routing.selectedExpertIDs.first,
+                          let weights = routing.normalizedWeights.first,
+                          ids.count == topK, weights.count == topK,
+                          Set(ids).count == topK,
+                          ids.allSatisfy({ $0 >= 0 && $0 < model.architecture.experts }),
+                          weights.allSatisfy({ $0.isFinite && $0 >= 0 }),
+                          abs(weights.reduce(Float(0), +) - 1) <= 0.001 else {
+                        throw QwenTextRunnerError.execution(detail: "source prefill Top-8 route")
+                    }
+                    let ranked = logits.indices.sorted {
+                        logits[$0] == logits[$1] ? $0 < $1 : logits[$0] > logits[$1]
+                    }
+                    let cutoff = ranked.count > topK
+                        ? logits[ranked[topK - 1]] - logits[ranked[topK]] : 0
+                    hooks.observeRoute(position + index, layer, logits, ids, weights, cutoff)
+                    groupedCapture?.observeRoute?(position + index, layer, logits, ids, weights, cutoff)
+                    for rank in 0..<topK {
+                        routingExpertIDs[index * topK + rank] = ids[rank]
+                        routeValues[index * topK + rank] = weights[rank]
+                        workByExpert[ids[rank], default: []].append(
+                            QwenBF16GroupedExpertWork(expertID: ids[rank],
+                                tokenIndex: index, routeRank: rank))
+                    }
+                }
+                let uniqueExperts = workByExpert.keys.sorted()
+                // Check the complete immutable layer plan once. Each original
+                // token/rank must contribute exactly once across all chunks.
+                var seen = [Bool](repeating: false, count: routeElements)
+                for expert in uniqueExperts {
+                    for item in workByExpert[expert] ?? [] {
+                        let routeIndex = item.tokenIndex * topK + item.routeRank
+                        guard !seen[routeIndex], routingExpertIDs[routeIndex] == expert else {
+                            throw QwenTextRunnerError.invalidState(detail: "source prefill duplicate route work")
+                        }
+                        seen[routeIndex] = true
+                    }
+                }
+                guard seen.allSatisfy({ $0 }) else {
+                    throw QwenTextRunnerError.invalidState(detail: "source prefill incomplete route work")
+                }
+                lastPrefillDiagnostics?.mappedUniqueExperts[layer] = uniqueExperts.count
+                let coordinator = try expertCoordinator(layer: layer)
+                var firstCommand = true
+                var groupStart = 0
+                while groupStart < uniqueExperts.count {
+                    let groupEnd = min(groupStart + expertSlotCount, uniqueExperts.count)
+                    let groupIDs = Array(uniqueExperts[groupStart..<groupEnd])
+                    let groupWork = groupIDs.flatMap { workByExpert[$0] ?? [] }
+                    var workStart = 0
+                    while workStart < groupWork.count {
+                        try Task.checkCancellation()
+                        let workEnd = min(workStart + QwenMoE.maximumGroupedContributionsPerCommand,
+                                          groupWork.count)
+                        let work = Array(groupWork[workStart..<workEnd])
+                        // Load the complete group once. Subsequent chunks can map
+                        // their current subset as hits without evicting this group.
+                        let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
+                        try model.revalidateSource()
+                        let lease = try await coordinator.map(expertIDs: requested)
+                        successfulCacheHits += UInt64(lease.diagnostics.hits)
+                        successfulCacheMisses += UInt64(lease.diagnostics.misses)
+                        publishCacheSummary()
+                        lastPrefillDiagnostics?.mappingHits += UInt64(lease.diagnostics.hits)
+                        lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
+                        lastRoutedExpertCount = topK
+                        do {
+                            try model.revalidateSource()
+                            try await moe.submitGroupedExpertsBF16(
+                                hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
+                                routingWeights: routingWeights, outputRows: outputRows,
+                                tokenCount: tokenIDs.count, lease: lease, work: work,
+                                sharedWeights: row.weights, scratch: scratch,
+                                initializeOutput: firstCommand)
+                        } catch {
+                            try? lease.cancel()
+                            throw error
+                        }
+                        firstCommand = false
+                        workStart = workEnd
+                    }
+                    groupStart = groupEnd
+                }
+                for index in tokenIDs.indices {
+                    try Task.checkCancellation()
+                    let post = Array(UnsafeBufferPointer(
+                        start: inputs.advanced(by: index * width), count: width))
+                    let output = outputRows.contents().assumingMemoryBound(to: Float.self)
+                    let routed = Array(UnsafeBufferPointer(
+                        start: output.advanced(by: index * width), count: width))
+                    let sharedInput = try floats(post, label: "source prefill shared input")
+                    let sharedOutput = try floats(routed, label: "source prefill shared output")
+                    let command = try commandBuffer()
+                    try moe.encodeSharedBF16(commandBuffer: command, hidden: sharedInput,
+                        weights: row.weights, names: row.sharedNames,
+                        scratch: scratch, output: sharedOutput)
+                    try await settle(command, stage: "source.prefill.shared")
+                    let combined = read(sharedOutput, count: width)
+                    for column in 0..<width {
+                        residual[index * width + column] = residual[index * width + column] + combined[column]
+                    }
+                    guard (0..<width).allSatisfy({ residual[index * width + $0].isFinite }) else {
+                        throw QwenTextRunnerError.execution(detail: "nonfinite source prefill hidden")
+                    }
+                    if layer == model.layers.count - 1, index + 1 < tokenIDs.count {
+                        await onProgress(index + 1, tokenIDs.count)
+                    }
+                }
+                lastPrefillDiagnostics?.completedLayers += 1
+            }
+            let finalHidden = Array(UnsafeBufferPointer(
+                start: residual.advanced(by: (tokenIDs.count - 1) * width), count: width))
+            let final = try qwenOfficialSourceRMSNorm(finalHidden, model.finalNorm)
+            let logits = try await projection(model.entryWeights, model.headName,
+                input: final, outputCount: model.architecture.vocabularySize)
+            guard logits.count == model.architecture.vocabularySize,
+                  logits.allSatisfy(\.isFinite) else {
+                throw QwenTextRunnerError.execution(detail: "nonfinite source prefill logits")
+            }
+            groupedCapture?.observeFinalRawLogits?(position + tokenIDs.count - 1,
+                                                  tokenIDs[tokenIDs.count - 1], logits)
+            await onProgress(tokenIDs.count, tokenIDs.count)
+            try Task.checkCancellation()
+            try model.revalidateSource()
+            let expected = position + tokenIDs.count
+            let full = try fullKV.snapshot()
+            let linearPositionsMatch = try linearSteps.keys.allSatisfy {
+                try linearState.committedPosition(layer: $0) == expected
+            }
+            guard full.position == expected, linearPositionsMatch else {
+                throw QwenTextRunnerError.invalidState(detail: "source prefill final layer positions")
+            }
+            committedPosition = expected
+            if ownsCheckpoint { turnCheckpoint = nil }
+            return logits
+        } catch {
+            await linearState.waitUntilIdle()
+            do {
+                guard let checkpoint = turnCheckpoint else {
+                    throw QwenTextRunnerError.invalidTransaction
+                }
+                try linearState.restore(checkpoint.linear)
+                try fullKV.restore(checkpoint.full)
+                committedPosition = checkpoint.position
+                turnCheckpoint?.full = try fullKV.snapshot()
+                if ownsCheckpoint { turnCheckpoint = nil }
+            } catch let rollbackError {
+                unusable = true
+                throw QwenTextRunnerError.execution(
+                    detail: "source prefill failed: \(error); rollback failed: \(rollbackError)")
+            }
+            throw error
+        }
+    }
+
+    private func prefillProduct(_ lhs: Int, _ rhs: Int) throws -> Int {
+        let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+        guard lhs > 0, rhs > 0, !overflow else {
+            throw QwenTextRunnerError.invalidState(detail: "source prefill workspace overflow")
+        }
+        return value
+    }
+
     /// Exactly one turn baseline; full KV's owner/lineage stays opaque here.
     /// Individual tokens still have their own existing atomic failure recovery.
     func beginTurn() throws {
-        guard !inFlight, !unusable, turnCheckpoint == nil else {
+        guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint == nil else {
             throw QwenTextRunnerError.operationInProgress
         }
         try model.revalidateSource()
@@ -328,7 +714,12 @@ actor QwenOfficialSourceRunner {
     /// Restores the turn's pre-write state, then refreshes KV lineage so that
     /// a second failure during suffix replay can still roll back the same turn.
     func restoreTurnBaseline() async throws {
-        guard !inFlight, !unusable, let checkpoint = turnCheckpoint else {
+        try await restoreTurnBaselineCore(withinPrefill: false)
+    }
+
+    private func restoreTurnBaselineCore(withinPrefill: Bool) async throws {
+        guard !inFlight, !unusable, !prefillInFlight || withinPrefill,
+              let checkpoint = turnCheckpoint else {
             throw QwenTextRunnerError.invalidTransaction
         }
         await linearState.waitUntilIdle()
@@ -354,7 +745,7 @@ actor QwenOfficialSourceRunner {
     /// the only irreversible checkpoint release. If it throws, the checkpoint
     /// remains available to rollback; no await or throw follows its success.
     func finishTurn(validateCompanion: @Sendable () throws -> Void = {}) throws {
-        guard !inFlight, !unusable, turnCheckpoint != nil else {
+        guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint != nil else {
             throw QwenTextRunnerError.invalidTransaction
         }
         try model.revalidateSource()
@@ -363,7 +754,7 @@ actor QwenOfficialSourceRunner {
     }
 
     func resetConversation() throws {
-        guard !inFlight, !unusable, turnCheckpoint == nil else {
+        guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint == nil else {
             throw QwenTextRunnerError.operationInProgress
         }
         try model.revalidateSource()
@@ -380,7 +771,7 @@ actor QwenOfficialSourceRunner {
     /// Diagnostic copies of committed FP32 state, never the BF16 weights or
     /// speculative KV tail. Shared Metal buffers are idle at this actor gate.
     func diagnosticSnapshot() throws -> QwenOfficialSourceRunnerDiagnosticSnapshot {
-        guard !inFlight, !unusable else {
+        guard !inFlight, !unusable, !prefillInFlight else {
             throw QwenTextRunnerError.operationInProgress
         }
         let linear = try linearState.clone()
@@ -418,7 +809,9 @@ actor QwenOfficialSourceRunner {
                                 stride: MemoryLayout<Float>.stride,
                                 label: "source embedding")
         let command = try commandBuffer()
-        try model.entryWeights.encodeEmbedding(
+        // These IDs are owned only by this call and remain immutable through
+        // settlement, allowing the encoder to bind only their weight chunks.
+        try model.entryWeights.encodeEmbeddingFromImmutableIDs(
             commandBuffer: command, tensorName: model.embeddingName,
             tokenIDs: ids, tokenCount: 1, output: output)
         try await settle(command, stage: "source.embedding")
@@ -470,6 +863,7 @@ actor QwenOfficialSourceRunner {
         // these completed cache reads, even when the token is rolled back.
         successfulCacheHits += UInt64(lease.diagnostics.hits)
         successfulCacheMisses += UInt64(lease.diagnostics.misses)
+        publishCacheSummary()
         do {
             // Protected reads validate their retained shard before and after
             // every slice. Recheck the complete source once after mapping so
@@ -525,6 +919,8 @@ actor QwenOfficialSourceRunner {
         expertCacheStorage.coordinators[layer] = coordinator
         allocatedCacheBytes = nextAllocated
         peakAllocatedCacheBytes = max(peakAllocatedCacheBytes, allocatedCacheBytes)
+        // Allocation is real even if the subsequent map fails.
+        publishCacheSummary()
         return coordinator
     }
 

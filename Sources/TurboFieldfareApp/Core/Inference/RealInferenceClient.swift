@@ -200,7 +200,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
     /// Bytes allocated by the loaded family's routed-expert caches. Zero is a
     /// valid loaded value; nil means there is no installed model to report.
     public var currentExpertCacheBytes: UInt64? {
-        session.expertCacheBytes.withLock { $0 }
+        session.currentExpertCacheAllocatedBytes
     }
 
     func generatePreparedQwen(
@@ -644,6 +644,15 @@ actor RealInferenceSession {
     nonisolated let conversationLogicalStateBytes = Mutex<UInt64?>(nil)
     /// Actual allocated routed-expert cache bytes for the installed family.
     nonisolated let expertCacheBytes = Mutex<UInt64?>(nil)
+    // Mirrors only the installed source session. Retirement clears this owner
+    // synchronously so telemetry cannot keep a retired cache alive.
+    nonisolated let sourceExpertCacheOwner = Mutex<QwenOfficialSourceConversationGenerationSession?>(nil)
+
+    nonisolated var currentExpertCacheAllocatedBytes: UInt64? {
+        let source = sourceExpertCacheOwner.withLock { $0 }
+        if let source { return source.currentRoutedExpertCacheSummary?.allocatedBytes }
+        return expertCacheBytes.withLock { $0 }
+    }
     /// Set by Stop, read by the decode loop at each token boundary.
     ///
     /// Cancelling the task instead throws out of `runRawCompletion`'s loop
@@ -1250,6 +1259,38 @@ actor RealInferenceSession {
         }
     }
 
+    /// Test seam parallel to installQwenFixture, using the source fixture's
+    /// real generation session and the production installation lifecycle.
+    /// Production source loading still requires its verified bundle and codec.
+    func installQwenOfficialSourceFixture(
+        model: QwenOfficialSourceModel,
+        generation: QwenOfficialSourceConversationGenerationSession,
+        key: SessionLoadKey,
+        context: MetalContext
+    ) async throws {
+        let transition = try beginLifecycleTransition()
+        do {
+            try await drainRetired(transition)
+            try requireActive(transition)
+            let status = await generation.status()
+            try requireActive(transition)
+            let prepared = PreparedInstallation(
+                key: key, context: context, family: .qwenSource(model),
+                identity: nil, codec: nil, qwenGeneration: nil,
+                tokenizer: nil, sourceGeneration: generation,
+                runner: nil, scratch: nil, model: nil,
+                conversation: nil, visionRuntime: nil, visionError: nil,
+                logicalStateBytes: status.committed.logicalStateBytes,
+                expertCacheBytes: generation.currentRoutedExpertCacheSummary?.allocatedBytes ?? 0)
+            transition.prepared = prepared
+            try installPrepared(prepared, transition: transition)
+            finishInstall(transition)
+        } catch {
+            await cleanup(transition, explicitUnload: false)
+            throw error
+        }
+    }
+
     private static func validate(_ bundle: LoadedModelFamilyBundle) throws {
         switch (bundle.family, bundle.runtime, bundle.verifiedIdentity,
                 bundle.qwenCodec, bundle.sourceIdentity) {
@@ -1283,6 +1324,7 @@ actor RealInferenceSession {
         conversationImageProvenance.removeAll()
         conversationTokens.withLock { $0 = 0 }
         conversationLogicalStateBytes.withLock { $0 = nil }
+        sourceExpertCacheOwner.withLock { $0 = nil }
         expertCacheBytes.withLock { $0 = nil }
         loadedFamily = nil
         qwenCodec = nil
@@ -1319,6 +1361,7 @@ actor RealInferenceSession {
         qwenPendingToolCalls.removeAll(keepingCapacity: true)
         conversationTokens.withLock { $0 = 0 }
         conversationLogicalStateBytes.withLock { $0 = nil }
+        sourceExpertCacheOwner.withLock { $0 = nil }
         expertCacheBytes.withLock { $0 = nil }
         var capturedConversation = transition.retired?.conversation
         if let capturedConversation { await capturedConversation.invalidate() }
@@ -1454,7 +1497,7 @@ actor RealInferenceSession {
                 model: nil, conversation: nil, visionRuntime: nil,
                 visionError: nil,
                 logicalStateBytes: status.committed.logicalStateBytes,
-                expertCacheBytes: 0)
+                expertCacheBytes: sourceGeneration.currentRoutedExpertCacheSummary?.allocatedBytes ?? 0)
         }
     }
 
@@ -1469,6 +1512,7 @@ actor RealInferenceSession {
         qwenCodec = prepared.codec
         qwenGeneration = prepared.qwenGeneration
         sourceGeneration = prepared.sourceGeneration
+        sourceExpertCacheOwner.withLock { $0 = prepared.sourceGeneration }
         loadedSourceIdentity = prepared.sourceIdentity
         qwenTools.removeAll(keepingCapacity: true)
         qwenSystemPrompt = nil
@@ -1507,6 +1551,7 @@ actor RealInferenceSession {
         transition.retired?.releaseAll()
         transition.retired = nil
         conversationLogicalStateBytes.withLock { $0 = nil }
+        sourceExpertCacheOwner.withLock { $0 = nil }
         expertCacheBytes.withLock { $0 = nil }
         if explicitUnload || transition.teardownRequested {
             tokenizer = nil
@@ -1794,6 +1839,7 @@ actor RealInferenceSession {
             tokenizerDirectoryCache.clear()
             ctx = nil
             conversationLogicalStateBytes.withLock { $0 = nil }
+            sourceExpertCacheOwner.withLock { $0 = nil }
             expertCacheBytes.withLock { $0 = nil }
             return
         }
@@ -1805,6 +1851,7 @@ actor RealInferenceSession {
         qwenPendingToolCalls.removeAll(keepingCapacity: true)
         conversationTokens.withLock { $0 = 0 }
         conversationLogicalStateBytes.withLock { $0 = nil }
+        sourceExpertCacheOwner.withLock { $0 = nil }
         expertCacheBytes.withLock { $0 = nil }
         var capturedConversation = transition.retired?.conversation
         if let capturedConversation { await capturedConversation.invalidate() }
@@ -2561,7 +2608,7 @@ actor RealInferenceSession {
             peakMemoryBytes: memorySampler.peakBytes,
             visionTowerMappedBytes: visionRuntime.map { UInt64($0.retainedWeightBytes) },
             conversationLogicalStateBytes: conversationLogicalStateBytes.withLock { $0 },
-            expertCacheBytes: expertCacheBytes.withLock { $0 },
+            expertCacheBytes: currentExpertCacheAllocatedBytes,
             runtimeOptions: request.runtimeOptions,
             prefill: prefill,
             runner: runnerTiming,

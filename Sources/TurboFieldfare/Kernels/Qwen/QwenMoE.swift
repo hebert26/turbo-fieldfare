@@ -136,6 +136,13 @@ struct QwenBF16SharedNames: Sendable {
     let outputGate: String
 }
 
+/// One original-rank contribution to a token's routed output row.
+struct QwenBF16GroupedExpertWork: Sendable {
+    let expertID: Int
+    let tokenIndex: Int
+    let routeRank: Int
+}
+
 final class QwenMoEScratch: @unchecked Sendable {
     let routedActivation: MTLBuffer
     let sharedGate: MTLBuffer
@@ -159,6 +166,8 @@ final class QwenMoEScratch: @unchecked Sendable {
 /// Qwen MoE reference ordering and concrete correctness Metal operations.
 /// The production session-family integration is deliberately a Phase-12 concern.
 final class QwenMoE {
+    static let maximumGroupedContributionsPerCommand = 128
+
     private struct RoutingParameters {
         var tokenCount: UInt32
         var expertCount: UInt32
@@ -199,6 +208,27 @@ final class QwenMoE {
         let mapped: QwenMappedExpert
         var gateUp: RoutedParameters
         var down: RoutedParameters
+    }
+
+    /// Transfers only completion waiting and resource retention to a background
+    /// thread after submit has committed the command. It never encodes work or
+    /// accesses buffer contents. The caller waits before reusing these buffers.
+    private final class GroupedCommandCompletion: @unchecked Sendable {
+        private let command: MTLCommandBuffer
+        private let lease: QwenBF16ExpertLease
+        private let buffers: [MTLBuffer]
+
+        init(command: MTLCommandBuffer, lease: QwenBF16ExpertLease, buffers: [MTLBuffer]) {
+            self.command = command
+            self.lease = lease
+            self.buffers = buffers
+        }
+
+        func wait() {
+            command.waitUntilCompleted()
+            withExtendedLifetime(buffers) {}
+            withExtendedLifetime(lease) {}
+        }
     }
 
     let configuration: QwenMoEConfiguration
@@ -833,6 +863,296 @@ final class QwenMoE {
             try encodeSharedBF16(commandBuffer: command, hidden: hidden,
                                  weights: sharedWeights, names: sharedNames,
                                  scratch: scratch, output: output)
+        }
+    }
+
+    /// The caller supplies consecutive chunks of globally ascending expert IDs.
+    /// Each chunk binds only its current lease, retaining the original token rank
+    /// for weights. Shared experts run after all routed chunks have settled.
+    func submitGroupedExpertsBF16(
+        hiddenRows: MTLBuffer,
+        routingExpertIDs: [Int],
+        routingWeights: MTLBuffer,
+        outputRows: MTLBuffer,
+        tokenCount: Int,
+        lease: QwenBF16ExpertLease,
+        work: [QwenBF16GroupedExpertWork],
+        sharedWeights: QwenBF16Weights,
+        scratch: QwenMoEScratch,
+        initializeOutput: Bool,
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws {
+        // Capture inside submit: its encoding failure path still commits the
+        // partially encoded command and holds both buffers until completion.
+        var submittedCommand: MTLCommandBuffer?
+        let retainedBuffers = [hiddenRows, routingWeights, outputRows,
+            scratch.routedActivation, scratch.sharedGate, scratch.sharedUp,
+            scratch.sharedActivation, scratch.sharedOutput, scratch.sharedOutputGate]
+        do {
+            try Task.checkCancellation()
+            try lease.requireUsable()
+            guard tokenCount > 0, UInt32(exactly: tokenCount) != nil else {
+                throw QwenMoEError.invalidConfiguration(field: "grouped tokenCount", value: tokenCount)
+            }
+            guard !work.isEmpty, work.count <= Self.maximumGroupedContributionsPerCommand else {
+                throw QwenMoEError.invalidCount(
+                    field: "grouped contributions", expected: Self.maximumGroupedContributionsPerCommand,
+                    actual: work.count)
+            }
+            guard !lease.experts.isEmpty, lease.experts.count <= configuration.expertCount,
+                  lease.experts.map(\.expertID) == lease.diagnostics.requestedExpertIDs else {
+                throw QwenMoEError.invalidAffineBinding("grouped lease IDs differ from requested IDs")
+            }
+            let rowElements = try Self.checkedMultiply(
+                tokenCount, configuration.hiddenSize, operation: "grouped hidden elements")
+            let routeCount = try Self.checkedMultiply(
+                tokenCount, configuration.topK, operation: "grouped route elements")
+            let activationCount = try Self.checkedMultiply(
+                configuration.topK, configuration.routedIntermediateSize,
+                operation: "grouped activation elements")
+            let gateRows = try Self.checkedMultiply(
+                2, configuration.routedIntermediateSize, operation: "grouped gate/up rows")
+            let gateCount = try Self.checkedMultiply(
+                gateRows, configuration.hiddenSize, operation: "grouped gate/up elements")
+            let downCount = try Self.checkedMultiply(
+                configuration.hiddenSize, configuration.routedIntermediateSize,
+                operation: "grouped down elements")
+            guard [rowElements, routeCount, activationCount, gateCount, downCount]
+                    .allSatisfy({ UInt32(exactly: $0) != nil }) else {
+                throw QwenMoEError.arithmeticOverflow(operation: "grouped Metal scalar indexing")
+            }
+            let gateBytes = try Self.checkedMultiply(
+                gateCount, MemoryLayout<UInt16>.stride, operation: "grouped gate/up bytes")
+            let downBytes = try Self.checkedMultiply(
+                downCount, MemoryLayout<UInt16>.stride, operation: "grouped down bytes")
+            guard gateBytes <= device.maxBufferLength, downBytes <= device.maxBufferLength else {
+                throw QwenMoEError.invalidExpertShape(expert: -1)
+            }
+            guard routingExpertIDs.count == routeCount else {
+                throw QwenMoEError.invalidCount(
+                    field: "grouped route IDs", expected: routeCount, actual: routingExpertIDs.count)
+            }
+            try Self.requireBuffer(hiddenRows, named: "grouped hidden", elements: rowElements, as: Float.self)
+            try Self.requireBuffer(outputRows, named: "grouped output", elements: rowElements, as: Float.self)
+            try Self.requireBuffer(routingWeights, named: "grouped weights", elements: routeCount, as: Float.self)
+            try Self.requireBuffer(scratch.routedActivation, named: "grouped routedActivation",
+                                   elements: activationCount, as: Float.self)
+            try Self.requireBuffer(scratch.sharedGate, named: "grouped sharedGate",
+                                   elements: configuration.sharedIntermediateSize, as: Float.self)
+            try Self.requireBuffer(scratch.sharedUp, named: "grouped sharedUp",
+                                   elements: configuration.sharedIntermediateSize, as: Float.self)
+            try Self.requireBuffer(scratch.sharedActivation, named: "grouped sharedActivation",
+                                   elements: configuration.sharedIntermediateSize, as: Float.self)
+            try Self.requireBuffer(scratch.sharedOutput, named: "grouped sharedOutput",
+                                   elements: configuration.hiddenSize, as: Float.self)
+            try Self.requireBuffer(scratch.sharedOutputGate, named: "grouped sharedOutputGate",
+                                   elements: 1, as: Float.self)
+            guard retainedBuffers.allSatisfy({ $0.device === device }),
+                  Set(retainedBuffers.map { ObjectIdentifier($0) }).count == retainedBuffers.count,
+                  routingWeights.storageMode == .shared,
+                  sharedWeights.inspectedChunks.allSatisfy({ $0.buffer.device === device }) else {
+                throw QwenMoEError.invalidAffineBinding("grouped device, alias or routing storage")
+            }
+            try Self.requireDistinctSharedWeights(sharedWeights, from: retainedBuffers)
+            var mappedByID: [Int: QwenBF16MappedExpert] = [:]
+            var mappedBufferIDs = Set<ObjectIdentifier>()
+            for mapped in lease.experts {
+                guard mapped.expertID >= 0, mapped.expertID < configuration.expertCount,
+                      mappedByID[mapped.expertID] == nil,
+                      mapped.gateUp !== mapped.down,
+                      mapped.gateUp.device === device, mapped.down.device === device,
+                      mapped.gateUp.storageMode == .shared, mapped.down.storageMode == .shared,
+                      mapped.gateUpLength == gateBytes, mapped.downLength == downBytes,
+                      mapped.gateUp.length >= gateBytes, mapped.down.length >= downBytes,
+                      mappedBufferIDs.insert(ObjectIdentifier(mapped.gateUp)).inserted,
+                      mappedBufferIDs.insert(ObjectIdentifier(mapped.down)).inserted,
+                      !retainedBuffers.contains(where: { $0 === mapped.gateUp || $0 === mapped.down }) else {
+                    throw QwenMoEError.invalidExpertShape(expert: mapped.expertID)
+                }
+                try Self.requireDistinctSharedWeights(sharedWeights, from: [mapped.gateUp, mapped.down])
+                mappedByID[mapped.expertID] = mapped
+            }
+            let weights = routingWeights.contents().assumingMemoryBound(to: Float.self)
+            // The runner checks all rows when routes are created. Recheck each
+            // complete row used by this chunk, without rescanning unused tokens.
+            var referencedTokens = Set<Int>()
+            for item in work {
+                guard item.tokenIndex >= 0, item.tokenIndex < tokenCount,
+                      item.routeRank >= 0, item.routeRank < configuration.topK else {
+                    throw QwenMoEError.invalidAffineBinding("grouped token or route rank out of bounds")
+                }
+                referencedTokens.insert(item.tokenIndex)
+            }
+            for token in referencedTokens.sorted() {
+                try Task.checkCancellation()
+                var selected = Set<Int>()
+                var sum: Float = 0
+                for rank in 0..<configuration.topK {
+                    let index = token * configuration.topK + rank
+                    let expertID = routingExpertIDs[index]
+                    guard expertID >= 0, expertID < configuration.expertCount else {
+                        throw QwenMoEError.missingExpert(expertID)
+                    }
+                    guard selected.insert(expertID).inserted else {
+                        throw QwenMoEError.duplicateExpertWithinToken(token: token, expert: expertID)
+                    }
+                    let weight = weights[index]
+                    guard weight.isFinite, weight >= 0 else {
+                        throw QwenMoEError.invalidAffineBinding("nonfinite/negative grouped routing weight")
+                    }
+                    sum += weight
+                }
+                guard sum.isFinite, abs(sum - 1) <= 0.001 else {
+                    throw QwenMoEError.invalidAffineBinding("grouped Top-8 weights not normalized")
+                }
+            }
+            // Preflight every byte offset and association before transferring
+            // the lease. Strict expert/token order also rejects duplicate work.
+            var offsets: [(row: Int, weight: Int)] = []
+            offsets.reserveCapacity(work.count)
+            var previous: QwenBF16GroupedExpertWork?
+            for item in work {
+                if let previous,
+                   !(previous.expertID < item.expertID
+                     || (previous.expertID == item.expertID && previous.tokenIndex < item.tokenIndex)) {
+                    throw QwenMoEError.invalidAffineBinding("grouped work is not strictly expert/token ordered")
+                }
+                guard mappedByID[item.expertID] != nil else {
+                    throw QwenMoEError.missingExpert(item.expertID)
+                }
+                let routeIndex = item.tokenIndex * configuration.topK + item.routeRank
+                guard routingExpertIDs[routeIndex] == item.expertID else {
+                    throw QwenMoEError.invalidAffineBinding("grouped expert differs from original route rank")
+                }
+                let rowOffset = try Self.checkedMultiply(
+                    item.tokenIndex * configuration.hiddenSize, MemoryLayout<Float>.stride,
+                    operation: "grouped row byte offset")
+                let weightOffset = try Self.checkedMultiply(
+                    routeIndex, MemoryLayout<Float>.stride, operation: "grouped weight byte offset")
+                try Self.requireBuffer(hiddenRows, named: "grouped hidden row", offset: rowOffset,
+                                       elements: configuration.hiddenSize, as: Float.self)
+                try Self.requireBuffer(outputRows, named: "grouped output row", offset: rowOffset,
+                                       elements: configuration.hiddenSize, as: Float.self)
+                try Self.requireBuffer(routingWeights, named: "grouped rank weight", offset: weightOffset,
+                                       elements: 1, as: Float.self)
+                offsets.append((row: rowOffset, weight: weightOffset))
+                previous = item
+            }
+            let gateSelection = try bf16RoutedPipeline(
+                serialName: "qwen_moe_routed_gate_up_bf16",
+                cooperativeName: "qwen_moe_routed_gate_up_bf16_cooperative",
+                useCooperative: configuration.routedIntermediateSize >= 256
+                    && configuration.hiddenSize >= 512 && configuration.hiddenSize.isMultiple(of: 64))
+            let downSelection = try bf16RoutedPipeline(
+                serialName: "qwen_moe_routed_down_add_bf16",
+                cooperativeName: "qwen_moe_routed_down_add_bf16_cooperative",
+                useCooperative: configuration.hiddenSize >= 512
+                    && configuration.routedIntermediateSize >= 512
+                    && configuration.routedIntermediateSize.isMultiple(of: 64))
+            try requireDispatchable(gateSelection.pipeline, count: configuration.routedIntermediateSize)
+            try requireDispatchable(downSelection.pipeline, count: configuration.hiddenSize)
+            if initializeOutput { try requireDispatchable(clearPipeline, count: rowElements) }
+            try Task.checkCancellation()
+            try lease.submit(on: queue) { command in
+                submittedCommand = command
+                command.label = "qwen.moe.grouped-bf16"
+                if initializeOutput {
+                    try encodeClear(commandBuffer: command, buffer: outputRows, count: rowElements)
+                }
+                for (index, item) in work.enumerated() {
+                    try Task.checkCancellation()
+                    // No mapping from an earlier chunk is reused here.
+                    guard let mapped = mappedByID[item.expertID] else {
+                        throw QwenMoEError.missingExpert(item.expertID)
+                    }
+                    var parameters = BF16RoutedParameters(
+                        hiddenSize: UInt32(configuration.hiddenSize),
+                        intermediateSize: UInt32(configuration.routedIntermediateSize), scratchOffset: 0)
+                    guard let gateEncoder = command.makeComputeCommandEncoder() else {
+                        throw QwenMoEError.commandEncoderUnavailable
+                    }
+                    do {
+                        defer { gateEncoder.endEncoding() }
+                        gateEncoder.setComputePipelineState(gateSelection.pipeline)
+                        gateEncoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                                             index: QwenMetalBufferIndex.parameters.rawValue)
+                        gateEncoder.setBuffer(hiddenRows, offset: offsets[index].row,
+                                              index: QwenMetalBufferIndex.input.rawValue)
+                        gateEncoder.setBuffer(mapped.gateUp, offset: 0,
+                                              index: QwenMetalBufferIndex.weights.rawValue)
+                        gateEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                              index: QwenMetalBufferIndex.scratch.rawValue)
+                        gateEncoder.useResource(mapped.gateUp, usage: .read)
+                        try dispatchBF16Routed(gateEncoder, pipeline: gateSelection.pipeline,
+                                               rows: configuration.routedIntermediateSize,
+                                               cooperative: gateSelection.cooperative)
+                    }
+                    guard let downEncoder = command.makeComputeCommandEncoder() else {
+                        throw QwenMoEError.commandEncoderUnavailable
+                    }
+                    do {
+                        defer { downEncoder.endEncoding() }
+                        downEncoder.setComputePipelineState(downSelection.pipeline)
+                        downEncoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                                             index: QwenMetalBufferIndex.parameters.rawValue)
+                        downEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                              index: QwenMetalBufferIndex.input.rawValue)
+                        downEncoder.setBuffer(mapped.down, offset: 0,
+                                              index: QwenMetalBufferIndex.weights.rawValue)
+                        downEncoder.setBuffer(outputRows, offset: offsets[index].row,
+                                              index: QwenMetalBufferIndex.output.rawValue)
+                        downEncoder.setBuffer(routingWeights, offset: offsets[index].weight,
+                                              index: QwenMetalBufferIndex.state.rawValue)
+                        downEncoder.useResource(mapped.down, usage: .read)
+                        try dispatchBF16Routed(downEncoder, pipeline: downSelection.pipeline,
+                                               rows: configuration.hiddenSize,
+                                               cooperative: downSelection.cooperative)
+                    }
+                }
+                try Task.checkCancellation()
+            }
+        } catch {
+            if let command = submittedCommand {
+                // Await cleanup but preserve the original encoding error. If
+                // settlement invariants fail, this throw still rejects output
+                // and the coordinator keeps any unresolved slot pins reserved.
+                try? await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers)
+            } else {
+                try? lease.cancel()
+            }
+            throw error
+        }
+        guard let command = submittedCommand else {
+            throw MetalError.commandBufferFailed("grouped lease submitted without a captured command")
+        }
+        try await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers)
+        try checkCommandBufferError(command)
+        try Task.checkCancellation()
+        guard lease.snapshot().succeeded == true else {
+            throw QwenExpertMappingError.canceled
+        }
+    }
+
+    private static func settleGroupedCommand(
+        _ command: MTLCommandBuffer, lease: QwenBF16ExpertLease, buffers: [MTLBuffer],
+        isolation: isolated (any Actor)? = #isolation
+    ) async throws {
+        // Unlike terminal status, waitUntilCompleted includes all completion
+        // handlers. A background thread waits so no cooperative executor blocks.
+        let completion = GroupedCommandCompletion(command: command, lease: lease, buffers: buffers)
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    completion.wait()
+                    continuation.resume()
+                }
+            }
+        } onCancel: {
+            try? lease.cancel()
+        }
+        let snapshot = lease.snapshot()
+        guard snapshot.submitted, snapshot.completed else {
+            throw MetalError.commandBufferFailed("grouped command finished before lease settlement")
         }
     }
 

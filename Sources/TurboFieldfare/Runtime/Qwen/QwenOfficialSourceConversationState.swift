@@ -11,6 +11,10 @@ struct QwenOfficialSourceTransactionHooks: Sendable {
     let afterActualGPUCompletion: @Sendable (String) async throws -> Void
     /// Explicit callbacks, including no-op callbacks, retain stage boundaries.
     let requiresSeparateGPUStages: Bool
+    /// Explicit per-token observations retain their original publication timing.
+    let requiresTokenMajorPrefill: Bool
+    /// These boundaries cannot be replaced by an explicit grouped capture.
+    let requiresOrderedPrefillStages: Bool
     let betweenConsumedTokens: @Sendable (Int) async throws -> Void
     let beforeTurnCommit: @Sendable () async throws -> Void
     let beforeRollbackRestore: @Sendable () throws -> Void
@@ -30,11 +34,11 @@ struct QwenOfficialSourceTransactionHooks: Sendable {
             (Int, Int, QwenBF16ExpertReadHooks.Stream) throws -> Void = { _, _, _ in },
         afterActualGPUSubmission: (@Sendable (String) async throws -> Void)? = nil,
         afterActualGPUCompletion: (@Sendable (String) async throws -> Void)? = nil,
-        betweenConsumedTokens: @escaping @Sendable (Int) async throws -> Void = { _ in },
+        betweenConsumedTokens: (@Sendable (Int) async throws -> Void)? = nil,
         beforeTurnCommit: @escaping @Sendable () async throws -> Void = {},
         beforeRollbackRestore: @escaping @Sendable () throws -> Void = {},
         observeRoute: @escaping @Sendable (Int, Int, [Float], [Int], [Float], Float) -> Void = { _, _, _, _, _, _ in },
-        observeRawLogits: @escaping @Sendable (Int, Int32, [Float]) -> Void = { _, _, _ in },
+        observeRawLogits: (@Sendable (Int, Int32, [Float]) -> Void)? = nil,
         observePublicLogitsAndSample: @escaping @Sendable (Int, [UInt16], Int32) -> Void = { _, _, _ in },
         observeActivation: (@Sendable (Int, Int, String, [Float]) -> Void)? = nil,
         observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)? = nil
@@ -44,11 +48,14 @@ struct QwenOfficialSourceTransactionHooks: Sendable {
         self.afterActualGPUCompletion = afterActualGPUCompletion ?? { _ in }
         requiresSeparateGPUStages = afterActualGPUSubmission != nil
             || afterActualGPUCompletion != nil || observeActivation != nil
-        self.betweenConsumedTokens = betweenConsumedTokens
+        requiresOrderedPrefillStages = requiresSeparateGPUStages || betweenConsumedTokens != nil
+        requiresTokenMajorPrefill = requiresOrderedPrefillStages
+            || observeRawLogits != nil || observeConsumedInput != nil
+        self.betweenConsumedTokens = betweenConsumedTokens ?? { _ in }
         self.beforeTurnCommit = beforeTurnCommit
         self.beforeRollbackRestore = beforeRollbackRestore
         self.observeRoute = observeRoute
-        self.observeRawLogits = observeRawLogits
+        self.observeRawLogits = observeRawLogits ?? { _, _, _ in }
         self.observePublicLogitsAndSample = observePublicLogitsAndSample
         self.observeActivation = observeActivation
         self.observeConsumedInput = observeConsumedInput
@@ -116,6 +123,7 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
     private let model: QwenOfficialSourceModel
     private let runner: QwenOfficialSourceRunner
     private let hooks: QwenOfficialSourceTransactionHooks
+    private let groupedPrefillEnabled: Bool
     private let vocabularySize: Int
     private let fixedStateBytes: UInt64
     private var committed = Aggregate()
@@ -123,9 +131,11 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
     private var nextID: UInt64 = 1
     private var mutating = false
     private var unusable = false
+    private var legacyPrefillDiagnostics: QwenSourceGroupedPrefillDiagnostics?
 
     init(model: QwenOfficialSourceModel, context: MetalContext,
          maxContext: Int, expertSlotCount: Int,
+         groupedPrefillEnabled: Bool = true,
          hooks: QwenOfficialSourceTransactionHooks = .none) async throws {
         guard maxContext > 0, model.architecture.vocabularySize > 0,
               expertSlotCount == model.expertCacheSlots else {
@@ -154,6 +164,7 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
         self.model = model
         self.runner = runner
         self.hooks = hooks
+        self.groupedPrefillEnabled = groupedPrefillEnabled
         vocabularySize = model.architecture.vocabularySize
         modelIdentity = model.sourceIdentity
         contextLimit = maxContext
@@ -173,6 +184,13 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
 
     func prefill(_ tokenIDs: [Int32], transaction: ConversationTransactionID,
                  onProgress: @Sendable (Int, Int) async -> Void) async throws {
+        try await prefill(tokenIDs, transaction: transaction,
+                          groupedCapture: nil, onProgress: onProgress)
+    }
+
+    func prefill(_ tokenIDs: [Int32], transaction: ConversationTransactionID,
+                 groupedCapture: QwenSourceGroupedPrefillCapture?,
+                 onProgress: @Sendable (Int, Int) async -> Void) async throws {
         try requireMutable(transaction)
         guard !tokenIDs.isEmpty else {
             throw ConversationStateTransactionError.invalidBoundary(
@@ -184,12 +202,38 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
         }
         mutating = true
         defer { mutating = false }
-        for (index, token) in tokenIDs.enumerated() {
-            try Task.checkCancellation()
+        let tokenMajor = !groupedPrefillEnabled || (groupedCapture == nil
+            ? hooks.requiresTokenMajorPrefill : hooks.requiresOrderedPrefillStages)
+        legacyPrefillDiagnostics = tokenMajor
+            ? QwenSourceGroupedPrefillDiagnostics(mode: .tokenMajor, tokenCount: tokenIDs.count) : nil
+        if tokenMajor {
+            for (index, token) in tokenIDs.enumerated() {
+                try Task.checkCancellation()
+                try await consumePending(transaction: transaction)
+                try await consume(token, transaction: transaction)
+                active?.promptTokenIDs.append(token)
+                await onProgress(index + 1, tokenIDs.count)
+            }
+        } else {
             try await consumePending(transaction: transaction)
-            try await consume(token, transaction: transaction)
-            active?.promptTokenIDs.append(token)
-            await onProgress(index + 1, tokenIDs.count)
+            guard let working = active?.working else {
+                throw ConversationStateTransactionError.staleTransaction
+            }
+            let position = working.consumedTokenIDs.count
+            let positions: [QwenMRoPEPosition]?
+            if working.usesMRoPE {
+                positions = try tokenIDs.indices.map { index in
+                    let absolute = Int64(position + index) + Int64(working.textRoPEDelta)
+                    guard absolute >= 0, absolute <= Int64(Int32.max) else {
+                        throw QwenVisionError.invalidPositions
+                    }
+                    return try QwenMRoPEPosition(temporal: Int(absolute),
+                        height: Int(absolute), width: Int(absolute))
+                }
+            } else { positions = nil }
+            let logits = try await runner.prefill(tokenIDs: tokenIDs, position: position,
+                mropePositions: positions, groupedCapture: groupedCapture, onProgress: onProgress)
+            try publishPrefill(tokenIDs, logits: logits, transaction: transaction)
         }
     }
 
@@ -198,9 +242,11 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
     /// survive commit. A failure rolls back the original runner baseline.
     func prefillPrepared(_ prepared: QwenPreparedPrefill,
                          transaction: ConversationTransactionID,
+                         groupedCapture: QwenSourceGroupedPrefillCapture? = nil,
                          onProgress: @Sendable (Int, Int) async -> Void) async throws {
         try requireMutable(transaction)
         guard !prepared.tokenIDs.isEmpty,
+              prepared.positions.count == prepared.tokenIDs.count,
               prepared.tokenIDs.count <= contextLimit - retainedCount(),
               active?.promptTokenIDs.isEmpty == true,
               let current = active?.working,
@@ -212,14 +258,30 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
         mutating = true
         defer { mutating = false }
         active?.preparedPrompt = prepared
-        for (index, token) in prepared.tokenIDs.enumerated() {
-            try Task.checkCancellation()
+        let tokenMajor = !groupedPrefillEnabled || (groupedCapture == nil
+            ? hooks.requiresTokenMajorPrefill : hooks.requiresOrderedPrefillStages)
+        legacyPrefillDiagnostics = tokenMajor
+            ? QwenSourceGroupedPrefillDiagnostics(mode: .tokenMajor, tokenCount: prepared.tokenIDs.count) : nil
+        if tokenMajor {
+            for (index, token) in prepared.tokenIDs.enumerated() {
+                try Task.checkCancellation()
+                try await consumePending(transaction: transaction)
+                try await consume(token, transaction: transaction,
+                                  featureRow: try Self.featureRow(prepared, at: index),
+                                  mropePosition: prepared.positions[index])
+                active?.promptTokenIDs.append(token)
+                await onProgress(index + 1, prepared.tokenIDs.count)
+            }
+        } else {
             try await consumePending(transaction: transaction)
-            try await consume(token, transaction: transaction,
-                              featureRow: try Self.featureRow(prepared, at: index),
-                              mropePosition: prepared.positions[index])
-            active?.promptTokenIDs.append(token)
-            await onProgress(index + 1, prepared.tokenIDs.count)
+            guard let position = active?.working.consumedTokenIDs.count else {
+                throw ConversationStateTransactionError.staleTransaction
+            }
+            let logits = try await runner.prefill(tokenIDs: prepared.tokenIDs, position: position,
+                featureRowAt: { index in try Self.featureRow(prepared, at: index) },
+                mropePositions: prepared.positions, groupedCapture: groupedCapture,
+                onProgress: onProgress)
+            try publishPrefill(prepared.tokenIDs, logits: logits, transaction: transaction)
         }
         active?.working.textRoPEDelta = newDelta
         active?.working.usesMRoPE = true
@@ -413,6 +475,10 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
             unusable: unusable)
     }
 
+    nonisolated var currentRoutedExpertCacheSummary: RoutedExpertCacheSummary? {
+        runner.currentRoutedExpertCacheSummary
+    }
+
     func cacheDiagnostics() async -> QwenOfficialSourceCacheDiagnostics {
         await runner.cacheDiagnostics()
     }
@@ -471,6 +537,26 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
         active?.working.consumedTokenIDs.append(token)
         active?.working.currentLogits = logits
         try await hooks.betweenConsumedTokens(position + 1)
+    }
+
+    func groupedPrefillDiagnostics() async -> QwenSourceGroupedPrefillDiagnostics? {
+        if let legacyPrefillDiagnostics { return legacyPrefillDiagnostics }
+        return await runner.groupedPrefillDiagnostics()
+    }
+
+    /// Runner has validated and advanced every layer. Journal publication has
+    /// no suspension and remains provisional until the existing turn commit.
+    private func publishPrefill(_ tokenIDs: [Int32], logits: [Float],
+                                transaction: ConversationTransactionID) throws {
+        guard logits.count == vocabularySize, logits.allSatisfy(\.isFinite) else {
+            throw QwenTextRunnerError.execution(detail: "source conversation logits invalid")
+        }
+        guard active?.id == transaction else {
+            throw ConversationStateTransactionError.staleTransaction
+        }
+        active?.working.consumedTokenIDs.append(contentsOf: tokenIDs)
+        active?.working.currentLogits = logits
+        active?.promptTokenIDs.append(contentsOf: tokenIDs)
     }
 
     private func retainedCount() -> Int { active?.working.retainedTokenIDs.count ?? 0 }

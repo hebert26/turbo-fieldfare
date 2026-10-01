@@ -261,6 +261,24 @@ final class QwenBF16Weights: @unchecked Sendable {
     func encodeEmbedding(commandBuffer: MTLCommandBuffer, tensorName: String,
                          tokenIDs: MTLBuffer, tokenCount: Int,
                          output: MTLBuffer) throws {
+        try encodeEmbedding(commandBuffer: commandBuffer, tensorName: tensorName,
+            tokenIDs: tokenIDs, tokenCount: tokenCount, output: output, immutableIDs: false)
+    }
+
+    /// The source runner creates and owns these IDs privately, keeps them
+    /// immutable until GPU settlement, and never exposes them to observers.
+    /// General callers retain the all-chunk path above, including its existing
+    /// behavior if a caller changes a valid ID before command execution.
+    func encodeEmbeddingFromImmutableIDs(commandBuffer: MTLCommandBuffer, tensorName: String,
+                                         tokenIDs: MTLBuffer, tokenCount: Int,
+                                         output: MTLBuffer) throws {
+        try encodeEmbedding(commandBuffer: commandBuffer, tensorName: tensorName,
+            tokenIDs: tokenIDs, tokenCount: tokenCount, output: output, immutableIDs: true)
+    }
+
+    private func encodeEmbedding(commandBuffer: MTLCommandBuffer, tensorName: String,
+                                 tokenIDs: MTLBuffer, tokenCount: Int,
+                                 output: MTLBuffer, immutableIDs: Bool) throws {
         let tensor = try requireTensor(tensorName, role: .embedding)
         try requireReady(commandBuffer)
         try requireTokenCount(tokenCount)
@@ -278,8 +296,32 @@ final class QwenBF16Weights: @unchecked Sendable {
         for index in 0..<tokenCount where ids[index] >= UInt32(tensor.spec.rows) {
             throw QwenBF16WeightError.invalidGeometry("embedding ID out of bounds")
         }
+        var selectedChunks: [Chunk]?
+        if immutableIDs {
+            guard let first = tensor.chunks.first, first.firstRow == 0, first.rowCount > 0 else {
+                throw QwenBF16WeightError.invalidGeometry("embedding chunk geometry")
+            }
+            // Construction fills uniform complete-row chunks and one possible
+            // shorter final chunk. Keep chunk zero so the existing kernel's
+            // out-of-bounds-ID NaN safeguard still has its designated writer.
+            var selectedIndices: Set<Int> = [0]
+            for index in 0..<tokenCount {
+                let row = Int(ids[index])
+                let chunkIndex = row / first.rowCount
+                guard tensor.chunks.indices.contains(chunkIndex) else {
+                    throw QwenBF16WeightError.invalidGeometry("embedding chunk outside tensor")
+                }
+                let chunk = tensor.chunks[chunkIndex]
+                guard row >= chunk.firstRow, row - chunk.firstRow < chunk.rowCount else {
+                    throw QwenBF16WeightError.invalidGeometry("embedding row outside chunk")
+                }
+                selectedIndices.insert(chunkIndex)
+            }
+            selectedChunks = selectedIndices.sorted().map { tensor.chunks[$0] }
+        }
         try encode(commandBuffer: commandBuffer, tensor: tensor, pipeline: embeddingPipeline,
-                   input: tokenIDs, tokenCount: tokenCount, output: output)
+                   input: tokenIDs, tokenCount: tokenCount, output: output,
+                   selectedChunks: selectedChunks)
     }
 
     func encodeProjection(commandBuffer: MTLCommandBuffer, tensorName: String,
@@ -356,7 +398,8 @@ final class QwenBF16Weights: @unchecked Sendable {
     private func encode(commandBuffer: MTLCommandBuffer, tensor: Tensor,
                         pipeline: MTLComputePipelineState,
                         input: MTLBuffer, tokenCount: Int,
-                        output: MTLBuffer, parallelStreams: Bool = false) throws {
+                        output: MTLBuffer, parallelStreams: Bool = false,
+                        selectedChunks: [Chunk]? = nil) throws {
         guard tokenCount > 0, tokenCount <= Int(UInt32.max),
               pipeline.maxTotalThreadsPerThreadgroup > 0,
               pipeline.threadExecutionWidth > 0 else {
@@ -364,13 +407,30 @@ final class QwenBF16Weights: @unchecked Sendable {
         }
         // Retain even if a later encoder cannot be created: a caller must
         // discard an errored command buffer rather than submit partial work.
-        let lease = BufferLease(tensor.chunks.map(\.buffer))
+        let chunks = selectedChunks ?? tensor.chunks
+        let lease = BufferLease(chunks.map(\.buffer))
         commandBuffer.addCompletedHandler { _ in _ = lease.buffers.count }
         // Callers own submission and keep input/output immutable until completion.
         // No waitUntilCompleted or early buffer reuse.
-        for chunk in tensor.chunks {
-            guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+        let headEncoder: MTLComputeCommandEncoder?
+        if tensor.spec.role == .head, chunks.count > 1 {
+            // Each chunk writes its own complete output rows. Input and all
+            // weight chunks are read-only, so these dispatches have no mutual
+            // dependencies. The dot kernel and its reduction order stay fixed.
+            guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) else {
                 throw QwenBF16WeightError.commandBufferUnavailable
+            }
+            headEncoder = encoder
+        } else { headEncoder = nil }
+        defer { headEncoder?.endEncoding() }
+        for chunk in chunks {
+            let encoder: MTLComputeCommandEncoder
+            if let headEncoder { encoder = headEncoder }
+            else {
+                guard let separate = commandBuffer.makeComputeCommandEncoder() else {
+                    throw QwenBF16WeightError.commandBufferUnavailable
+                }
+                encoder = separate
             }
             var params = Parameters(rows: UInt32(tensor.spec.rows),
                                     columns: UInt32(tensor.spec.columns),
@@ -399,7 +459,7 @@ final class QwenBF16Weights: @unchecked Sendable {
                                         threadsPerThreadgroup: MTLSize(width: groupWidth, height: 1,
                                                                        depth: 1))
             }
-            encoder.endEncoding()
+            if headEncoder == nil { encoder.endEncoding() }
         }
     }
 }

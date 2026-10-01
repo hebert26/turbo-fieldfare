@@ -250,6 +250,10 @@ func run(
             }
         }
         if !args.quiet {
+            if sourceBacking, let rows = result.producedVisionFeatureRows {
+                stderr.write(Data(
+                    "[vision images=\(parsed.imagesByID.count) feature-rows=\(rows) source=official-bf16]\n".utf8))
+            }
             if let summary = result.cacheSummary {
                 stderr.write(Data(routedExpertCacheFooter(summary).utf8))
             }

@@ -315,6 +315,26 @@ private final class Schema {
             guard parsed.count == 2, parsed.contains(.null) else {
                 throw GemmaToolCallParserError.malformed
             }
+        case nil:
+            // Finite enum/const constraints can define their value domain
+            // without a JSON Schema type. Preserve raw string framing only
+            // when that domain is unambiguously string-valued.
+            var values: [JSONValue] = []
+            if let constant = object["const"] {
+                values.append(try jsonValue(constant))
+            }
+            if let enumerated = object["enum"] {
+                guard case .array(let members) = enumerated, !members.isEmpty else {
+                    throw GemmaToolCallParserError.malformed
+                }
+                values += try members.map(jsonValue)
+            }
+            guard !values.isEmpty else { throw GemmaToolCallParserError.malformed }
+            parsed = values.map { value in
+                let valueType = type(of: value)
+                // Implicit numeric const/enum permits equivalent JSON numbers.
+                return valueType == .integer ? .number : valueType
+            }
         default:
             throw GemmaToolCallParserError.malformed
         }

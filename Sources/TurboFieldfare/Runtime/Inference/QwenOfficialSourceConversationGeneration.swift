@@ -73,6 +73,8 @@ public actor QwenOfficialSourceConversationGenerationSession {
     private let context: MetalContext
     private let scratch: RawCompletionScratch
     private let hooks: QwenOfficialSourceTransactionHooks
+    /// Internal proof capture replaces only prefill observations. Decode keeps hooks.
+    private let groupedCapture: QwenSourceGroupedPrefillCapture?
     private let maxContext: Int
     private let modelDirectoryURL: URL?
     private let visionPackURL: URL?
@@ -88,7 +90,9 @@ public actor QwenOfficialSourceConversationGenerationSession {
          context: MetalContext, maxContext: Int,
          expertSlotCount: Int, modelDirectoryURL: URL? = nil,
          visionPackURL: URL? = nil,
-         hooks: QwenOfficialSourceTransactionHooks = .none) async throws {
+         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+         hooks: QwenOfficialSourceTransactionHooks = .none,
+         groupedCapture: QwenSourceGroupedPrefillCapture? = nil) async throws {
         guard model.sourceIdentity == sourceIdentity,
               context.device === model.context.device,
               context.queue === model.context.queue else {
@@ -97,7 +101,8 @@ public actor QwenOfficialSourceConversationGenerationSession {
         try model.revalidateSource()
         let state = try await QwenOfficialSourceConversationState(
             model: model, context: context, maxContext: maxContext,
-            expertSlotCount: expertSlotCount, hooks: hooks)
+            expertSlotCount: expertSlotCount,
+            groupedPrefillEnabled: prefillConfig.mode != .off, hooks: hooks)
         self.model = model
         self.state = state
         self.codec = codec
@@ -109,13 +114,15 @@ public actor QwenOfficialSourceConversationGenerationSession {
         scratch = try RawCompletionScratch(
             context: context, vocab: model.architecture.vocabularySize)
         self.hooks = hooks
+        self.groupedCapture = groupedCapture
     }
 
     /// Luna's protected tiny fixture: real BF16 reads and GPU execution.
     /// Prepared text turns sample normally; tool tests may simulate decoding.
     init(fixtureModel: QwenOfficialSourceModel, context: MetalContext,
          maxContext: Int, expertSlotCount: Int,
-         hooks: QwenOfficialSourceTransactionHooks = .none) async throws {
+         hooks: QwenOfficialSourceTransactionHooks = .none,
+         groupedCapture: QwenSourceGroupedPrefillCapture? = nil) async throws {
         guard fixtureModel.sourceIdentity == nil,
               context.device === fixtureModel.context.device,
               context.queue === fixtureModel.context.queue else {
@@ -135,6 +142,11 @@ public actor QwenOfficialSourceConversationGenerationSession {
         scratch = try RawCompletionScratch(
             context: context, vocab: fixtureModel.architecture.vocabularySize)
         self.hooks = hooks
+        self.groupedCapture = groupedCapture
+    }
+
+    func groupedPrefillDiagnostics() async -> QwenSourceGroupedPrefillDiagnostics? {
+        await state.groupedPrefillDiagnostics()
     }
 
     public func generate(
@@ -221,6 +233,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
         try prompt.validateForCommit(model: model)
         let prepared: QwenPreparedPrefill?
         var visionStore: QwenOfficialSourceVisionWeightStore?
+        var producedVisionFeatureRows: Int? = nil
         if imageIDs.isEmpty { prepared = nil }
         else {
             guard request.visionResidency == .onDemand,
@@ -247,6 +260,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
             prepared = try await prepareSourceImages(
                 templateTokens: prompt.tokenIDs, features: features,
                 visionConfig: .official)
+            producedVisionFeatureRows = features.reduce(0) { $0 + $1.tokenCount }
         }
         let result = try await generateCore(
             promptTokenIDs: prepared?.tokenIDs ?? prompt.tokenIDs,
@@ -255,6 +269,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
             codec: codec, binding: prompt,
             thinking: options.enableThinking, tools: request.tools,
             firstSourceTurn: firstTurn, sourceSystemPrompt: request.systemPrompt,
+            producedVisionFeatureRows: producedVisionFeatureRows,
             shouldStop: shouldStop, onEvent: onEvent)
         return result
     }
@@ -441,6 +456,12 @@ public actor QwenOfficialSourceConversationGenerationSession {
         try await state.diagnosticSnapshot()
     }
 
+    /// Owned expert-cache allocation and counters, excluding process physical memory.
+    /// This synchronous snapshot does not wait for decode or validate source files.
+    public nonisolated var currentRoutedExpertCacheSummary: RoutedExpertCacheSummary? {
+        state.currentRoutedExpertCacheSummary
+    }
+
     func cacheDiagnostics() async -> QwenOfficialSourceCacheDiagnostics {
         await state.cacheDiagnostics()
     }
@@ -462,6 +483,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
         fixtureSteps: [QwenOfficialSourcePreparedToolStep]? = nil,
         firstSourceTurn: Bool = false,
         sourceSystemPrompt: String? = nil,
+        producedVisionFeatureRows: Int? = nil,
         shouldStop: @escaping @Sendable () -> Bool,
         onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void
     ) async throws -> QwenConversationGenerationResult {
@@ -488,12 +510,14 @@ public actor QwenOfficialSourceConversationGenerationSession {
         do {
             if let preparedPrompt {
                 try await state.prefillPrepared(preparedPrompt, transaction: transaction,
+                    groupedCapture: groupedCapture,
                     onProgress: { done, total in
                         onEvent(.prefill(done: done, total: total))
                     })
             } else {
                 try await state.prefill(
                     promptTokenIDs, transaction: transaction,
+                    groupedCapture: groupedCapture,
                     onProgress: { done, total in
                         onEvent(.prefill(done: done, total: total))
                     })
@@ -678,7 +702,8 @@ public actor QwenOfficialSourceConversationGenerationSession {
                 prefillSeconds: decodeStarted.timeIntervalSince(started),
                 decodeSeconds: Date().timeIntervalSince(decodeStarted),
                 metrics: metrics, acceptedGeneratedTokenIDs: accepted,
-                sourceIdentity: binding?.sourceIdentity)
+                sourceIdentity: binding?.sourceIdentity,
+                producedVisionFeatureRows: producedVisionFeatureRows)
         } catch let operationError {
             let status = await state.status()
             if status.activeTransaction == transaction {
