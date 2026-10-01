@@ -484,16 +484,19 @@ final class QwenFullAttention {
                 for column in 0..<configuration.headDimension {
                     alignedQuery[column] = rotatedQuery[queryBase + column]
                 }
-                // Match the source matmul's contiguous repeated-KV head,
-                // including the candidate row, without changing the cache.
-                for token in scores.indices {
-                    let keyBase = (token * configuration.keyValueHeadCount + keyHead)
-                        * configuration.headDimension
-                    for column in 0..<configuration.headDimension {
-                        packedKeys[token * configuration.headDimension + column] =
-                            token == cache.validTokenCount
-                            ? rotatedKey[keyHead * configuration.headDimension + column]
-                            : keys[keyBase + column]
+                // Heads in this contiguous group share identical committed
+                // keys and candidate key. Pack once for that KV head; SGEMM
+                // reads the aligned matrix without modifying it.
+                if head.isMultiple(of: group) {
+                    for token in scores.indices {
+                        let keyBase = (token * configuration.keyValueHeadCount + keyHead)
+                            * configuration.headDimension
+                        for column in 0..<configuration.headDimension {
+                            packedKeys[token * configuration.headDimension + column] =
+                                token == cache.validTokenCount
+                                ? rotatedKey[keyHead * configuration.headDimension + column]
+                                : keys[keyBase + column]
+                        }
                     }
                 }
                 cblas_sgemm(
