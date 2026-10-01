@@ -810,6 +810,16 @@ final class QwenMoE {
             let orderedExperts = lease.experts.enumerated().sorted {
                 $0.element.expertID < $1.element.expertID
             }
+            // Gate/up dispatches read only immutable expert matrices and write
+            // disjoint rank rows. Their order cannot affect the ordered down/add.
+            // Grouped-prefill uses one reused row and deliberately stays separate.
+            let useConcurrentGateUps = gateSelection.cooperative && configuration.topK > 1
+            if useConcurrentGateUps {
+                try encodeConcurrentBF16GateUps(
+                    commandBuffer: command, hidden: hidden,
+                    orderedExperts: orderedExperts, scratch: scratch,
+                    pipeline: gatePipeline)
+            }
             for (rank, mapped) in orderedExperts {
                 let offset = try Self.checkedMultiply(
                     rank, configuration.routedIntermediateSize,
@@ -821,23 +831,26 @@ final class QwenMoE {
                     hiddenSize: UInt32(configuration.hiddenSize),
                     intermediateSize: UInt32(configuration.routedIntermediateSize),
                     scratchOffset: UInt32(offset))
-                guard let gateEncoder = command.makeComputeCommandEncoder() else {
-                    throw QwenMoEError.commandEncoderUnavailable
+                if !useConcurrentGateUps {
+                    guard let gateEncoder = command.makeComputeCommandEncoder() else {
+                        throw QwenMoEError.commandEncoderUnavailable
+                    }
+                    gateEncoder.setComputePipelineState(gatePipeline)
+                    gateEncoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                                         index: QwenMetalBufferIndex.parameters.rawValue)
+                    gateEncoder.setBuffer(hidden, offset: 0,
+                                          index: QwenMetalBufferIndex.input.rawValue)
+                    gateEncoder.setBuffer(mapped.gateUp, offset: 0,
+                                          index: QwenMetalBufferIndex.weights.rawValue)
+                    gateEncoder.setBuffer(scratch.routedActivation, offset: 0,
+                                          index: QwenMetalBufferIndex.scratch.rawValue)
+                    gateEncoder.useResource(mapped.gateUp, usage: .read)
+                    try dispatchBF16Routed(gateEncoder, pipeline: gatePipeline,
+                                           rows: configuration.routedIntermediateSize,
+                                           cooperative: gateSelection.cooperative)
+                    gateEncoder.endEncoding()
+
                 }
-                gateEncoder.setComputePipelineState(gatePipeline)
-                gateEncoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
-                                     index: QwenMetalBufferIndex.parameters.rawValue)
-                gateEncoder.setBuffer(hidden, offset: 0,
-                                      index: QwenMetalBufferIndex.input.rawValue)
-                gateEncoder.setBuffer(mapped.gateUp, offset: 0,
-                                      index: QwenMetalBufferIndex.weights.rawValue)
-                gateEncoder.setBuffer(scratch.routedActivation, offset: 0,
-                                      index: QwenMetalBufferIndex.scratch.rawValue)
-                gateEncoder.useResource(mapped.gateUp, usage: .read)
-                try dispatchBF16Routed(gateEncoder, pipeline: gatePipeline,
-                                       rows: configuration.routedIntermediateSize,
-                                       cooperative: gateSelection.cooperative)
-                gateEncoder.endEncoding()
 
                 guard let downEncoder = command.makeComputeCommandEncoder() else {
                     throw QwenMoEError.commandEncoderUnavailable
@@ -863,6 +876,45 @@ final class QwenMoE {
             try encodeSharedBF16(commandBuffer: command, hidden: hidden,
                                  weights: sharedWeights, names: sharedNames,
                                  scratch: scratch, output: output)
+        }
+    }
+
+    /// Each dispatch writes `[rank * intermediateSize, (rank + 1) * intermediateSize)`.
+    /// Ending this encoder preserves the tracked-buffer dependency before down/add.
+    private func encodeConcurrentBF16GateUps(
+        commandBuffer: MTLCommandBuffer,
+        hidden: MTLBuffer,
+        orderedExperts: [(offset: Int, element: QwenBF16MappedExpert)],
+        scratch: QwenMoEScratch,
+        pipeline: MTLComputePipelineState
+    ) throws {
+        guard let encoder = commandBuffer.makeComputeCommandEncoder(dispatchType: .concurrent) else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        defer { encoder.endEncoding() }
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(hidden, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+        encoder.setBuffer(scratch.routedActivation, offset: 0,
+                          index: QwenMetalBufferIndex.scratch.rawValue)
+        for (rank, mapped) in orderedExperts {
+            let offset = try Self.checkedMultiply(
+                rank, configuration.routedIntermediateSize,
+                operation: "BF16 routed scratch offset")
+            guard UInt32(exactly: offset) != nil else {
+                throw QwenMoEError.arithmeticOverflow(operation: "BF16 routed scratch offset")
+            }
+            var parameters = BF16RoutedParameters(
+                hiddenSize: UInt32(configuration.hiddenSize),
+                intermediateSize: UInt32(configuration.routedIntermediateSize),
+                scratchOffset: UInt32(offset))
+            encoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                             index: QwenMetalBufferIndex.parameters.rawValue)
+            encoder.setBuffer(mapped.gateUp, offset: 0,
+                              index: QwenMetalBufferIndex.weights.rawValue)
+            encoder.useResource(mapped.gateUp, usage: .read)
+            try dispatchBF16Routed(encoder, pipeline: pipeline,
+                                   rows: configuration.routedIntermediateSize,
+                                   cooperative: true)
         }
     }
 

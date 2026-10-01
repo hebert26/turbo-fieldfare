@@ -713,22 +713,12 @@ package final class OfficialSourceHandle {
 
     private static func openDirectory(_ path: String) throws -> Int32 {
         _ = try absolutePath(URL(fileURLWithPath: path, isDirectory: true))
-        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard current >= 0 else { throw openError("/") }
-        var prefix = ""
-        for part in path.dropFirst().split(separator: "/") {
-            prefix += "/" + part
-            let next = openat(current, String(part),
-                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-            if next < 0 {
-                let error = openError(prefix)
-                close(current)
-                throw error
-            }
-            close(current)
-            current = next
-        }
-        return current
+        // Fresh named-path resolution rejects symlinks in every component,
+        // enforces ancestor search access and opens the final directory readably.
+        // O_NOFOLLOW_ANY must not be combined with O_NOFOLLOW.
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw openError(path) }
+        return fd
     }
 
     private static func requireNamedDirectory(_ path: String, retained: DirectoryIdentity) throws {
