@@ -89,6 +89,26 @@ import TurboFieldfareFormat
         #expect(config.repetitionPenalty == 1)
     }
 
+    @Test func qwenStructuredToolFailureMappingPreservesRetryEligibility() {
+        let eligible = StructuredToolFailure(
+            underlying: .malformed, canRegenerateToolResult: true, evidence: nil)
+        let mapped = RealInferenceSession.mapQwenGenerationError(eligible)
+        guard case let .structuredToolFailure(_, canRegenerate, _) = mapped else {
+            Issue.record("Qwen parser failure must map to structured tool failure")
+            return
+        }
+        #expect(canRegenerate)
+
+        let ineligible = StructuredToolFailure(
+            underlying: .malformed, canRegenerateToolResult: false, evidence: nil)
+        let mappedIneligible = RealInferenceSession.mapQwenGenerationError(ineligible)
+        guard case let .structuredToolFailure(_, remainsIneligible, _) = mappedIneligible else {
+            Issue.record("Qwen parser failure mapping lost its structured error type")
+            return
+        }
+        #expect(!remainsIneligible)
+    }
+
     @Test func tokenizerDirectoryCacheReloadsOnlyWhenModelDirectoryChanges() {
         var cache = TokenizerDirectoryCache()
         let first = URL(fileURLWithPath: "/tmp/first.gturbo")
@@ -884,6 +904,7 @@ private struct AppQwenSyntheticDecodeFixture: Sendable {
             6: "</tool_call>",
             18: "<|fixture_eos|>",
         ])
+
 }
 
 private struct AppQwenTokenizerOverride: Tokenizer {

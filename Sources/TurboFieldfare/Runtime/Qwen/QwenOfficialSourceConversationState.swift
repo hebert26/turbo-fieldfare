@@ -424,7 +424,28 @@ actor QwenOfficialSourceConversationState: ConversationStateTransaction {
     func rebuildCheckpoint(retaining tokenIDs: [Int32],
                            transaction: ConversationTransactionID,
                            onProgress: @Sendable (Int, Int) async -> Void) async throws {
-        throw ConversationStateTransactionError.unsupportedFamily
+        try await beginCheckpointReplacement(transaction: transaction)
+        try await prefill(tokenIDs, transaction: transaction, onProgress: onProgress)
+    }
+
+    func rebuildPreparedCheckpoint(_ prepared: QwenPreparedPrefill,
+        transaction: ConversationTransactionID,
+        onProgress: @Sendable (Int, Int) async -> Void) async throws {
+        try await beginCheckpointReplacement(transaction: transaction)
+        try await prefillPrepared(prepared, transaction: transaction, onProgress: onProgress)
+    }
+
+    private func beginCheckpointReplacement(transaction: ConversationTransactionID) async throws {
+        try requireMutable(transaction)
+        guard active?.promptTokenIDs.isEmpty == true,
+              active?.generatedTokenIDs.isEmpty == true else {
+            throw ConversationStateTransactionError.invalidBoundary("checkpoint must begin an untouched turn")
+        }
+        mutating = true
+        defer { mutating = false }
+        try Task.checkCancellation()
+        try await runner.beginCheckpointReplacement()
+        active?.working = Aggregate()
     }
 
     func reset() async throws {

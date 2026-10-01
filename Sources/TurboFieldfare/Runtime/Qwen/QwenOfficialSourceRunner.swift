@@ -77,6 +77,7 @@ actor QwenOfficialSourceRunner {
         let linear: QwenLinearAttentionSnapshot
         var full: QwenFullAttentionKVSnapshot
         let position: Int
+        var replacementFull: QwenFullAttentionKV.ReplacementCheckpoint? = nil
     }
     private var turnCheckpoint: TurnCheckpoint?
     private var lastPrefillDiagnostics: QwenSourceGroupedPrefillDiagnostics?
@@ -353,7 +354,8 @@ actor QwenOfficialSourceRunner {
                 } else {
                     try linearState.restore(linearCheckpoint)
                 }
-                try fullKV.restore(turnCheckpoint?.full ?? fullSnapshot)
+                if let checkpoint = turnCheckpoint { try restoreFullTurnCheckpoint(checkpoint) }
+                else { try fullKV.restore(fullSnapshot) }
                 if let baseline = turnCheckpoint {
                     committedPosition = baseline.position
                     turnCheckpoint?.full = try fullKV.snapshot()
@@ -673,7 +675,7 @@ actor QwenOfficialSourceRunner {
                     throw QwenTextRunnerError.invalidTransaction
                 }
                 try linearState.restore(checkpoint.linear)
-                try fullKV.restore(checkpoint.full)
+                try restoreFullTurnCheckpoint(checkpoint)
                 committedPosition = checkpoint.position
                 turnCheckpoint?.full = try fullKV.snapshot()
                 if ownsCheckpoint { turnCheckpoint = nil }
@@ -726,7 +728,7 @@ actor QwenOfficialSourceRunner {
         do {
             try hooks.beforeRollbackRestore()
             try linearState.restore(checkpoint.linear)
-            try fullKV.restore(checkpoint.full)
+            try restoreFullTurnCheckpoint(checkpoint)
             committedPosition = checkpoint.position
             let refreshed = try fullKV.snapshot()
             turnCheckpoint?.full = refreshed
@@ -738,6 +740,7 @@ actor QwenOfficialSourceRunner {
 
     func rollbackTurn() async throws {
         try await restoreTurnBaseline()
+        fullKV.discardReplacementCheckpoint()
         turnCheckpoint = nil
     }
 
@@ -750,7 +753,27 @@ actor QwenOfficialSourceRunner {
         }
         try model.revalidateSource()
         try validateCompanion()
+        fullKV.discardReplacementCheckpoint()
         turnCheckpoint = nil
+    }
+
+    private func restoreFullTurnCheckpoint(_ checkpoint: TurnCheckpoint) throws {
+        if let replacement = checkpoint.replacementFull {
+            try fullKV.restoreReplacementCheckpoint(replacement)
+        } else { try fullKV.restore(checkpoint.full) }
+    }
+
+    func beginCheckpointReplacement() throws {
+        guard !inFlight, !unusable, !prefillInFlight,
+              var checkpoint = turnCheckpoint, checkpoint.replacementFull == nil else {
+            throw QwenTextRunnerError.invalidTransaction
+        }
+        try model.revalidateSource()
+        checkpoint.replacementFull = try fullKV.retainReplacementCheckpoint()
+        turnCheckpoint = checkpoint
+        try linearState.reset()
+        try fullKV.reset()
+        committedPosition = 0
     }
 
     func resetConversation() throws {

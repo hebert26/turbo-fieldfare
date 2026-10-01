@@ -1152,18 +1152,23 @@ actor VisionCaptureToolLoop {
                     "instruction": .string(
                         "Do not execute this proposal. The user's new instruction will arrive as the next user turn."),
                 ]).encoded()
-                var results: [AppToolResult] = []
                 for call in completion.toolCalls {
                     Self.logLocalRejection(call, reason: reason)
                     await activity(.localRejection(
                         id: UUID(), call: call, reason: reason))
-                    results.append(AppToolResult(
-                        callID: call.id, name: call.name, content: content))
+                    let result = AppToolResult(
+                        callID: call.id, name: call.name, content: content)
+                    try taskCheckpoint.appendSettled(call: call, result: result,
+                        outcome: content, target: nil, requestIDs: checkpointRequestIDs,
+                        session: checkpointSessionReference,
+                        origin: "user_instruction_before_dispatch")
                 }
                 nextReadyOffer = nil
                 retryBoundary = nil
-                next = .results(results)
-                continue
+                // Retain the honest not-sent outcome, then let the app deliver
+                // the queued instruction in a fresh model lineage. Feeding
+                // this result back first can starve that instruction forever.
+                throw CancellationError()
             }
             if completion.toolCalls.isEmpty {
                 guard completion.diagnostics.stopReason != .toolCalls else {
@@ -1445,12 +1450,17 @@ actor VisionCaptureToolLoop {
                     name: call.name,
                     content: content,
                     imageAttachments: images)
-            if isHistoryRead {
+            if isHistoryRead, executionOrigin != "user_instruction_before_dispatch" {
                 taskCheckpoint.appendHistoryRead(call: call, result: settledResult)
             } else {
                 try taskCheckpoint.appendSettled(call: call, result: settledResult,
                     outcome: executionOutcome, target: historicalTarget, requestIDs: checkpointRequestIDs,
                     session: checkpointSessionReference, origin: executionOrigin)
+            }
+            if executionOrigin == "user_instruction_before_dispatch" {
+                // This race has the same terminal instruction boundary as a
+                // proposal suppressed immediately after model completion.
+                throw CancellationError()
             }
             next = .results([settledResult])
             retryBoundary = isHistoryRead ? nil : GenerationRetryBoundary(

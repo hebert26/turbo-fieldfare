@@ -36,6 +36,9 @@ public struct QwenStructuredAssistantDecoder: Sendable {
     private var terminalTailConsumed = false
     private var finalized = false
     private var failed = false
+    /// A failed suffix must not make an already valid call prefix eligible for
+    /// automatic regeneration. This never publishes the provisional call.
+    private(set) var failureContainsValidatedCall = false
     public private(set) var progress = StructuredAssistantProgress()
 
     public init(
@@ -247,6 +250,11 @@ public struct QwenStructuredAssistantDecoder: Sendable {
     }
 
     private mutating func fail() {
+        if let first = frames.first,
+           (try? QwenToolCallParser().parse(
+                first, tools: tools, id: "pending_host_id")) != nil {
+            failureContainsValidatedCall = true
+        }
         failed = true
         pending = ""
         activeFrame = ""

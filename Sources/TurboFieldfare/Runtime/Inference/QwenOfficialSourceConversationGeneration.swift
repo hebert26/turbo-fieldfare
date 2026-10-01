@@ -83,6 +83,10 @@ public actor QwenOfficialSourceConversationGenerationSession {
     private var retainedContinuationBoundary: QwenChatContinuationBoundary?
     private var retainedMetadataInitialized = false
     private var retainedTools: [ModelChatToolDefinition]?
+    private struct PendingCheckpoint: Equatable { let id: UUID; let thinking: ModelFamilyThinkingMode }
+    private var pendingCheckpoint: PendingCheckpoint?
+    // Retain checkpoint image owners for the accepted replacement lineage.
+    private var retainedCheckpointImages: QwenPreparedPrefill?
     private var outstandingToolCalls: [String: String] = [:]
 
     init(model: QwenOfficialSourceModel, codec: QwenChatCodec,
@@ -169,11 +173,12 @@ public actor QwenOfficialSourceConversationGenerationSession {
             throw QwenConversationGenerationError.invalidTurn(
                 "retained source tool definitions changed")
         }
+        var resumesCheckpoint = false
         let messages: [ModelChatMessage]
         let imageIDs: [String]
         switch request.turn {
         case .user(let user):
-            guard outstandingToolCalls.isEmpty, user.role == .user,
+            guard pendingCheckpoint == nil, outstandingToolCalls.isEmpty, user.role == .user,
                   user.content != nil,
                   user.reasoningContent == nil, user.toolCalls.isEmpty else {
                 throw QwenConversationGenerationError.invalidTurn(
@@ -182,14 +187,14 @@ public actor QwenOfficialSourceConversationGenerationSession {
             imageIDs = try orderedImageIDs(in: [user])
             messages = [user]
         case .toolResults(let results):
-            guard !firstTurn, !outstandingToolCalls.isEmpty,
+            guard pendingCheckpoint == nil, !firstTurn, !outstandingToolCalls.isEmpty,
                   results.count == outstandingToolCalls.count else {
                 throw QwenConversationGenerationError.invalidTurn(
                     "source tool results do not match committed calls")
             }
             var remaining = outstandingToolCalls
             for message in results {
-                guard message.role == .tool, case .text? = message.content,
+                guard message.role == .tool, message.content != nil,
                       message.reasoningContent == nil, message.toolCalls.isEmpty,
                       let id = message.toolCallID, let name = message.name,
                       remaining.removeValue(forKey: id) == name else {
@@ -197,10 +202,18 @@ public actor QwenOfficialSourceConversationGenerationSession {
                         "source tool result identity or content is invalid")
                 }
             }
-            imageIDs = []
+            imageIDs = try orderedImageIDs(in: results)
             messages = results
-        case .checkpoint:
-            throw ConversationStateTransactionError.unsupportedFamily
+        case .checkpoint(let id):
+            guard !firstTurn, pendingCheckpoint == PendingCheckpoint(id: id, thinking: request.thinking),
+                  retainedContinuationBoundary == .openAssistant,
+                  request.systemPrompt == nil, request.imagesByID.isEmpty,
+                  outstandingToolCalls.isEmpty else {
+                throw QwenConversationGenerationError.invalidTurn("source checkpoint continuation does not match the committed checkpoint")
+            }
+            resumesCheckpoint = true
+            messages = []
+            imageIDs = []
         }
         if let missing = imageIDs.first(where: { request.imagesByID[$0] == nil }) {
             throw ModelFamilyGenerationError.missingImage(missing)
@@ -223,14 +236,14 @@ public actor QwenOfficialSourceConversationGenerationSession {
             throw QwenConversationGenerationError.invalidTurn(
                 "retained source conversation has no committed assistant boundary")
         }
-        let prompt = try QwenOfficialSourcePromptBinding.prepare(
+        let prompt = resumesCheckpoint ? nil : try QwenOfficialSourcePromptBinding.prepare(
             codec: codec, messages: promptMessages,
             boundary: firstTurn ? nil : retainedContinuationBoundary,
             options: options, sourceIdentity: codecSourceIdentity,
             tools: firstTurn ? request.tools : [])
         // Production encodes and validates the same bound value exposed to
         // independent host-side prompt-byte and identity tests.
-        try prompt.validateForCommit(model: model)
+        try prompt?.validateForCommit(model: model)
         let prepared: QwenPreparedPrefill?
         var visionStore: QwenOfficialSourceVisionWeightStore?
         var producedVisionFeatureRows: Int? = nil
@@ -258,18 +271,19 @@ public actor QwenOfficialSourceConversationGenerationSession {
             let vision = try QwenVisionRuntime(context: context, sourceStore: store)
             let features = try await vision.process(pixels)
             prepared = try await prepareSourceImages(
-                templateTokens: prompt.tokenIDs, features: features,
+                templateTokens: prompt!.tokenIDs, features: features,
                 visionConfig: .official)
             producedVisionFeatureRows = features.reduce(0) { $0 + $1.tokenCount }
         }
         let result = try await generateCore(
-            promptTokenIDs: prepared?.tokenIDs ?? prompt.tokenIDs,
+            promptTokenIDs: prepared?.tokenIDs ?? prompt?.tokenIDs ?? [],
             config: request.config, preparedPrompt: prepared,
-            boundTemplateTokenIDs: prompt.tokenIDs, visionStore: visionStore,
+            boundTemplateTokenIDs: prompt?.tokenIDs, visionStore: visionStore,
             codec: codec, binding: prompt,
             thinking: options.enableThinking, tools: request.tools,
             firstSourceTurn: firstTurn, sourceSystemPrompt: request.systemPrompt,
             producedVisionFeatureRows: producedVisionFeatureRows,
+            resumesCheckpoint: resumesCheckpoint,
             shouldStop: shouldStop, onEvent: onEvent)
         return result
     }
@@ -325,9 +339,145 @@ public actor QwenOfficialSourceConversationGenerationSession {
         retainedMetadataInitialized = false
         retainedTools = nil
         outstandingToolCalls.removeAll(keepingCapacity: true)
+        pendingCheckpoint = nil
+        retainedCheckpointImages = nil
         // The runner reset can suspend. Do not acknowledge a lineage reset
         // after the registered source changed during that suspension.
         try model.revalidateSource()
+    }
+
+    private func validateCheckpointIdentity() throws {
+        guard codec != nil, let codecSourceIdentity,
+              codecSourceIdentity == model.sourceIdentity else {
+            throw ModelFamilyGenerationError.modelIdentityChanged
+        }
+        try model.revalidateSource()
+    }
+
+    private func checkpointVisionStore() throws -> QwenOfficialSourceVisionWeightStore {
+        guard let modelDirectoryURL else { throw ModelFamilyGenerationError.verifiedVisionUnavailable }
+        let companion = try visionPackURL
+            ?? VisionPackLocation.companionURL(forTextModel: modelDirectoryURL)
+        return try QwenOfficialSourceVisionWeightStore.open(directoryURL: companion, model: model)
+    }
+
+    public func preflightCheckpointImages(orderedImageIDs ids: [String],
+        imagesByID: [String: URL], visionResidency: VisionResidencyPolicy = .defaultPolicy)
+        throws -> QwenConversationImagePreflight {
+        try validateCheckpointIdentity()
+        guard visionResidency == .onDemand, !ids.isEmpty,
+              Set(ids).count == ids.count, Set(ids) == Set(imagesByID.keys) else {
+            throw ModelFamilyGenerationError.unsupportedInput("checkpoint images require exact unique IDs and on-demand vision")
+        }
+        let store = try checkpointVisionStore()
+        let preprocessor = QwenImagePreprocessor(device: context.device)
+        let plans = try ids.map { try preprocessor.plan(fileURL: imagesByID[$0]!) }
+        try QwenImagePreprocessor.preflight(plans.map(\.geometry))
+        let rows = plans.reduce(0) { $0 + $1.geometry.mergedRows }
+        let (bytes, overflow) = rows.multipliedReportingOverflow(by:
+            QwenVisionConfig.official.outputHiddenSize * MemoryLayout<Float>.stride
+                + 3 * MemoryLayout<Int32>.stride)
+        guard !overflow else { throw QwenVisionError.arithmeticOverflow("checkpoint feature bytes") }
+        try store.revalidate()
+        try validateCheckpointIdentity()
+        return QwenConversationImagePreflight(retainedImageCount: ids.count,
+            retainedImageRows: rows, retainedFeatureBytes: bytes)
+    }
+
+    public func rebuildCheckpoint(_ request: QwenConversationCheckpointRequest,
+        shouldStop: @escaping @Sendable () -> Bool = { false },
+        onEvent: @escaping @Sendable (QwenConversationCheckpointEvent) -> Void = { _ in })
+        async throws -> QwenConversationCheckpointResult {
+        guard !generating else { throw ModelFamilyGenerationError.busy }
+        generating = true
+        defer { generating = false }
+        try validateCheckpointIdentity()
+        let status = await state.status()
+        let firstTurn = retainedTools == nil && status.committed.retainedTokenIDs.isEmpty
+        guard pendingCheckpoint == nil, firstTurn || retainedTools == request.tools else {
+            throw QwenConversationGenerationError.invalidTurn("source checkpoint tools or pending checkpoint changed")
+        }
+        let binding = try QwenOfficialSourcePromptBinding.prepare(codec: codec!,
+            messages: request.messages, boundary: nil,
+            options: ModelChatRenderOptions(enableThinking: request.thinking != .disabled,
+                preserveThinking: true), sourceIdentity: codecSourceIdentity!, tools: request.tools)
+        try binding.validateForCommit(model: model)
+        guard !binding.tokenIDs.isEmpty else { throw ModelFamilyGenerationError.emptyPrompt }
+        let ids = try orderedImageIDs(in: request.messages)
+        guard Set(ids) == Set(request.imagesByID.keys) else {
+            throw ModelFamilyGenerationError.unsupportedInput("checkpoint image bindings changed")
+        }
+        var store: QwenOfficialSourceVisionWeightStore?
+        var prepared: QwenPreparedPrefill?
+        var rows = 0
+        var bytes = 0
+        if !ids.isEmpty {
+            let preflight = try preflightCheckpointImages(orderedImageIDs: ids,
+                imagesByID: request.imagesByID, visionResidency: request.visionResidency)
+            rows = preflight.retainedImageRows
+            bytes = preflight.retainedFeatureBytes
+            let visionStore = try checkpointVisionStore()
+            store = visionStore
+            try VisionRuntime.requireSupportedDevice(context.device)
+            let preprocessor = QwenImagePreprocessor(device: context.device)
+            let plans = try ids.map { try preprocessor.plan(fileURL: request.imagesByID[$0]!) }
+            try QwenImagePreprocessor.preflight(plans.map(\.geometry))
+            let pixels = try plans.map(preprocessor.preprocess)
+            let vision = try QwenVisionRuntime(context: context, sourceStore: visionStore)
+            let features = try await vision.process(pixels)
+            guard features.reduce(0, { $0 + $1.tokenCount }) == rows else {
+                throw MultimodalPromptRendererError.placeholderMismatch
+            }
+            prepared = try await prepareSourceImages(templateTokens: binding.tokenIDs,
+                features: features, visionConfig: .official, replacement: true)
+        }
+        try Task.checkCancellation()
+        if shouldStop() { throw CancellationError() }
+        try binding.validateForCommit(model: model)
+        try store?.revalidate()
+        let transaction = try await state.begin()
+        do {
+            if let prepared {
+                try await state.rebuildPreparedCheckpoint(prepared, transaction: transaction,
+                    onProgress: { done, total in onEvent(.progress(done: done, total: total)) })
+            } else {
+                try await state.rebuildCheckpoint(retaining: binding.tokenIDs,
+                    transaction: transaction,
+                    onProgress: { done, total in onEvent(.progress(done: done, total: total)) })
+            }
+            try Task.checkCancellation()
+            if shouldStop() { throw CancellationError() }
+            try binding.validateForCommit(model: model)
+            try store?.revalidate()
+            let metrics: ConversationStateMetrics
+            if request.commit {
+                metrics = try await state.commit(transaction: transaction,
+                    shouldStop: shouldStop, validateCompanion: { [store] in try store?.revalidate() })
+                retainedTools = request.tools
+                retainedSystemPrompt = request.messages.first(where: { $0.role == .system }).flatMap {
+                    if case .text(let text)? = $0.content { return text }; return nil
+                }
+                retainedMetadataInitialized = true
+                retainedContinuationBoundary = .openAssistant
+                outstandingToolCalls.removeAll(keepingCapacity: true)
+                retainedCheckpointImages = prepared
+                pendingCheckpoint = PendingCheckpoint(id: request.checkpointID, thinking: request.thinking)
+            } else {
+                try await state.rollback(transaction: transaction)
+                metrics = await state.status().committed
+            }
+            return QwenConversationCheckpointResult(committed: request.commit,
+                promptTokens: prepared?.tokenIDs.count ?? binding.tokenIDs.count,
+                metrics: metrics, retainedImageCount: ids.count,
+                retainedImageRows: rows, retainedFeatureBytes: bytes)
+        } catch let operationError {
+            if await state.status().activeTransaction == transaction {
+                do { try await state.rollback(transaction: transaction) }
+                catch { throw QwenConversationGenerationError.rollbackFailed(
+                    operation: String(describing: operationError), rollback: String(describing: error)) }
+            }
+            throw operationError
+        }
     }
 
     public func status() async -> ConversationStateStatus { await state.status() }
@@ -408,7 +558,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
     private func prepareSourceImages(
         templateTokens: [Int32], features: [QwenVisionFeatures],
         visionConfig: QwenVisionConfig,
-        alreadyNormalized: Bool = false
+        alreadyNormalized: Bool = false, replacement: Bool = false
     ) async throws -> QwenPreparedPrefill {
         guard !features.isEmpty, features.count <= 8,
               features.allSatisfy({ $0.hiddenSize == model.architecture.hiddenSize
@@ -425,13 +575,14 @@ public actor QwenOfficialSourceConversationGenerationSession {
             normalized, features: features, architecture: model.visionArchitecture,
             config: visionConfig)
         let status = await state.status()
-        let existing = status.committed.retainedTokenIDs.count
+        let existing = replacement ? 0 : status.committed.retainedTokenIDs.count
         guard rendered.embeddingTokenIDs.count < maxContext - existing else {
             throw ModelFamilyGenerationError.contextOverflow(
                 prompt: existing + rendered.embeddingTokenIDs.count,
                 maxNew: 1, maximum: maxContext)
         }
-        let delta = await state.committedTextRoPEDelta()
+        let committedDelta = await state.committedTextRoPEDelta()
+        let delta = replacement ? 0 : committedDelta
         let (offset, overflow) = existing.addingReportingOverflow(delta)
         guard !overflow, offset >= 0 else { throw QwenVisionError.invalidPositions }
         let positions = try rendered.positionPlan.positions.map { position in
@@ -484,11 +635,12 @@ public actor QwenOfficialSourceConversationGenerationSession {
         firstSourceTurn: Bool = false,
         sourceSystemPrompt: String? = nil,
         producedVisionFeatureRows: Int? = nil,
+        resumesCheckpoint: Bool = false,
         shouldStop: @escaping @Sendable () -> Bool,
         onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void
     ) async throws -> QwenConversationGenerationResult {
         try requested.validate()
-        guard (codec == nil) == (binding == nil),
+        guard resumesCheckpoint || (codec == nil) == (binding == nil),
               fixtureSteps == nil || (codec == nil && model.sourceIdentity == nil),
               binding.map({ $0.tokenIDs == (boundTemplateTokenIDs ?? promptTokenIDs) }) ?? true,
               preparedPrompt.map({ $0.tokenIDs == promptTokenIDs }) ?? true else {
@@ -497,7 +649,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
         if let binding { try binding.validateForCommit(model: model) }
         else { try model.revalidateSource() }
         try visionStore?.revalidate()
-        guard !promptTokenIDs.isEmpty else {
+        guard resumesCheckpoint || !promptTokenIDs.isEmpty else {
             throw ModelFamilyGenerationError.emptyPrompt
         }
         guard codec != nil || requested.stopStrings.isEmpty else {
@@ -507,8 +659,13 @@ public actor QwenOfficialSourceConversationGenerationSession {
         let transaction = try await state.begin()
         let started = Date()
         var accepted: [Int32] = []
+        var terminalToolCalls: [ParsedToolCall] = []
+        var structured = QwenStructuredAssistantDecoder(
+            tools: tools, startsInThoughtChannel: thinking)
         do {
-            if let preparedPrompt {
+            if resumesCheckpoint {
+                onEvent(.prefill(done: 0, total: 0))
+            } else if let preparedPrompt {
                 try await state.prefillPrepared(preparedPrompt, transaction: transaction,
                     groupedCapture: groupedCapture,
                     onProgress: { done, total in
@@ -538,8 +695,6 @@ public actor QwenOfficialSourceConversationGenerationSession {
             config.logitTransform = .raw
             if let codec { config.extraStopTokens.insert(codec.tokenizer.eosID) }
             var decoder = codec?.tokenizer.makeIncrementalDecoder()
-            var structured = QwenStructuredAssistantDecoder(
-                tools: tools, startsInThoughtChannel: thinking)
             var matcher = StreamingStopMatcher(stops: config.stopStrings)
             var lastProgress = structured.progress
             var trailingStopTokenCount = 0
@@ -547,7 +702,6 @@ public actor QwenOfficialSourceConversationGenerationSession {
             var termination: QwenGenerationTermination = .maxTokens
             var fixtureTail: String?
             var sawVisibleText = false
-            var terminalToolCalls: [ParsedToolCall] = []
             while accepted.count < config.maxNewTokens {
                 try Task.checkCancellation()
                 // Source conversations abort the entire provisional turn on
@@ -688,8 +842,9 @@ public actor QwenOfficialSourceConversationGenerationSession {
                 validateCompanion: { try visionStore?.revalidate() })
             // No suspension or throwing operation follows the journal swap.
             retainedTools = tools
+            if resumesCheckpoint { pendingCheckpoint = nil }
             outstandingToolCalls = nextOutstandingCalls
-            if binding != nil {
+            if binding != nil || resumesCheckpoint {
                 if firstSourceTurn { retainedSystemPrompt = sourceSystemPrompt }
                 retainedMetadataInitialized = true
                 retainedContinuationBoundary = accepted.last == codec?.tokenizer.eosID
@@ -702,18 +857,32 @@ public actor QwenOfficialSourceConversationGenerationSession {
                 prefillSeconds: decodeStarted.timeIntervalSince(started),
                 decodeSeconds: Date().timeIntervalSince(decodeStarted),
                 metrics: metrics, acceptedGeneratedTokenIDs: accepted,
-                sourceIdentity: binding?.sourceIdentity,
+                sourceIdentity: binding?.sourceIdentity ?? (resumesCheckpoint ? codecSourceIdentity : nil),
                 producedVisionFeatureRows: producedVisionFeatureRows)
         } catch let operationError {
             let status = await state.status()
+            var restored = false
             if status.activeTransaction == transaction {
                 do {
                     try await state.rollback(transaction: transaction)
+                    restored = true
                 } catch {
                     throw QwenConversationGenerationError.rollbackFailed(
                         operation: String(describing: operationError),
                         rollback: String(describing: error))
                 }
+            }
+            if let parserError = operationError as? GemmaToolCallParserError {
+                // The pending tool result and rejected draft are provisional.
+                // Only successful restoration permits the host's existing
+                // bounded model-only correction; no call was published here.
+                throw StructuredToolFailure(
+                    underlying: parserError,
+                    canRegenerateToolResult: restored && parserError == .malformed
+                        && !tools.isEmpty && terminalToolCalls.isEmpty
+                        && !structured.failureContainsValidatedCall
+                        && !Task.isCancelled && !shouldStop(),
+                    evidence: nil)
             }
             throw operationError
         }

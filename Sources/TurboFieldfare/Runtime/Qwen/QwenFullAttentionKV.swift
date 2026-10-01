@@ -96,6 +96,7 @@ final class QwenFullAttentionKV: @unchecked Sendable {
     private var reads: [UInt64: ReadLease] = [:]
     private var nextIdentifier: UInt64 = 1
     private var lineage: UInt64 = 0
+    private var replacementCheckpointID: UUID?
 
     init(
         device: MTLDevice,
@@ -445,6 +446,78 @@ final class QwenFullAttentionKV: @unchecked Sendable {
                 lineage += 1
             }
         }
+    }
+
+    struct ReplacementCheckpoint: Sendable {
+        fileprivate let owner: UUID
+        fileprivate let identifier: UUID
+        fileprivate let keys: [Int: Data]
+        fileprivate let values: [Int: Data]
+        fileprivate let positions: [Int: Int]
+    }
+
+    // Cursor snapshots cannot protect a replacement that overwrites position zero.
+    // Retain only the accepted prefixes, after every GPU lease has settled.
+    func retainReplacementCheckpoint() throws -> ReplacementCheckpoint {
+        try withLock {
+            try requireNoActiveUse()
+            var keys: [Int: Data] = [:]
+            var values: [Int: Data] = [:]
+            var positions: [Int: Int] = [:]
+            for layer in fullLayerIndices {
+                let storage = try requireLayer(layer)
+                let bytes = storage.committedPosition * strideBytes
+                keys[layer] = Data(bytes: storage.key.contents(), count: bytes)
+                values[layer] = Data(bytes: storage.value.contents(), count: bytes)
+                positions[layer] = storage.committedPosition
+            }
+            let identifier = UUID()
+            replacementCheckpointID = identifier
+            return ReplacementCheckpoint(owner: owner, identifier: identifier,
+                keys: keys, values: values, positions: positions)
+        }
+    }
+
+    func restoreReplacementCheckpoint(_ checkpoint: ReplacementCheckpoint) throws {
+        try withLock {
+            try requireNoActiveUse()
+            guard checkpoint.owner == owner else {
+                throw QwenFullAttentionKVError.invalidSnapshotOwner
+            }
+            guard checkpoint.identifier == replacementCheckpointID else {
+                throw QwenFullAttentionKVError.invalidSnapshotLineage
+            }
+            guard lineage < UInt64.max else {
+                throw QwenFullAttentionKVError.arithmeticOverflow(operation: "replacement lineage")
+            }
+            for layer in fullLayerIndices {
+                let storage = try requireLayer(layer)
+                guard let position = checkpoint.positions[layer], position >= 0, position <= maxContext,
+                      let key = checkpoint.keys[layer], let value = checkpoint.values[layer],
+                      key.count == position * strideBytes, value.count == key.count,
+                      key.count <= storage.key.length, value.count <= storage.value.length else {
+                    throw QwenFullAttentionKVError.invalidSnapshotOwner
+                }
+            }
+            for layer in fullLayerIndices {
+                var storage = try requireLayer(layer)
+                checkpoint.keys[layer]!.withUnsafeBytes { bytes in
+                    if let base = bytes.baseAddress { memcpy(storage.key.contents(), base, bytes.count) }
+                }
+                checkpoint.values[layer]!.withUnsafeBytes { bytes in
+                    if let base = bytes.baseAddress { memcpy(storage.value.contents(), base, bytes.count) }
+                }
+                storage.committedPosition = checkpoint.positions[layer]!
+                layers[layer] = storage
+            }
+            lineage += 1
+        }
+    }
+
+    func discardReplacementCheckpoint() {
+        lock.lock()
+        replacementCheckpointID = nil
+        lock.unlock()
     }
 
     func reset() throws {

@@ -468,9 +468,27 @@ actor RealInferenceSession {
         case packed(QwenConversationGenerationSession)
         case source(QwenOfficialSourceConversationGenerationSession)
 
-        var supportsCheckpoint: Bool {
-            if case .packed = self { return true }
-            return false
+        var supportsCheckpoint: Bool { true }
+
+        func preflightCheckpointImages(orderedImageIDs: [String], imagesByID: [String: URL],
+            visionResidency: VisionResidencyPolicy) async throws -> QwenConversationImagePreflight {
+            switch self {
+            case .packed(let session): return try await session.preflightCheckpointImages(
+                orderedImageIDs: orderedImageIDs, imagesByID: imagesByID, visionResidency: visionResidency)
+            case .source(let session): return try await session.preflightCheckpointImages(
+                orderedImageIDs: orderedImageIDs, imagesByID: imagesByID, visionResidency: visionResidency)
+            }
+        }
+
+        func rebuildCheckpoint(_ request: QwenConversationCheckpointRequest,
+            shouldStop: @escaping @Sendable () -> Bool,
+            onEvent: @escaping @Sendable (QwenConversationCheckpointEvent) -> Void)
+            async throws -> QwenConversationCheckpointResult {
+            switch self {
+            case .packed(let session): return try await session.rebuildCheckpoint(request, onEvent: onEvent)
+            case .source(let session): return try await session.rebuildCheckpoint(
+                request, shouldStop: shouldStop, onEvent: onEvent)
+            }
         }
 
         func reset() async throws {
@@ -814,7 +832,7 @@ actor RealInferenceSession {
     func contextCheckpoint(_ request: DecodeContextCheckpointRequest,
                            stop: AppGenerationStop?) async throws -> DecodeContextCheckpointReceipt {
         if case .qwenSource = loadedFamily {
-            throw ConversationStateTransactionError.unsupportedFamily
+            return try await qwenContextCheckpoint(request, stop: stop)
         }
         if case .qwen = loadedFamily {
             guard qwenGeneration != nil else {
@@ -877,7 +895,12 @@ actor RealInferenceSession {
             throw AppInferenceError.modelNotLoaded
         }
         if let conversationLifecycleError { throw conversationLifecycleError }
-        let generation = try beginQwenOrdinaryGeneration()
+        let generation: QwenTurnGenerator
+        if case .qwenSource = loadedFamily {
+            generation = .source(try beginSourceOrdinaryGeneration())
+        } else {
+            generation = .packed(try beginQwenOrdinaryGeneration())
+        }
         defer { finishQwenOrdinaryGeneration() }
         let started = ContinuousClock.now
         let check: @Sendable () throws -> Void = {
@@ -1043,6 +1066,7 @@ actor RealInferenceSession {
                     reason: request.trigger == .sustainedSlowDecode
                         ? .sustainedSlowDecode : .capacity,
                     commit: request.commit),
+                shouldStop: { stop?.isRequested == true },
                 onEvent: { _ in })
         } catch is CancellationError {
             throw CancellationError()
@@ -1289,6 +1313,35 @@ actor RealInferenceSession {
             await cleanup(transition, explicitUnload: false)
             throw error
         }
+    }
+
+    /// Internal App-test bookkeeping after the tiny source fixture's real
+    /// prepared generation. It does not render, rebuild, or return a receipt.
+    /// An admitted production source can never enter this metadata seam.
+    func synchronizeQwenOfficialSourceFixtureTurn(
+        codec: QwenChatCodec, tools: [ModelChatToolDefinition],
+        systemPrompt: String? = nil, toolCalls: [ParsedToolCall]
+    ) async throws {
+        guard case .qwenSource = loadedFamily,
+              loadedSourceIdentity == nil, verifiedIdentity == nil, let sourceGeneration,
+              !qwenOrdinaryGenerationInFlight else {
+            throw AppInferenceError.invalidRequest("source fixture metadata requires an idle synthetic installation")
+        }
+        let status = await sourceGeneration.status()
+        guard self.sourceGeneration === sourceGeneration,
+              !qwenOrdinaryGenerationInFlight,
+              status.activeTransaction == nil,
+              !status.committed.retainedTokenIDs.isEmpty,
+              !toolCalls.isEmpty,
+              Set(toolCalls.map(\.id)).count == toolCalls.count else {
+            throw AppInferenceError.invalidRequest("source fixture turn has no accepted tool boundary")
+        }
+        qwenCodec = codec
+        qwenTools = tools
+        qwenSystemPrompt = systemPrompt
+        qwenPendingToolCalls = toolCalls
+        conversationTokens.withLock { $0 = status.committed.retainedTokenIDs.count }
+        conversationLogicalStateBytes.withLock { $0 = status.committed.logicalStateBytes }
     }
 
     private static func validate(_ bundle: LoadedModelFamilyBundle) throws {
@@ -1770,8 +1823,14 @@ actor RealInferenceSession {
         return result
     }
 
-    private static func mapQwenGenerationError(_ error: Error) -> AppInferenceError {
+    static func mapQwenGenerationError(_ error: Error) -> AppInferenceError {
         if let appError = error as? AppInferenceError { return appError }
+        if let failure = error as? StructuredToolFailure {
+            return .structuredToolFailure(
+                message: failure.description,
+                canRegenerateToolResult: failure.canRegenerateToolResult,
+                evidence: failure.evidence)
+        }
         if let error = error as? ModelFamilyGenerationError {
             switch error {
             case .contextOverflow(let prompt, let maxNew, let maximum):

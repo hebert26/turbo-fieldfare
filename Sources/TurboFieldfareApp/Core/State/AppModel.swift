@@ -3588,19 +3588,16 @@ public final class AppModel {
         guard generation == runIdentity, !hasHandledTerminalEvent else { return }
         hasHandledTerminalEvent = true
 
-        // A live instruction stops the current model step at its next token
-        // boundary. If that boundary falls inside an unfinished structured
-        // tool span, the parser correctly refuses to commit the partial call.
-        // That refusal is an interruption, not a failed user instruction: keep
-        // the completed QA evidence, move the uncommitted turn out of the old
-        // KV lineage, and immediately send the exact queued instruction in a
-        // fresh lineage reconstructed from the host checkpoint.
+        // An instruction can interrupt decoding or suppress a completed call
+        // before dispatch. Keep settled external evidence, retire the old model
+        // lineage (including any undelivered pending calls), and deliver the
+        // exact instruction using a fresh lineage and the host checkpoint.
         if let instruction = pendingAgentInstruction,
-           agentCancellationIssued,
+           agentCancellationIssued || appError == .cancelled,
            Self.isRecoverableAgentInstructionInterruption(appError) {
             pendingAgentInstruction = nil
             interruptAgentCompaction(appError)
-            let interruption = "Interrupted by a new user instruction before an unfinished tool call was sent."
+            let interruption = "Interrupted by a new user instruction before a proposed tool call was sent."
             if !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 outputText += "\n\n" + interruption
             } else {

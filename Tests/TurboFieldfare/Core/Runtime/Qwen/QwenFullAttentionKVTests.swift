@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import Testing
 @testable import TurboFieldfare
@@ -101,6 +102,40 @@ import Testing
         try cache.abandon(reacquired)
         #expect(try cache.view(layer: 3).validTokenCount == before.position)
     }
+
+    @Test func replacementCheckpointRestoresOverwrittenPrefixBytesAndCursors() throws {
+        let cache = try makeCache(maxContext: 4)
+        let queue = try #require(device().makeCommandQueue())
+
+        for (layerIndex, layer) in cache.fullLayerIndices.enumerated() {
+            let write = try cache.reserveWrite(layer: layer, position: 0, tokenCount: 2)
+            fill(write, keyBase: Float(layerIndex + 1), valueBase: -Float(layerIndex + 1))
+            try commit(write, cache: cache, queue: queue)
+        }
+        let original = try cache.fullLayerIndices.map { layer in
+            try kvBytes(cache: cache, layer: layer)
+        }
+        let replacement = try cache.retainReplacementCheckpoint()
+
+        try cache.reset()
+        for (layerIndex, layer) in cache.fullLayerIndices.enumerated() {
+            let write = try cache.reserveWrite(layer: layer, position: 0, tokenCount: 2)
+            fill(write, keyBase: Float(100 + layerIndex), valueBase: Float(-100 - layerIndex))
+            try commit(write, cache: cache, queue: queue)
+        }
+        #expect(try cache.fullLayerIndices.map { layer in
+            try kvBytes(cache: cache, layer: layer)
+        } != original)
+
+        try cache.restoreReplacementCheckpoint(replacement)
+        #expect(cache.fullLayerIndices.allSatisfy { layer in
+            (try? cache.committedPosition(layer: layer)) == 2
+        })
+        #expect(try cache.fullLayerIndices.map { layer in
+            try kvBytes(cache: cache, layer: layer)
+        } == original)
+        cache.discardReplacementCheckpoint()
+    }
 }
 
 private func device() -> MTLDevice { MTLCreateSystemDefaultDevice()! }
@@ -117,4 +152,29 @@ private func commitAllLayers(cache: QwenFullAttentionKV, position: Int, tokenCou
     for layer in cache.fullLayerIndices {
         try commit(try cache.reserveWrite(layer: layer, position: position, tokenCount: tokenCount), cache: cache, queue: queue)
     }
+}
+
+private func fill(_ write: QwenFullAttentionKVWrite, keyBase: Float, valueBase: Float) {
+    let elementCount = write.tokenCount * write.strideBytes / MemoryLayout<Float>.stride
+    let key = write.key.contents().advanced(by: write.keyOffset)
+        .assumingMemoryBound(to: Float.self)
+    let value = write.value.contents().advanced(by: write.valueOffset)
+        .assumingMemoryBound(to: Float.self)
+    for index in 0..<elementCount {
+        key[index] = keyBase + Float(index) * 0.25
+        value[index] = valueBase - Float(index) * 0.5
+    }
+}
+
+private struct KVBytes: Equatable {
+    let key: Data
+    let value: Data
+}
+
+private func kvBytes(cache: QwenFullAttentionKV, layer: Int) throws -> KVBytes {
+    let view = try cache.view(layer: layer)
+    let byteCount = view.validTokenCount * view.strideBytes
+    return KVBytes(
+        key: Data(bytes: view.key.contents().advanced(by: view.keyOffset), count: byteCount),
+        value: Data(bytes: view.value.contents().advanced(by: view.valueOffset), count: byteCount))
 }

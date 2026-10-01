@@ -3,6 +3,7 @@ import Foundation
 import Metal
 import Synchronization
 import Testing
+import TurboFieldfareDecodeProtocol
 import TurboFieldfareFormat
 import TurboFieldfareOfficialQwenSource
 @testable import TurboFieldfare
@@ -12,6 +13,63 @@ import TurboFieldfareOfficialQwenSource
 /// registration. It exercises the protected BF16 source reader and the real
 /// source runner, while keeping original weights out of the test.
 @Suite(.serialized) struct SourceCacheTelemetryTests {
+    @Test func sourceClientCheckpointDryRunPreservesToolTransactionAndReceiptIdentity() async throws {
+        let harness = try await SourceCheckpointHarness.make()
+        defer { harness.fixture.remove() }
+        let call = try await harness.generateToolCall(query: "snow")
+        try await harness.synchronize(call: call)
+        let before = await harness.generation.status()
+        let beforeSnapshot = try await harness.generation.diagnosticSnapshot()
+        let request = try sourceCheckpointRequest(call: call, record: "", commit: false)
+
+        let receipt = try await harness.client.contextCheckpoint(request)
+
+        #expect(!receipt.committed)
+        #expect(receipt.checkpointID == request.checkpointID)
+        #expect(receipt.replacementEpoch == request.replacementEpoch)
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+        #expect(await harness.client.conversationTokenCount
+            == before.committed.retainedTokenIDs.count)
+    }
+
+    @Test func sourceClientCheckpointRejectsMismatchedToolResultBeforeMutation() async throws {
+        let harness = try await SourceCheckpointHarness.make()
+        defer { harness.fixture.remove() }
+        let call = try await harness.generateToolCall(query: "snow")
+        try await harness.synchronize(call: call)
+        let before = await harness.generation.status()
+        let beforeSnapshot = try await harness.generation.diagnosticSnapshot()
+        var request = try sourceCheckpointRequest(call: call, record: "", commit: false)
+        request.result.callID = "different-call-id"
+
+        await #expect(throws: (any Error).self) {
+            try await harness.client.contextCheckpoint(request)
+        }
+
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+    }
+
+    @Test func sourceClientCheckpointCancellationLeavesSourceTurnUnchanged() async throws {
+        let harness = try await SourceCheckpointHarness.make()
+        defer { harness.fixture.remove() }
+        let call = try await harness.generateToolCall(query: "snow")
+        try await harness.synchronize(call: call)
+        let before = await harness.generation.status()
+        let beforeSnapshot = try await harness.generation.diagnosticSnapshot()
+        let request = try sourceCheckpointRequest(call: call, record: "", commit: false)
+        let stop = AppGenerationStop()
+        stop.requestStop()
+
+        await #expect(throws: CancellationError.self) {
+            try await harness.client.contextCheckpoint(request, stop: stop)
+        }
+
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+    }
+
     @Test func sourceAllocationIsVisibleThroughClientAndSurvivesReset() async throws {
         let fixture = try SourceCacheTelemetryFixture.make()
         defer { fixture.remove() }
@@ -138,6 +196,145 @@ import TurboFieldfareOfficialQwenSource
         #expect(client.currentExpertCacheBytes == nil)
     }
 }
+
+private enum SourceCheckpointFixtureFailure: Error {
+    case noToolCall
+}
+
+private final class SourceToolCallRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var calls: [ParsedToolCall] = []
+
+    func record(_ call: ParsedToolCall) {
+        lock.lock()
+        calls.append(call)
+        lock.unlock()
+    }
+
+    var last: ParsedToolCall? {
+        lock.lock()
+        defer { lock.unlock() }
+        return calls.last
+    }
+}
+
+private struct SourceCheckpointHarness {
+    let fixture: SourceCacheTelemetryFixture
+    let generation: QwenOfficialSourceConversationGenerationSession
+    let session: RealInferenceSession
+    let client: RealInferenceClient
+    let codec: QwenChatCodec
+
+    static func make(
+        hooks: QwenOfficialSourceTransactionHooks = .none
+    ) async throws -> Self {
+        let fixture = try SourceCacheTelemetryFixture.make()
+        do {
+            let context = try MetalContext()
+            let model = try QwenOfficialSourceModel.loadSyntheticFixture(
+                registrationURL: fixture.registrationURL,
+                context: context,
+                residencyBudgetBytes: fixture.residencyBudgetBytes)
+            let generation = try await QwenOfficialSourceConversationGenerationSession(
+                fixtureModel: model, context: context, maxContext: 32,
+                expertSlotCount: fixture.expertSlotCount, hooks: hooks)
+            let session = RealInferenceSession()
+            try await session.installQwenOfficialSourceFixture(
+                model: model, generation: generation,
+                key: fixture.sessionKey, context: context)
+            let tokenizer = try QwenTokenizer.loadOfficialSidecar(
+                from: sourceCheckpointTokenizerDirectory)
+            let codec = QwenChatCodec(tokenizer: tokenizer)
+            return Self(fixture: fixture, generation: generation,
+                        session: session, client: RealInferenceClient(session: session),
+                        codec: codec)
+        } catch {
+            fixture.remove()
+            throw error
+        }
+    }
+
+    func generateToolCall(query: String) async throws -> ParsedToolCall {
+        let recorder = SourceToolCallRecorder()
+        let steps = sourcePreparedToolSteps(query: query)
+        let result = try await generation.generatePreparedToolTurn(
+            promptTokenIDs: [0, 1], steps: steps, tools: [sourceLookupTool()],
+            config: sourceToolConfig(maxNewTokens: steps.count),
+            onEvent: { event in
+                if case .toolCall(let call) = event { recorder.record(call) }
+            })
+        guard result.reason == .toolCalls, let observed = recorder.last else {
+            throw SourceCheckpointFixtureFailure.noToolCall
+        }
+        return observed
+    }
+
+    func synchronize(call: ParsedToolCall) async throws {
+        try await session.synchronizeQwenOfficialSourceFixtureTurn(
+            codec: codec, tools: [sourceLookupTool()], toolCalls: [call])
+    }
+}
+
+private func sourceLookupTool() -> ModelChatToolDefinition {
+    ModelChatToolDefinition(function: .init(
+        name: "lookup", description: "synthetic lookup",
+        parameters: .object([
+            .init("type", .string("object")),
+            .init("properties", .object([
+                .init("query", .object([
+                    .init("type", .string("string")),
+                    .init("enum", .array([.string("snow")])),
+                ])),
+            ])),
+            .init("required", .array([.string("query")])),
+            .init("additionalProperties", .bool(false)),
+        ])))
+}
+
+private func sourcePreparedToolSteps(query: String) -> [QwenOfficialSourcePreparedToolStep] {
+    let text = "<tool_call>\n<function=lookup>\n<parameter=query>\n\(query)\n"
+        + "</parameter>\n</function>\n</tool_call>"
+    let bytes = Array(text.utf8)
+    var steps: [QwenOfficialSourcePreparedToolStep] = []
+    for start in stride(from: 0, to: bytes.count, by: 32) {
+        let end = min(start + 32, bytes.count)
+        steps.append(.token(
+            id: Int32(steps.count % 4),
+            decoded: String(decoding: bytes[start..<end], as: UTF8.self)))
+    }
+    steps.append(.modelEOS(id: 4, tokenizerTail: ""))
+    return steps
+}
+
+private func sourceToolConfig(maxNewTokens: Int) -> GenerationConfig {
+    var config = GenerationConfig(
+        maxNewTokens: maxNewTokens, temperature: 0, topK: nil, topP: nil,
+        repetitionPenalty: 1, seed: 0, stopStrings: [], extraStopTokens: [])
+    config.logitTransform = .raw
+    return config
+}
+
+private func sourceCheckpointRequest(
+    call: ParsedToolCall, record: String, commit: Bool
+) throws -> DecodeContextCheckpointRequest {
+    DecodeContextCheckpointRequest(
+        checkpointID: UUID(), sourceEpoch: UUID(), sourceTurnIndex: 0,
+        replacementEpoch: UUID(),
+        pendingCall: DecodeToolCall(
+            id: call.id, name: call.name,
+            argumentsJSON: try call.arguments.encoded()),
+        result: DecodeToolResult(
+            callID: call.id, name: call.name, content: "synthetic result"),
+        record: record, commit: commit, force: true,
+        generationAllowance: 128, finalAnswerAllowance: 128,
+        permitsScreenshot: false)
+}
+
+private let sourceCheckpointTokenizerDirectory = URL(
+    fileURLWithPath: FileManager.default.currentDirectoryPath)
+    .appendingPathComponent(
+        "scratch/qwen3.6-35b-a3b/official-995ad96eacd98c81ed38be0c5b274b04031597b0",
+        isDirectory: true)
 
 private enum SourceCacheTelemetryFailure: Error {
     case protectedRead

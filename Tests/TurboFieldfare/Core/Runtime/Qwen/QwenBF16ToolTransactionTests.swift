@@ -80,6 +80,53 @@ struct QwenBF16ToolTransactionTests {
         }
     }
 
+    @Test func strayPreserveTagRemainsMalformedAcrossRetriesThenCorrectedCallPublishesOnce() async throws {
+        let harness = try await makeToolHarness()
+        defer { harness.source.remove() }
+        let baseline = try await commitToolBaseline(harness)
+        let malformed = "<tool_call>\n<function=visioncapture_navigate>\n"
+            + "<parameter=action>\ntap\n</parameter>\n"
+            + "<.preserve_existing_data>\n</parameter>\n"
+            + "<parameter=target>\nc10\n</parameter>\n"
+            + "</function>\n</tool_call>"
+
+        for _ in 0..<2 {
+            let events = QwenBF16ToolEventRecorder()
+            let failed = await captureToolOperation {
+                try await harness.session.generatePreparedToolTurn(
+                    promptTokenIDs: [1, 2], steps: preparedToolSteps(malformed),
+                    tools: [navigateTool()], config: toolConfig(maxNewTokens: 64),
+                    onEvent: observeToolEvents(events, session: harness.session))
+            }
+            #expect(failed.value == nil)
+            guard let failure = failed.error as? StructuredToolFailure else {
+                Issue.record("malformed source output must preserve its typed parser failure")
+                continue
+            }
+            #expect(failure.underlying == .malformed)
+            #expect(failure.canRegenerateToolResult,
+                    "only a malformed frame after successful rollback may be regenerated")
+            #expect(events.snapshot().isEmpty)
+            #expect(try await harness.session.diagnosticSnapshot() == baseline,
+                    "a malformed model frame must not mutate the committed turn")
+        }
+
+        let events = QwenBF16ToolEventRecorder()
+        let retry = try await harness.session.generatePreparedToolTurn(
+            promptTokenIDs: [1, 2], steps: preparedToolSteps(navigateToolFrame()),
+            tools: [navigateTool()], config: toolConfig(maxNewTokens: 64),
+            onEvent: observeToolEvents(events, session: harness.session))
+        #expect(retry.reason == .toolCalls)
+        let calls = events.snapshot()
+        #expect(calls.count == 1)
+        if let call = calls.first {
+            #expect(call.name == "visioncapture_navigate")
+            #expect(call.arguments == .object([
+                "action": .string("tap"), "target": .string("c10")
+            ]))
+        }
+    }
+
     @Test func multipleCompleteCallsArePublishedOnlyAfterTheirSharedCommit() async throws {
         let harness = try await makeToolHarness()
         defer { harness.source.remove() }
@@ -126,7 +173,13 @@ struct QwenBF16ToolTransactionTests {
         }
 
         #expect(failed.value == nil)
-        #expect(failed.error != nil)
+        guard let failure = failed.error as? StructuredToolFailure else {
+            Issue.record("a valid prefix followed by malformed output must retain typed parser failure")
+            return
+        }
+        #expect(failure.underlying == .malformed)
+        #expect(!failure.canRegenerateToolResult,
+                "a malformed suffix after a valid call must not be regenerated")
         #expect(events.snapshot().isEmpty,
                 "a valid prefix remains provisional when the later call fails validation")
         let after = try await harness.session.diagnosticSnapshot()
@@ -265,6 +318,32 @@ private func lookupTool() -> ModelChatToolDefinition {
             .init("required", .array([.string("query")])),
             .init("additionalProperties", .bool(false)),
         ])))
+}
+
+private func navigateTool() -> ModelChatToolDefinition {
+    ModelChatToolDefinition(function: ModelChatFunctionDefinition(
+        name: "visioncapture_navigate", description: "synthetic navigation",
+        parameters: .object([
+            .init("type", .string("object")),
+            .init("properties", .object([
+                .init("action", .object([
+                    .init("type", .string("string")),
+                    .init("enum", .array([.string("tap")])),
+                ])),
+                .init("target", .object([
+                    .init("type", .string("string")),
+                ])),
+            ])),
+            .init("required", .array([.string("action"), .string("target")])),
+            .init("additionalProperties", .bool(false)),
+        ])))
+}
+
+private func navigateToolFrame(action: String = "tap", target: String = "c10") -> String {
+    "<tool_call>\n<function=visioncapture_navigate>\n"
+        + "<parameter=action>\n\(action)\n</parameter>\n"
+        + "<parameter=target>\n\(target)\n</parameter>\n"
+        + "</function>\n</tool_call>"
 }
 
 /// Literal structured protocol frame, independent of parser-produced output.
