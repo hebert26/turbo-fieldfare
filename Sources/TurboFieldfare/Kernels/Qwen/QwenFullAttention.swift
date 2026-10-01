@@ -537,21 +537,59 @@ final class QwenFullAttention {
             }
             // The source softmax multiplies by one rounded reciprocal.
             let sourceReciprocal: Float = useOfficialSourceMath ? 1 / denominator : 0
-            for token in scores.indices {
-                let probability = useOfficialSourceMath
-                    ? scores[token] * sourceReciprocal : scores[token] / denominator
-                let valueBase = (token * configuration.keyValueHeadCount + keyHead)
-                    * configuration.headDimension
-                for column in 0..<configuration.headDimension {
-                    let current = token == cache.validTokenCount
-                        ? value[keyHead * configuration.headDimension + column]
-                        : values[valueBase + column]
-                    if useOfficialSourceMath {
-                        // The source value matmul accumulates ordered FP32 FMA.
-                        output[queryBase + column] = output[queryBase + column]
-                            .addingProduct(probability, current)
-                    } else {
-                        output[queryBase + column] += probability * current
+            if useOfficialSourceMath && configuration.headDimension.isMultiple(of: 4) {
+                // Each lane owns an independent output column. Keep the token
+                // sequence and each lane's fused FP32 accumulation unchanged.
+                output.withUnsafeMutableBufferPointer { destination in
+                    for token in scores.indices {
+                        let probability = scores[token] * sourceReciprocal
+                        let valueBase = (token * configuration.keyValueHeadCount + keyHead)
+                            * configuration.headDimension
+                        let candidateBase = keyHead * configuration.headDimension
+                        var column = 0
+                        while column < configuration.headDimension {
+                            let current: SIMD4<Float>
+                            // Scalar loads require no SIMD alignment from arrays
+                            // or cache slices and never read beyond this head.
+                            if token == cache.validTokenCount {
+                                let base = candidateBase + column
+                                current = SIMD4<Float>(value[base], value[base + 1],
+                                                       value[base + 2], value[base + 3])
+                            } else {
+                                let base = valueBase + column
+                                current = SIMD4<Float>(values[base], values[base + 1],
+                                                       values[base + 2], values[base + 3])
+                            }
+                            let base = queryBase + column
+                            let accumulator = SIMD4<Float>(
+                                destination[base], destination[base + 1],
+                                destination[base + 2], destination[base + 3])
+                            let updated = accumulator.addingProduct(probability, current)
+                            destination[base] = updated[0]
+                            destination[base + 1] = updated[1]
+                            destination[base + 2] = updated[2]
+                            destination[base + 3] = updated[3]
+                            column += 4
+                        }
+                    }
+                }
+            } else {
+                for token in scores.indices {
+                    let probability = useOfficialSourceMath
+                        ? scores[token] * sourceReciprocal : scores[token] / denominator
+                    let valueBase = (token * configuration.keyValueHeadCount + keyHead)
+                        * configuration.headDimension
+                    for column in 0..<configuration.headDimension {
+                        let current = token == cache.validTokenCount
+                            ? value[keyHead * configuration.headDimension + column]
+                            : values[valueBase + column]
+                        if useOfficialSourceMath {
+                            // The source value matmul accumulates ordered FP32 FMA.
+                            output[queryBase + column] = output[queryBase + column]
+                                .addingProduct(probability, current)
+                        } else {
+                            output[queryBase + column] += probability * current
+                        }
                     }
                 }
             }
