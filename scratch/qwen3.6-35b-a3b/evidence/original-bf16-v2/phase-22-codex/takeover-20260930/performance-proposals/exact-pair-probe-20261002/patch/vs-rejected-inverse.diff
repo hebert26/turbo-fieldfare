@@ -1,0 +1,377 @@
+diff --git a/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift b/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
+--- a/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
++++ b/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
+@@ -985,14 +985,13 @@
+         scratch: QwenMoEScratch,
+         initializeOutput: Bool,
+         exactBlockAdmission: QwenExactBlockConsumerAdmission? = nil,
+-        exactPairSharedNames: QwenBF16SharedNames? = nil,
+         isolation: isolated (any Actor)? = #isolation
+     ) async throws {
+         // Capture inside submit: its encoding failure path still commits the
+         // partially encoded command and holds both buffers until completion.
+         var submittedCommand: MTLCommandBuffer?
+         let timing = QwenProductionTimingMeasurement.command(.groupedMoE)
+-        var retainedBuffers = [hiddenRows, routingWeights, outputRows,
++        let retainedBuffers = [hiddenRows, routingWeights, outputRows,
+             scratch.routedActivation, scratch.sharedGate, scratch.sharedUp,
+             scratch.sharedActivation, scratch.sharedOutput, scratch.sharedOutputGate]
+         do {
+@@ -1144,67 +1143,6 @@
+                                        elements: 1, as: Float.self)
+                 offsets.append((row: rowOffset, weight: weightOffset))
+                 previous = item
+-            }
+-            // All pair bindings and allocations precede source authentication.
+-            // Distinct, tracked single rows let the unchanged shared encoder use offset0.
+-            var sharedRows: [(token: Int, rowOffset: Int, hidden: MTLBuffer, output: MTLBuffer)] = []
+-            if let names = exactPairSharedNames {
+-                let tokens = referencedTokens.sorted()
+-                guard exactBlockAdmission != nil, tokenCount == 4, configuration.topK == 8,
+-                      tokens == [0, 1] || tokens == [2, 3],
+-                      initializeOutput == (tokens == [0, 1]), work.count == 16,
+-                      lease.experts.count <= 16 else {
+-                    throw QwenMoEError.invalidAffineBinding("exact pair eligibility/clear binding")
+-                }
+-                for token in tokens {
+-                    let ranks = work.filter { $0.tokenIndex == token }.map(\.routeRank)
+-                    guard Set(ranks) == Set(0..<configuration.topK), ranks.count == configuration.topK else {
+-                        throw QwenMoEError.invalidAffineBinding("exact pair missing original rank")
+-                    }
+-                }
+-                try sharedWeights.requireShape(names.gate, role: .sharedGate,
+-                    rows: configuration.sharedIntermediateSize, columns: configuration.hiddenSize)
+-                try sharedWeights.requireShape(names.up, role: .sharedUp,
+-                    rows: configuration.sharedIntermediateSize, columns: configuration.hiddenSize)
+-                try sharedWeights.requireShape(names.down, role: .sharedDown,
+-                    rows: configuration.hiddenSize, columns: configuration.sharedIntermediateSize)
+-                try sharedWeights.requireShape(names.outputGate, role: .sharedOutputGate,
+-                    rows: 1, columns: configuration.hiddenSize)
+-                try requireDispatchable(try bf16Pipeline("qwen_moe_silu_multiply_bf16"),
+-                    count: configuration.sharedIntermediateSize)
+-                try requireDispatchable(try bf16Pipeline("qwen_moe_shared_epilogue_bf16"),
+-                    count: configuration.hiddenSize)
+-                guard retainedBuffers.allSatisfy({ $0.hazardTrackingMode != .untracked }) else {
+-                    throw QwenMoEError.invalidAffineBinding("exact pair requires tracked resources")
+-                }
+-                let rowBytes = try Self.checkedMultiply(configuration.hiddenSize, MemoryLayout<Float>.stride,
+-                    operation: "exact pair row bytes")
+-                for token in tokens {
+-                    guard let hidden = device.makeBuffer(length: rowBytes,
+-                            options: [.storageModePrivate, .hazardTrackingModeTracked]),
+-                          let output = device.makeBuffer(length: rowBytes,
+-                            options: [.storageModePrivate, .hazardTrackingModeTracked]) else {
+-                        throw QwenMoEError.bufferTooSmall(name: "exact pair rows", required: rowBytes, actual: 0)
+-                    }
+-                    hidden.label = "qwen.exact-pair.hidden.\(token)"
+-                    output.label = "qwen.exact-pair.output.\(token)"
+-                    let rowOffset = try Self.checkedMultiply(token, rowBytes, operation: "exact pair row offset")
+-                    try Self.requireBuffer(hiddenRows, named: "exact pair input", offset: rowOffset,
+-                        elements: configuration.hiddenSize, as: Float.self)
+-                    try Self.requireBuffer(outputRows, named: "exact pair routed output", offset: rowOffset,
+-                        elements: configuration.hiddenSize, as: Float.self)
+-                    sharedRows.append((token, rowOffset, hidden, output))
+-                    retainedBuffers.append(contentsOf: [hidden, output])
+-                }
+-                guard Set(retainedBuffers.map { ObjectIdentifier($0) }).count == retainedBuffers.count,
+-                      retainedBuffers.allSatisfy({ $0.device === device }),
+-                      sharedRows.allSatisfy({ $0.hidden.hazardTrackingMode == .tracked && $0.output.hazardTrackingMode == .tracked }) else {
+-                    throw QwenMoEError.invalidAffineBinding("exact pair row alias/device/tracking")
+-                }
+-                try Self.requireDistinctSharedWeights(sharedWeights, from: retainedBuffers)
+-                guard mappedBufferIDs.isDisjoint(with: Set(retainedBuffers.map { ObjectIdentifier($0) })) else {
+-                    throw QwenMoEError.invalidAffineBinding("exact pair row aliases mapped expert")
+-                }
+             }
+             let gateSelection = try bf16RoutedPipeline(
+                 serialName: "qwen_moe_routed_gate_up_bf16",
+@@ -1280,30 +1218,6 @@
+                                                cooperative: downSelection.cooperative)
+                     }
+                 }
+-                if let names = exactPairSharedNames {
+-                    let rowBytes = configuration.hiddenSize * MemoryLayout<Float>.stride
+-                    for row in sharedRows {
+-                        try Task.checkCancellation()
+-                        guard let inputCopies = command.makeBlitCommandEncoder() else {
+-                            throw QwenMoEError.commandEncoderUnavailable
+-                        }
+-                        inputCopies.copy(from: hiddenRows, sourceOffset: row.rowOffset,
+-                            to: row.hidden, destinationOffset: 0, size: rowBytes)
+-                        inputCopies.copy(from: outputRows, sourceOffset: row.rowOffset,
+-                            to: row.output, destinationOffset: 0, size: rowBytes)
+-                        inputCopies.endEncoding()
+-                        // Encoders are ordered, all resources tracked; shared scratch
+-                        // is overwritten/read completely before the next token uses it.
+-                        try encodeSharedBF16(commandBuffer: command, hidden: row.hidden,
+-                            weights: sharedWeights, names: names, scratch: scratch, output: row.output)
+-                        guard let outputCopy = command.makeBlitCommandEncoder() else {
+-                            throw QwenMoEError.commandEncoderUnavailable
+-                        }
+-                        outputCopy.copy(from: row.output, sourceOffset: 0,
+-                            to: outputRows, destinationOffset: row.rowOffset, size: rowBytes)
+-                        outputCopy.endEncoding()
+-                    }
+-                }
+                 try Task.checkCancellation()
+             }
+         } catch {
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+@@ -150,10 +150,6 @@
+             let layerAdmissions: Int
+             let reusedPairChecks: Int
+             let preGPUChecks: Int
+-            let pairMaps: Int
+-            let pairMappedExperts: Int
+-            let pairMoECommands: Int
+-            let separateSharedCommands: Int
+             let sharedChecks: Int
+             let finalChecks: Int
+             init(_ capture: QwenExactBlockCapture) {
+@@ -163,10 +159,6 @@
+                 layerAdmissions = capture.layerAdmissions
+                 reusedPairChecks = capture.reusedPairChecks
+                 preGPUChecks = capture.preGPUChecks
+-                pairMaps = capture.pairMaps
+-                pairMappedExperts = capture.pairMappedExperts
+-                pairMoECommands = capture.pairMoECommands
+-                separateSharedCommands = capture.separateSharedCommands
+                 sharedChecks = capture.sharedChecks
+                 finalChecks = capture.finalChecks
+             }
+@@ -247,10 +239,6 @@
+              "matchedDrafts": value.matched, "targetSamples": value.samples,
+              "routeSHA256": probeSHA(try JSONEncoder().encode(probeRoutes(value.capture.routes))),
+              "rawRowSHA256": probeRowSHA(value.capture.logits),
+-             "commands": ["pairMaps": value.capture.pairMaps,
+-                          "pairMappedExperts": value.capture.pairMappedExperts,
+-                          "pairMoE": value.capture.pairMoECommands,
+-                          "separateShared": value.capture.separateSharedCommands],
+              "sourceChecks": ["tokenAdmissions": value.capture.tokenAdmissions,
+                               "layerAdmissions": value.capture.layerAdmissions,
+                               "reusedPairChecks": value.capture.reusedPairChecks,
+@@ -263,11 +251,6 @@
+             let expectedState = try await runner.diagnosticSnapshot()
+             try await rollback()
+             let grouped = try await arm(grouped: true, inputs: inputs, history: history, sampleBase: sampleBase)
+-            try probeRequire(grouped.capture.pairMaps == 80 && grouped.capture.pairMoECommands == 80
+-                && grouped.capture.pairMappedExperts + grouped.capture.reusedPairChecks == 1280
+-                && grouped.capture.separateSharedCommands == 0 && grouped.capture.sharedChecks == 0
+-                && grouped.capture.tokenAdmissions == 4 && grouped.capture.finalChecks == 4
+-                && grouped.capture.layerAdmissions == 160 && grouped.capture.preGPUChecks == 160, "pair scheduling/source check counts")
+             try probeRequire(serial.capture.logits.count == 4 && grouped.capture.logits.count == 4,
+                              "missing all-row logits")
+             for row in 0..<4 {
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
+@@ -15,10 +15,6 @@
+     var layerAdmissions = 0
+     var reusedPairChecks = 0
+     var preGPUChecks = 0
+-    var pairMaps = 0
+-    var pairMappedExperts = 0
+-    var pairMoECommands = 0
+-    var separateSharedCommands = 0
+     var sharedChecks = 0
+     var finalChecks = 0
+ }
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -431,7 +431,6 @@
+         }
+         if exactBlock != nil {
+             guard hooks.isKnownNone, tokenIDs.count == 4, position > 0,
+-                  expertSlotCount == 16, model.architecture.expertsPerToken == 8,
+                   featureRowAt == nil, mropePositions == nil, groupedCapture == nil,
+                   turnCheckpoint != nil else {
+                 throw QwenTextRunnerError.invalidState(detail: "isolated probe eligibility")
+@@ -677,32 +676,33 @@
+                 }
+                 lastPrefillDiagnostics?.mappedUniqueExperts[layer] = uniqueExperts.count
+                 let coordinator = try expertCoordinator(layer: layer)
+-                if let exactBlock {
+-                    // Fixed complete-token pairs: each union fits the existing16 slots.
+-                    // Pair B maps only after pair A has settled and released its lease.
+-                    for pairStart in stride(from: 0, to: tokenIDs.count, by: 2) {
++                var firstCommand = true
++                var groupStart = 0
++                while groupStart < uniqueExperts.count {
++                    let groupEnd = min(groupStart + expertSlotCount, uniqueExperts.count)
++                    let groupIDs = Array(uniqueExperts[groupStart..<groupEnd])
++                    let groupWork = groupIDs.flatMap { workByExpert[$0] ?? [] }
++                    var workStart = 0
++                    while workStart < groupWork.count {
+                         try Task.checkCancellation()
+-                        let pairTokens = [pairStart, pairStart + 1]
+-                        let requested = Array(Set(pairTokens.flatMap { token in
+-                            (0..<topK).map { routingExpertIDs[token * topK + $0] }
+-                        })).sorted()
+-                        let work = requested.flatMap { expert in
+-                            (workByExpert[expert] ?? []).filter { pairTokens.contains($0.tokenIndex) }
+-                        }
+-                        guard requested.count <= expertSlotCount, work.count == 2 * topK else {
+-                            throw QwenTextRunnerError.invalidState(detail: "incomplete exact pair")
+-                        }
+-                        for _ in pairTokens {
+-                            try model.revalidateSource()
+-                            exactBlock.layerAdmissions += 1
+-                        }
++                        let workEnd = min(workStart + QwenMoE.maximumGroupedContributionsPerCommand,
++                                          groupWork.count)
++                        let work = Array(groupWork[workStart..<workEnd])
++                        // Load the complete group once. Subsequent chunks can map
++                        // their current subset as hits without evicting this group.
++                        let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
++                        let logicalTokens = Array(Set(work.map(\.tokenIndex))).sorted()
++                        if let exactBlock {
++                            for _ in logicalTokens {
++                                try model.revalidateSource()
++                                exactBlock.layerAdmissions += 1
++                            }
++                        } else { try model.revalidateSource() }
+                         let measurement = QwenCacheMapMeasurement.capture.map {
+                             QwenCacheMapContext(capture: $0, layer: layer,
+                                                 position: position, tokenCount: tokenIDs.count)
+                         }
+                         let lease = try await coordinator.map(expertIDs: requested, measurement: measurement)
+-                        exactBlock.pairMaps += 1
+-                        exactBlock.pairMappedExperts += lease.experts.count
+                         successfulCacheHits += UInt64(lease.diagnostics.hits)
+                         successfulCacheMisses += UInt64(lease.diagnostics.misses)
+                         publishCacheSummary()
+@@ -710,104 +710,45 @@
+                         lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
+                         lastRoutedExpertCount = topK
+                         do {
++                            if exactBlock == nil { try model.revalidateSource() }
+                             try await moe.submitGroupedExpertsBF16(
+                                 hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
+                                 routingWeights: routingWeights, outputRows: outputRows,
+                                 tokenCount: tokenIDs.count, lease: lease, work: work,
+                                 sharedWeights: row.weights, scratch: scratch,
+-                                initializeOutput: pairStart == 0,
+-                                exactBlockAdmission: QwenExactBlockConsumerAdmission(
+-                                    model: model, lease: lease, capture: exactBlock),
+-                                exactPairSharedNames: row.sharedNames)
+-                            exactBlock.pairMoECommands += 1
++                                initializeOutput: firstCommand,
++                                exactBlockAdmission: exactBlock.map {
++                                    QwenExactBlockConsumerAdmission(model: model, lease: lease,
++                                        capture: $0)
++                                })
+                         } catch {
+                             try? lease.cancel()
+                             throw error
+                         }
+-                    }
+-                } else {
+-                    var firstCommand = true
+-                    var groupStart = 0
+-                    while groupStart < uniqueExperts.count {
+-                        let groupEnd = min(groupStart + expertSlotCount, uniqueExperts.count)
+-                        let groupIDs = Array(uniqueExperts[groupStart..<groupEnd])
+-                        let groupWork = groupIDs.flatMap { workByExpert[$0] ?? [] }
+-                        var workStart = 0
+-                        while workStart < groupWork.count {
+-                            try Task.checkCancellation()
+-                            let workEnd = min(workStart + QwenMoE.maximumGroupedContributionsPerCommand,
+-                                              groupWork.count)
+-                            let work = Array(groupWork[workStart..<workEnd])
+-                            // Load the complete group once. Subsequent chunks can map
+-                            // their current subset as hits without evicting this group.
+-                            let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
+-                            let logicalTokens = Array(Set(work.map(\.tokenIndex))).sorted()
+-                            if let exactBlock {
+-                                for _ in logicalTokens {
+-                                    try model.revalidateSource()
+-                                    exactBlock.layerAdmissions += 1
+-                                }
+-                            } else { try model.revalidateSource() }
+-                            let measurement = QwenCacheMapMeasurement.capture.map {
+-                                QwenCacheMapContext(capture: $0, layer: layer,
+-                                                    position: position, tokenCount: tokenIDs.count)
+-                            }
+-                            let lease = try await coordinator.map(expertIDs: requested, measurement: measurement)
+-                            successfulCacheHits += UInt64(lease.diagnostics.hits)
+-                            successfulCacheMisses += UInt64(lease.diagnostics.misses)
+-                            publishCacheSummary()
+-                            lastPrefillDiagnostics?.mappingHits += UInt64(lease.diagnostics.hits)
+-                            lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
+-                            lastRoutedExpertCount = topK
+-                            do {
+-                                if exactBlock == nil { try model.revalidateSource() }
+-                                try await moe.submitGroupedExpertsBF16(
+-                                    hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
+-                                    routingWeights: routingWeights, outputRows: outputRows,
+-                                    tokenCount: tokenIDs.count, lease: lease, work: work,
+-                                    sharedWeights: row.weights, scratch: scratch,
+-                                    initializeOutput: firstCommand,
+-                                    exactBlockAdmission: exactBlock.map {
+-                                        QwenExactBlockConsumerAdmission(model: model, lease: lease,
+-                                            capture: $0)
+-                                    })
+-                            } catch {
+-                                try? lease.cancel()
+-                                throw error
+-                            }
+-                            firstCommand = false
+-                            workStart = workEnd
+-                        }
+-                        groupStart = groupEnd
+-                    }
++                        firstCommand = false
++                        workStart = workEnd
++                    }
++                    groupStart = groupEnd
+                 }
+                 for index in tokenIDs.indices {
+                     try Task.checkCancellation()
+-                    let combined: [Float]
+-                    if exactBlock != nil {
+-                        // Only read after both lease-owned pair commands have settled.
+-                        let output = outputRows.contents().assumingMemoryBound(to: Float.self)
+-                        combined = Array(UnsafeBufferPointer(start: output.advanced(by: index * width), count: width))
+-                    } else {
+-                        let post = Array(UnsafeBufferPointer(
+-                            start: inputs.advanced(by: index * width), count: width))
+-                        let output = outputRows.contents().assumingMemoryBound(to: Float.self)
+-                        let routed = Array(UnsafeBufferPointer(
+-                            start: output.advanced(by: index * width), count: width))
+-                        let sharedInput = try floats(post, label: "source prefill shared input")
+-                        let sharedOutput = try floats(routed, label: "source prefill shared output")
+-                        let command = try commandBuffer()
+-                        if let exactBlock {
+-                            try model.revalidateSource()
+-                            exactBlock.sharedChecks += 1
+-                        }
+-                        try moe.encodeSharedBF16(commandBuffer: command, hidden: sharedInput,
+-                            weights: row.weights, names: row.sharedNames,
+-                            scratch: scratch, output: sharedOutput)
+-                        try await settle(command, stage: "source.prefill.shared")
+-                        exactBlock?.separateSharedCommands += 1
+-                        combined = read(sharedOutput, count: width)
+-                    }
++                    let post = Array(UnsafeBufferPointer(
++                        start: inputs.advanced(by: index * width), count: width))
++                    let output = outputRows.contents().assumingMemoryBound(to: Float.self)
++                    let routed = Array(UnsafeBufferPointer(
++                        start: output.advanced(by: index * width), count: width))
++                    let sharedInput = try floats(post, label: "source prefill shared input")
++                    let sharedOutput = try floats(routed, label: "source prefill shared output")
++                    let command = try commandBuffer()
++                    if let exactBlock {
++                        try model.revalidateSource()
++                        exactBlock.sharedChecks += 1
++                    }
++                    try moe.encodeSharedBF16(commandBuffer: command, hidden: sharedInput,
++                        weights: row.weights, names: row.sharedNames,
++                        scratch: scratch, output: sharedOutput)
++                    try await settle(command, stage: "source.prefill.shared")
++                    let combined = read(sharedOutput, count: width)
+                     for column in 0..<width {
+                         residual[index * width + column] = residual[index * width + column] + combined[column]
+                     }

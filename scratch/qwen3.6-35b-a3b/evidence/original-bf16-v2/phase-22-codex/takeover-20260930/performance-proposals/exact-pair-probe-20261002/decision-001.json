@@ -1,0 +1,63 @@
+{
+  "at": "2026-10-02T12:27:33.070498+00:00",
+  "verdict": "isolated pair full-accept cost gate passed; no app integration or throughput acceptance",
+  "run": "scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-probe-20261002/run-20261002T122218Z-97f583a9",
+  "childExit": 0,
+  "wrapperExit": 0,
+  "resultSHA256": "125830171dab6fdb50f7795470a83747c4635a6c394933c9f4e28098af5caf48",
+  "receiptSHA256": "c7541dfeefe6830570960246f58b9f96d73892992589dd303ca8f546834ca7c9",
+  "firstAndSecondAllRawRowsRoutesStateExact": true,
+  "forcedConsumedBoundaries": [
+    0,
+    1,
+    3,
+    4
+  ],
+  "actualRejection": {
+    "matchedDrafts": 0,
+    "consumedAcceptedInputs": 1,
+    "correctionPending": 12640,
+    "restoreReplaySeconds": 0.5196878332644701,
+    "wallSeconds": 2.550602500094101
+  },
+  "EOS": "not exercised by this diagnostic",
+  "minimumSystemFreePercent": 33,
+  "memorySamples": 88,
+  "groupedToSerialMedian": 0.9121240069667651,
+  "workloadBreakEvenBeforeRecovery": 0.6744186046511628,
+  "arms": {
+    "serial": {
+      "medianSeconds": 1.759168125106953,
+      "wallSeconds": [
+        1.7937276668380946,
+        1.753029458457604,
+        1.7653067917563021,
+        1.6664396666456014
+      ],
+      "misses": [
+        469,
+        468,
+        468,
+        427
+      ],
+      "medianPayloadBytes": 2944401408.0
+    },
+    "grouped": {
+      "medianSeconds": 1.6045794792007655,
+      "wallSeconds": [
+        1.5934037500992417,
+        1.6415451250504702,
+        1.6157552083022892,
+        1.5828230835031718
+      ],
+      "misses": [
+        435,
+        468,
+        436,
+        435
+      ],
+      "medianPayloadBytes": 2739929088.0
+    }
+  },
+  "scope": "One warmed repeated four-input block with evolving LFU cache; adjacent real rejection state tested. Not representative whole request timing, not native MTP, not app speed. Serial custom counters uninstrumented. Target20tps remains open."
+}

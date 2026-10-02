@@ -1,0 +1,2428 @@
+{
+  "actualRejection" : {
+    "consumedAcceptedInputs" : 1,
+    "correctionPending" : 12640,
+    "recovery" : {
+      "commands" : {
+        "pairMappedExperts" : 1182,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 662,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 5284823040,
+            "count" : 1680,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          3200,
+          1680
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 3200,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 1680,
+            "errors" : 0
+          },
+          {
+            "count" : 1680,
+            "errors" : 0
+          },
+          {
+            "count" : 1680,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "actual rejection",
+      "matchedDrafts" : 0,
+      "misses" : 840,
+      "rawRowSHA256" : "d0c355ea5fbd37f45d84307f96e6581f230381906969e463b92adc08fe950f1a",
+      "restoreReplaySeconds" : 0.5196878332644701,
+      "routeSHA256" : "1dfdeac773e22ba8f24069db9ef9ae707edbf6fdbae7318b43cc5032ce940c2a",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 98,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        12640
+      ],
+      "wallSeconds" : 2.5506025000941008
+    },
+    "reference" : {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 320,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          0
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "accepted prefix reference",
+      "matchedDrafts" : 0,
+      "misses" : 0,
+      "rawRowSHA256" : "16d4f67cf0caa6799f938c6c6531ac2dfec4235d0fa0ac5dfc598538eb5c086b",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "3336c3018cab54ae4376d79e98c264ce14bade7dde99074d94700abe8e50b17e",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+
+      ],
+      "wallSeconds" : 0.34967787493951619
+    }
+  },
+  "alternatingTiming" : [
+    {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 811,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2950692864,
+            "count" : 938,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          938
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 938,
+            "errors" : 0
+          },
+          {
+            "count" : 938,
+            "errors" : 0
+          },
+          {
+            "count" : 938,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "serial",
+      "matchedDrafts" : 3,
+      "misses" : 469,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.7937276668380946
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 1096,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 661,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2736783360,
+            "count" : 870,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          870
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 870,
+            "errors" : 0
+          },
+          {
+            "count" : 870,
+            "errors" : 0
+          },
+          {
+            "count" : 870,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "grouped",
+      "matchedDrafts" : 3,
+      "misses" : 435,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 184,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.5934037500992417
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 1096,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 628,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2944401408,
+            "count" : 936,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          936
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "grouped",
+      "matchedDrafts" : 3,
+      "misses" : 468,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 184,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.6415451250504702
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 812,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2944401408,
+            "count" : 936,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          936
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "serial",
+      "matchedDrafts" : 3,
+      "misses" : 468,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.7530294584576041
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 1096,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 660,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2743074816,
+            "count" : 872,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          872
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 872,
+            "errors" : 0
+          },
+          {
+            "count" : 872,
+            "errors" : 0
+          },
+          {
+            "count" : 872,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "grouped",
+      "matchedDrafts" : 3,
+      "misses" : 436,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 184,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.6157552083022892
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 812,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2944401408,
+            "count" : 936,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          936
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          },
+          {
+            "count" : 936,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "serial",
+      "matchedDrafts" : 3,
+      "misses" : 468,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.7653067917563021
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 853,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2686451712,
+            "count" : 854,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          854
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 854,
+            "errors" : 0
+          },
+          {
+            "count" : 854,
+            "errors" : 0
+          },
+          {
+            "count" : 854,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "serial",
+      "matchedDrafts" : 3,
+      "misses" : 427,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.6664396666456014
+    },
+    {
+      "commands" : {
+        "pairMappedExperts" : 1096,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 661,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 2736783360,
+            "count" : 870,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          870
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 870,
+            "errors" : 0
+          },
+          {
+            "count" : 870,
+            "errors" : 0
+          },
+          {
+            "count" : 870,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "grouped",
+      "matchedDrafts" : 3,
+      "misses" : 435,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 184,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.5828230835031718
+    }
+  ],
+  "cacheCaveat" : "One runner; cache contents are not rolled back. Actual hits\/misses\/reads recorded per arm; opposite order after warming. No throughput qualification.",
+  "captureSHA256" : "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "decision" : "exact isolated probe passed; not speculative generation or speed qualification",
+  "diagnosticOnly" : true,
+  "EOSBehavior" : "not exercised by this diagnostic",
+  "expertCachePolicy" : "lfu",
+  "expertSlots" : 16,
+  "firstForcedBoundaries" : [
+    {
+      "diagnosticTruncationNotModelRejection" : true,
+      "EOSBehaviorExercised" : false,
+      "forcedConsumedInputs" : 0,
+      "grouped" : {
+        "commands" : {
+          "pairMappedExperts" : 1096,
+          "pairMaps" : 80,
+          "pairMoE" : 80,
+          "separateShared" : 0
+        },
+        "hits" : 588,
+        "io" : {
+          "failedReads" : [
+            0,
+            0,
+            0,
+            0
+          ],
+          "preads" : [
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 3196059648,
+              "count" : 1016,
+              "errors" : 0
+            }
+          ],
+          "reads" : [
+            0,
+            0,
+            2560,
+            1016
+          ],
+          "validations" : [
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 2560,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 1016,
+              "errors" : 0
+            },
+            {
+              "count" : 1016,
+              "errors" : 0
+            },
+            {
+              "count" : 1016,
+              "errors" : 0
+            }
+          ]
+        },
+        "label" : "forced boundary",
+        "matchedDrafts" : 3,
+        "misses" : 508,
+        "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+        "restoreReplaySeconds" : 0.0031706250738352537,
+        "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+        "sourceChecks" : {
+          "finalChecks" : 4,
+          "layerAdmissions" : 160,
+          "preGPUChecks" : 160,
+          "reusedPairChecks" : 184,
+          "sharedChecks" : 0,
+          "tokenAdmissions" : 4
+        },
+        "targetSamples" : [
+          198,
+          27,
+          1628,
+          28
+        ],
+        "wallSeconds" : 1.8459938333835453
+      },
+      "nextPending" : 248058
+    },
+    {
+      "diagnosticTruncationNotModelRejection" : true,
+      "EOSBehaviorExercised" : false,
+      "forcedConsumedInputs" : 1,
+      "grouped" : {
+        "commands" : {
+          "pairMappedExperts" : 1096,
+          "pairMaps" : 80,
+          "pairMoE" : 80,
+          "separateShared" : 0
+        },
+        "hits" : 910,
+        "io" : {
+          "failedReads" : [
+            0,
+            0,
+            0,
+            0
+          ],
+          "preads" : [
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 3183476736,
+              "count" : 1012,
+              "errors" : 0
+            }
+          ],
+          "reads" : [
+            0,
+            0,
+            3200,
+            1012
+          ],
+          "validations" : [
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 3200,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 1012,
+              "errors" : 0
+            },
+            {
+              "count" : 1012,
+              "errors" : 0
+            },
+            {
+              "count" : 1012,
+              "errors" : 0
+            }
+          ]
+        },
+        "label" : "forced boundary",
+        "matchedDrafts" : 3,
+        "misses" : 506,
+        "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+        "restoreReplaySeconds" : 0.51209404156543314,
+        "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+        "sourceChecks" : {
+          "finalChecks" : 4,
+          "layerAdmissions" : 160,
+          "preGPUChecks" : 160,
+          "reusedPairChecks" : 184,
+          "sharedChecks" : 0,
+          "tokenAdmissions" : 4
+        },
+        "targetSamples" : [
+          198,
+          27,
+          1628,
+          28
+        ],
+        "wallSeconds" : 2.0578021248802543
+      },
+      "nextPending" : 198
+    },
+    {
+      "diagnosticTruncationNotModelRejection" : true,
+      "EOSBehaviorExercised" : false,
+      "forcedConsumedInputs" : 3,
+      "grouped" : {
+        "commands" : {
+          "pairMappedExperts" : 1096,
+          "pairMaps" : 80,
+          "pairMoE" : 80,
+          "separateShared" : 0
+        },
+        "hits" : 1334,
+        "io" : {
+          "failedReads" : [
+            0,
+            0,
+            0,
+            0
+          ],
+          "preads" : [
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 4542431232,
+              "count" : 1444,
+              "errors" : 0
+            }
+          ],
+          "reads" : [
+            0,
+            0,
+            4480,
+            1444
+          ],
+          "validations" : [
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 4480,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 1444,
+              "errors" : 0
+            },
+            {
+              "count" : 1444,
+              "errors" : 0
+            },
+            {
+              "count" : 1444,
+              "errors" : 0
+            }
+          ]
+        },
+        "label" : "forced boundary",
+        "matchedDrafts" : 3,
+        "misses" : 722,
+        "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+        "restoreReplaySeconds" : 1.308112750062719,
+        "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+        "sourceChecks" : {
+          "finalChecks" : 4,
+          "layerAdmissions" : 160,
+          "preGPUChecks" : 160,
+          "reusedPairChecks" : 184,
+          "sharedChecks" : 0,
+          "tokenAdmissions" : 4
+        },
+        "targetSamples" : [
+          198,
+          27,
+          1628,
+          28
+        ],
+        "wallSeconds" : 2.8539107083342969
+      },
+      "nextPending" : 1628
+    },
+    {
+      "diagnosticTruncationNotModelRejection" : true,
+      "EOSBehaviorExercised" : false,
+      "forcedConsumedInputs" : 4,
+      "grouped" : {
+        "commands" : {
+          "pairMappedExperts" : 1096,
+          "pairMaps" : 80,
+          "pairMoE" : 80,
+          "separateShared" : 0
+        },
+        "hits" : 683,
+        "io" : {
+          "failedReads" : [
+            0,
+            0,
+            0,
+            0
+          ],
+          "preads" : [
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 0,
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "bytes" : 2598371328,
+              "count" : 826,
+              "errors" : 0
+            }
+          ],
+          "reads" : [
+            0,
+            0,
+            2560,
+            826
+          ],
+          "validations" : [
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 2560,
+              "errors" : 0
+            },
+            {
+              "count" : 0,
+              "errors" : 0
+            },
+            {
+              "count" : 826,
+              "errors" : 0
+            },
+            {
+              "count" : 826,
+              "errors" : 0
+            },
+            {
+              "count" : 826,
+              "errors" : 0
+            }
+          ]
+        },
+        "label" : "forced boundary",
+        "matchedDrafts" : 3,
+        "misses" : 413,
+        "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+        "restoreReplaySeconds" : 0,
+        "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+        "sourceChecks" : {
+          "finalChecks" : 4,
+          "layerAdmissions" : 160,
+          "preGPUChecks" : 160,
+          "reusedPairChecks" : 184,
+          "sharedChecks" : 0,
+          "tokenAdmissions" : 4
+        },
+        "targetSamples" : [
+          198,
+          27,
+          1628,
+          28
+        ],
+        "wallSeconds" : 1.5894957499112934
+      },
+      "nextPending" : 28
+    }
+  ],
+  "firstInputs" : [
+    248058,
+    198,
+    27,
+    1628
+  ],
+  "firstNumerical" : {
+    "allRowsRoutesStateExact" : true,
+    "grouped" : {
+      "commands" : {
+        "pairMappedExperts" : 1096,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 521,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 3617587200,
+            "count" : 1150,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          1150
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 1150,
+            "errors" : 0
+          },
+          {
+            "count" : 1150,
+            "errors" : 0
+          },
+          {
+            "count" : 1150,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "grouped numerical",
+      "matchedDrafts" : 3,
+      "misses" : 575,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 184,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 1.9075011250097305
+    },
+    "serial" : {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 404,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 5511315456,
+            "count" : 1752,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          1752
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 1752,
+            "errors" : 0
+          },
+          {
+            "count" : 1752,
+            "errors" : 0
+          },
+          {
+            "count" : 1752,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "serial numerical",
+      "matchedDrafts" : 3,
+      "misses" : 876,
+      "rawRowSHA256" : "94712cd6d9aeb40b64926b7c583a2347d18c605ee136d885d28f6b544a2375a6",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "9d7b2bb9c21f21679d5b006b3df419e5e48910766ab5b6383db94de6bad18d0b",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+        198,
+        27,
+        1628,
+        28
+      ],
+      "wallSeconds" : 4.3459369167685509
+    }
+  },
+  "groupedToSerialMedian" : 0.9121240069667651,
+  "prefixTokens" : 1175,
+  "requestSHA256" : "a9d120c3e25bfedfa7634162c2f28dd94202bdbfe015cd242933d946b678dd16",
+  "secondInputs" : [
+    28,
+    8422,
+    8901,
+    1224
+  ],
+  "secondNumerical" : {
+    "allRowsRoutesStateExact" : true,
+    "grouped" : {
+      "commands" : {
+        "pairMappedExperts" : 1182,
+        "pairMaps" : 80,
+        "pairMoE" : 80,
+        "separateShared" : 0
+      },
+      "hits" : 499,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 4297064448,
+            "count" : 1366,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          1366
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 1366,
+            "errors" : 0
+          },
+          {
+            "count" : 1366,
+            "errors" : 0
+          },
+          {
+            "count" : 1366,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "grouped numerical",
+      "matchedDrafts" : 0,
+      "misses" : 683,
+      "rawRowSHA256" : "d0c355ea5fbd37f45d84307f96e6581f230381906969e463b92adc08fe950f1a",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "1dfdeac773e22ba8f24069db9ef9ae707edbf6fdbae7318b43cc5032ce940c2a",
+      "sourceChecks" : {
+        "finalChecks" : 4,
+        "layerAdmissions" : 160,
+        "preGPUChecks" : 160,
+        "reusedPairChecks" : 98,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 4
+      },
+      "targetSamples" : [
+        12640
+      ],
+      "wallSeconds" : 2.1517413749825209
+    },
+    "serial" : {
+      "commands" : {
+        "pairMappedExperts" : 0,
+        "pairMaps" : 0,
+        "pairMoE" : 0,
+        "separateShared" : 0
+      },
+      "hits" : 505,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 4875878400,
+            "count" : 1550,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          2560,
+          1550
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 2560,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 1550,
+            "errors" : 0
+          },
+          {
+            "count" : 1550,
+            "errors" : 0
+          },
+          {
+            "count" : 1550,
+            "errors" : 0
+          }
+        ]
+      },
+      "label" : "serial numerical",
+      "matchedDrafts" : 0,
+      "misses" : 775,
+      "rawRowSHA256" : "d0c355ea5fbd37f45d84307f96e6581f230381906969e463b92adc08fe950f1a",
+      "restoreReplaySeconds" : 0,
+      "routeSHA256" : "1dfdeac773e22ba8f24069db9ef9ae707edbf6fdbae7318b43cc5032ce940c2a",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "targetSamples" : [
+        12640
+      ],
+      "wallSeconds" : 2.5388339166529477
+    }
+  },
+  "sourceDescriptorSHA256" : "c1ac463726b716e7db3a9fbe5db4cb690f95be7e5779aea02e49c2020bca7a7a",
+  "workloadBreakEvenRatioBeforeRecovery" : 0.67441860465116277
+}
