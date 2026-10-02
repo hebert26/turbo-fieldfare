@@ -1,0 +1,34 @@
+{
+  "recordedAt": "2026-10-02T18:35:17.204303+00:00",
+  "decision": "RESOURCE_GUARD_ABORT_NO_SPEED_RESULT",
+  "baseCommit": "867e99bf202fda5c7ea54c8f4aa1744cb42a8299",
+  "buildExit": 0,
+  "sourceFrozenAndStable": true,
+  "review": "review/astra-recovery-source-review.md",
+  "comparisonReceipt": "scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/comparison-20261002T183108.832530Z-7b84afc7a7e94fd48dc7a76421e88328/receipt.json",
+  "runReceipt": "scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/run-20261002T183108.870000Z-604a27ffc83543e0a075c5ec55def52b/receipt.json",
+  "completedModes": [],
+  "attemptedModes": [
+    "serial"
+  ],
+  "unstartedModes": [
+    "legacy",
+    "new"
+  ],
+  "launchFreePercent": 52,
+  "minimumFreePercent": 29,
+  "childExit": -15,
+  "comparisonExit": 2,
+  "wallSeconds": 158.2548796250485,
+  "error": "memory below 30% or unavailable",
+  "ownedChildExited": true,
+  "productionChanged": false,
+  "newSpeedClaim": false,
+  "limitations": [
+    "Baseline stopped before a complete report. No conclusion about recovery correctness or speed.",
+    "System free percentage is system-wide, not process RSS.",
+    "No immediate retry or relaxed memory floor.",
+    "No unit test code or package tests added or run."
+  ],
+  "next": "Inspect existing load/prefill memory evidence before another model run; keep point4 recovery candidate frozen."
+}

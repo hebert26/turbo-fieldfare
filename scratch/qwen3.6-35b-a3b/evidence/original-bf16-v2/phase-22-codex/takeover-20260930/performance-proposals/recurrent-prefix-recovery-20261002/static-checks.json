@@ -1,0 +1,17 @@
+{
+  "head": "867e99bf202fda5c7ea54c8f4aa1744cb42a8299",
+  "productionEqual3fe": true,
+  "liveStatus": "",
+  "forwardCheckExit": 0,
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "unchangedMathAndMapping": {
+    "Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift": true,
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": true,
+    "Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift": true,
+    "Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift": true
+  },
+  "SwiftFairy": "requested Metal lifetime guidance; no active scroll content, unrelatedCharts trial only; no trial or verification",
+  "builds": false,
+  "models": false,
+  "tests": false
+}
