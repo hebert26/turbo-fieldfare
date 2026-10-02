@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "originalBuildCommit": "867e99bf202fda5c7ea54c8f4aa1744cb42a8299",
+  "executionCommit": "298c08aa785b39f6b978cc7de7035da708b3f2d8",
+  "originalBuildCommitEvidence": "Original frozen baseline-hashes.json.commit and run.py HEAD.",
+  "originalStagePath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002",
+  "originalBinarySHA256": "659788d00badd1189c072b44019b896fb00269dec9e5d2db87aeb0460f7a7b04",
+  "originalEvidence": {
+    "frozen-hashes.json": "c9d9236bce1c184deb76f30a864e0cedb8369147604fe9c964829c88ab6aa8a5",
+    "build-receipt.json": "bbdae2eeebb0bc23b439705a648d87eafa70d06fa0eec129d0ba3f43a5133291",
+    "overlay-after-build-hashes.json": "9a9ca9285934d6c241fbb1e98b18725117dd652db6a5d77fd6a757a517cc1135",
+    "baseline-hashes.json": "0dd3bff9408fc34aa034ba4affa167657d3aedaa9c9dcf08ad59629e5e93f85f",
+    "preflight-plan.json": "724f48f84286872314a0339418bebf5978adc32efe87efafb33ec8128d1d0a4b"
+  },
+  "files": {
+    "run.py": "15d1bcff031092062097ef3e76a2b1dbb1ce8a752933301158e6083f2aa1ea93",
+    "compare.py": "bda679365804da45c0d97ae5b6bd0b4dd0efb8af2babe1d8f9feaaaadea2871c",
+    "analyze.py": "cb2cb50bab1338a9602aa3d9696ce714a141fcb8bd3cd5cc59e589f2efcc3b7f",
+    "preflight.py": "d34b362248259dc9332650ca91256726cd04d56beaddc74def149e5b5d1a195e",
+    "evidence_helpers.py": "2e964e874f367e3cd3bcfa045db721829e614373b925e30d91140c18bfda9113",
+    "preflight-plan.json": "86560119a29f85200cdb4b9c9b2cb367f4755d622f4e6aad7fc37d6e99a8a5d2"
+  },
+  "sourceRule": "Execution HEAD must descend from the original build anchor. Git diff must show no Sources, Tests, Scripts, Package.swift or Package.resolved change. Root must be clean.",
+  "command": "python3 retry-001/compare.py REGISTRATION_DIRECTORY",
+  "modesAndGates": "serial/legacy/new, then new/legacy/serial only if both first new/legacy and new/serial whole-decode ratios are <= 0.95, with exact causal/state checks.",
+  "guards": "Fresh launch free >= 50%; internal and external live free >= 30%; owned-child deadline 420s.",
+  "timing": "Request means prompt through decode finish. Model load is excluded. Original timing limits apply.",
+  "observations": "Own PID ps RSS is recorded with the existing 2s memory samples. RSS is resident set, not physical footprint. No phase claim is made without driver markers.",
+  "preservation": "All original files, receipts, source, binary and stage manifest remain unchanged. No rebuild.",
+  "verification": "Static Python AST/compile and JSON checks only. No preflight, comparison, tests, builds or model runs.",
+  "executionOwner": "Main"
+}
