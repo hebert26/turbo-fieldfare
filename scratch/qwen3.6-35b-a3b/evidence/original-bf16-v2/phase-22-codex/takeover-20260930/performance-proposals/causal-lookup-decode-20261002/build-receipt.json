@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareCausalLookupDecode"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "ab38d0eff836f2b0bc7979fba16086f693f785d58ed6a5474220730f127e49c9",
+  "binarySHA256": "601251f94baaae36a1a788d839f57597fc66b5359534be6cdf7927cc7f6ecc80",
+  "stageHashesSHA256": "2c1bd5e5849ce99e9f63fcf25e5241562592a55587a0c8bcb5175ac0a07bcfb5"
+}

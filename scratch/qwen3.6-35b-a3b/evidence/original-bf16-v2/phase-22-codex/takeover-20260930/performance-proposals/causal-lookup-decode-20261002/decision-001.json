@@ -1,0 +1,19 @@
+{
+  "at": "2026-10-02T17:51:28.470133+00:00",
+  "classification": "RESOURCE_GUARD_ABORT_NO_SPEED_RESULT",
+  "comparison": "comparison-20261002T174837.903870Z-c225c9b5674a4854befbe8e08978de5a/receipt.json",
+  "run": "run-20261002T174837.941806Z-a76fd61acbff44ddbbf6c4a8009c721b/receipt.json",
+  "buildExit": 0,
+  "childExit": -15,
+  "wrapperExit": 2,
+  "launchFreePercent": 46,
+  "minimumFreePercent": 29,
+  "elapsedSeconds": 16.025036124978215,
+  "ownedChildPID": 76918,
+  "ownedChildGoneConfirmed": true,
+  "completedGeneration": false,
+  "speedResult": null,
+  "onRunStarted": false,
+  "memoryGuardUnchanged": 30,
+  "next": "Three independent deeper multi-token investigations; no immediate repeat or app change."
+}

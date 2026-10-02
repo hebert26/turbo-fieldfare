@@ -1,0 +1,9 @@
+{"elapsedSeconds": 0.0024904171004891396, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 46%\n", "stderr": "", "freePercent": 46}
+{"elapsedSeconds": 2.004145792219788, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 41%\n", "stderr": "", "freePercent": 41}
+{"elapsedSeconds": 4.002703834325075, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 35%\n", "stderr": "", "freePercent": 35}
+{"elapsedSeconds": 6.005129124969244, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 31%\n", "stderr": "", "freePercent": 31}
+{"elapsedSeconds": 8.001660417299718, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 31%\n", "stderr": "", "freePercent": 31}
+{"elapsedSeconds": 10.00049841729924, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 30%\n", "stderr": "", "freePercent": 30}
+{"elapsedSeconds": 12.000542459078133, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 31%\n", "stderr": "", "freePercent": 31}
+{"elapsedSeconds": 14.0058180000633, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 30%\n", "stderr": "", "freePercent": 30}
+{"elapsedSeconds": 16.005163417197764, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 29%\n", "stderr": "", "freePercent": 29}

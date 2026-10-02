@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "baselineCommit": "ab21aeadac0297ab253b56b0b8aab0fd6ebb5e6b",
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "wrapperHashes": {
+    "run.py": "7da16247aec2f22ec9e8cd3c2151598d86f3579a80ba525a198aefba04e8af5b",
+    "compare.py": "e6ee1300593f0e599d71e5422950107e5c0b48936336babe2c2be80aa79bc230",
+    "analyze.py": "91a61bd6aafd7d131d03ca05e2e2376f12c4bc95dfa1244ff04cf2fc27c30a13"
+  },
+  "ownership": [
+    "run.py",
+    "compare.py",
+    "analyze.py",
+    "wrapper-handoff.json"
+  ],
+  "staticVerification": [
+    "Python AST parse and compile passed for all three scripts.",
+    "No removable assertions or shell mode in subprocess calls."
+  ],
+  "executed": {
+    "wrappers": false,
+    "tests": false,
+    "builds": false,
+    "models": false,
+    "originalShardHashes": false
+  },
+  "cli": {
+    "run": "python3 run.py REGISTRATION --mode off|on",
+    "probe": "TurboFieldfareCausalLookupDecode REGISTRATION REQUEST REPORT off|on",
+    "compare": "python3 compare.py REGISTRATION",
+    "analyze": "python3 analyze.py REPORT [--output NEW_RECEIPT]"
+  },
+  "modeSelection": "Fourth probe argument only. Baseline environment is the same for both modes.",
+  "gates": [
+    "Fresh serial OFF/ON first. First ratio above 0.95 stops.",
+    "Ratio above 1 records slower. Ratio in (0.95, 1] records no speed claim.",
+    "Only ratio <= 0.95 permits fresh ON/OFF. Both orders must pass to advance.",
+    "29 actual output IDs including EOS must match the saved assertion after generation.",
+    "Final position 1203 and pending count 1. EOS remains unconsumed.",
+    "Accepted 1120 canonical routes and 28 raw rows must have equal hashes across all runs.",
+    "Final linear/KV positions and state hashes must match across all runs.",
+    "Internal and external free memory >= 30%. One child at a time. Own-child timeout 420s."
+  ],
+  "cycleAccounting": [
+    "Initial sample comes from prefill. Cycles consume 28 inputs in total.",
+    "Per-cycle actual sampler IDs reconstruct the complete emitted chain.",
+    "Verified rows include rejected branch work. No offline 43-row condition.",
+    "Replay inputs equal consumed inputs only for a rejected or truncated branch.",
+    "Fixed pair kernel uses 4 inputs. Short proposals use serial verification.",
+    "OFF owns one turn. ON owns per-cycle turns for preserved restore/replay."
+  ],
+  "timingBoundary": "Whole decode includes initial sampling, lookup, checkpoints, verification, sampling, restore/replay, finish, and in-loop diagnostics. Golden assertion, final diagnostic state readback, and final memory guard are outside this timer. Prompt time is separate.",
+  "preservation": "Read-interval work stays saved and on hold. No prior stage or root source was edited.",
+  "executionOwner": "Main only",
+  "claimLimit": "This is an isolated diagnostic schedule. It does not qualify the app or native MTP."
+}

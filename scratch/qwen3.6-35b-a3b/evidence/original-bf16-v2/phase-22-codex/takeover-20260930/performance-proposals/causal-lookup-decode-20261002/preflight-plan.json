@@ -1,0 +1,13 @@
+{
+  "head": "ab21aeadac0297ab253b56b0b8aab0fd6ebb5e6b",
+  "installed": {
+    "TurboFieldfareDecodeService": {
+      "path": "/Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareDecodeService",
+      "sha256": "083e80a7155db7993af86d391ef84cf634cc2785b62289d79758c8e04f81a046"
+    },
+    "TurboFieldfareMac": {
+      "path": "/Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareMac",
+      "sha256": "4985b79913c6cd289f5de7b9ac4c6d284dda404d79a9916a96741a9dcc94fe28"
+    }
+  }
+}
