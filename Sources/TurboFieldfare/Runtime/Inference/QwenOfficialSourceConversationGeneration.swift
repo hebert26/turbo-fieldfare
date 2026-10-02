@@ -645,6 +645,14 @@ public actor QwenOfficialSourceConversationGenerationSession {
         shouldStop: @escaping @Sendable () -> Bool,
         onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void
     ) async throws -> QwenConversationGenerationResult {
+        let exactCapture = QwenExactTokenCapture.make(
+            maximumContext: maxContext, promptTokenCount: promptTokenIDs.count,
+            checkpointResume: resumesCheckpoint, thinking: thinking,
+            fixtureSamples: fixtureSteps != nil, visionStorePresent: visionStore != nil,
+            preparedPromptPresent: preparedPrompt != nil,
+            producedVisionFeatureRows: producedVisionFeatureRows,
+            codecEOS: codec?.tokenizer.eosID, source: model.sourceIdentity)
+        defer { exactCapture?.unfinished(cancelled: Task.isCancelled) }
         let cacheCaptureInstalled = measurementCapture?.beginQwenCacheMaps(
             layerCount: model.architecture.layers, expertCount: model.architecture.experts,
             slotCount: model.expertCacheSlots,
@@ -738,6 +746,8 @@ public actor QwenOfficialSourceConversationGenerationSession {
             config.maxNewTokens = min(config.maxNewTokens, available)
             config.logitTransform = .raw
             if let codec { config.extraStopTokens.insert(codec.tokenizer.eosID) }
+            exactCapture?.begin(input: working, config: config,
+                differingTemplate: boundTemplateTokenIDs == promptTokenIDs ? nil : boundTemplateTokenIDs)
             var decoder = codec?.tokenizer.makeIncrementalDecoder()
             var matcher = StreamingStopMatcher(stops: config.stopStrings)
             var lastProgress = structured.progress
@@ -766,9 +776,11 @@ public actor QwenOfficialSourceConversationGenerationSession {
                     token = try await sample(input: input, config: config,
                                              samplePosition: accepted.count)
                 }
+                exactCapture?.sampled(token, inputTokenIDs: input.retainedTokenIDs)
                 try Task.checkCancellation()
                 try await state.advance(token, transaction: transaction)
                 accepted.append(token)
+                exactCapture?.advanced()
                 if let step, case .modelEOS(_, let tail) = step {
                     guard accepted.count == fixtureSteps?.count else {
                         throw QwenConversationGenerationError.invalidTurn(
@@ -896,7 +908,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
             }
             for call in terminalToolCalls { onEvent(.toolCall(call)) }
             cacheTurnCompleted = true
-            return QwenConversationGenerationResult(
+            let result = QwenConversationGenerationResult(
                 reason: reason, promptTokens: promptTokenIDs.count,
                 newTokens: sampledCount,
                 prefillSeconds: decodeStarted.timeIntervalSince(started),
@@ -904,7 +916,10 @@ public actor QwenOfficialSourceConversationGenerationSession {
                 metrics: metrics, acceptedGeneratedTokenIDs: accepted,
                 sourceIdentity: binding?.sourceIdentity ?? (resumesCheckpoint ? codecSourceIdentity : nil),
                 producedVisionFeatureRows: producedVisionFeatureRows)
+            exactCapture?.committed(accepted, metrics: metrics, reason: String(describing: reason))
+            return result
         } catch let operationError {
+            exactCapture?.failed(operationError)
             let status = await state.status()
             var restored = false
             if status.activeTransaction == transaction {

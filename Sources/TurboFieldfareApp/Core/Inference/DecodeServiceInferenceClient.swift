@@ -3232,6 +3232,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
         if environment["TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN"] == "1" {
             result["TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN"] = "1"
         }
+        if environment["TURBO_QWEN_EXACT_TOKEN_CAPTURE"] == "1" {
+            result["TURBO_QWEN_EXACT_TOKEN_CAPTURE"] = "1"
+            if let directory = environment["TURBO_QWEN_EXACT_TOKEN_CAPTURE_DIRECTORY"] {
+                result["TURBO_QWEN_EXACT_TOKEN_CAPTURE_DIRECTORY"] = directory
+            }
+        }
         return result
     }
 
