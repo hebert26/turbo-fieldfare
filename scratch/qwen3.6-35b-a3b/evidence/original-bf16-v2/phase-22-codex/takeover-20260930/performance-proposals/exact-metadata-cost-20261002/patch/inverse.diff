@@ -1,0 +1,378 @@
+diff --git a/Package.swift b/Package.swift
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,7 +8,6 @@
+         .iOS(.v26),
+     ],
+     products: [
+-        .executable(name: "TurboFieldfareExactMetadataCost", targets: ["TurboFieldfareExactMetadataCost"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -27,7 +26,6 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
+-        .executableTarget(name: "TurboFieldfareExactMetadataCost", dependencies: ["TurboFieldfareOfficialQwenSource"], path: "Sources/TurboFieldfareExactMetadataCost"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+diff --git a/Sources/TurboFieldfareExactMetadataCost/Command.swift b/Sources/TurboFieldfareExactMetadataCost/Command.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfareExactMetadataCost/Command.swift
++++ /dev/null
+@@ -1,104 +0,0 @@
+-import Foundation
+-import Darwin
+-import TurboFieldfareOfficialQwenSource
+-
+-private struct MetadataDiagnosticError: Error { let detail: String }
+-private func require(_ condition: Bool, _ detail: String) throws {
+-    if !condition { throw MetadataDiagnosticError(detail: detail) }
+-}
+-private func now() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+-private func cpu() throws -> (user: Int64, system: Int64) {
+-    var value = rusage()
+-    guard getrusage(RUSAGE_SELF, &value) == 0 else {
+-        throw MetadataDiagnosticError(detail: "getrusage failed")
+-    }
+-    return (Int64(value.ru_utime.tv_sec) * 1_000_000_000 + Int64(value.ru_utime.tv_usec) * 1000,
+-            Int64(value.ru_stime.tv_sec) * 1_000_000_000 + Int64(value.ru_stime.tv_usec) * 1000)
+-}
+-
+-@main struct ExactMetadataCostCommand {
+-    static func main() {
+-        guard CommandLine.arguments.count == 3 else {
+-            FileHandle.standardError.write(Data("usage: TurboFieldfareExactMetadataCost registration.gturbo report.json\n".utf8))
+-            exit(2)
+-        }
+-        let output = URL(fileURLWithPath: CommandLine.arguments[2])
+-        do {
+-            try require(!FileManager.default.fileExists(atPath: output.path), "report already exists")
+-            let registration = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
+-            let initCPU = try cpu()
+-            let verifyStart = now()
+-            // This fixed policy has no payload hashing or full-verifier fallback.
+-            let receipt = try OfficialSourceTrust.verify(at: registration, policy: .sizeCheckTrustedReceipt)
+-            let verifyEnd = now()
+-            try require(!receipt.files.isEmpty && receipt.files.count <= 64, "unbounded receipt inventory")
+-            let handleStart = now()
+-            let handle = try OfficialSourceHandle(registrationURL: registration)
+-            let handleEnd = now()
+-            let afterInitCPU = try cpu()
+-            let files = UInt64(receipt.files.count)
+-            // One retained handle. Each call still performs every fresh observation.
+-            let warmOff = OfficialSourceMetadataCost(clockEnabled: false)
+-            let warmOn = OfficialSourceMetadataCost(clockEnabled: true)
+-            try handle.validateTrustedReceipt(receipt)
+-            try handle.validateTrustedReceipt(receipt, metadataCost: warmOff)
+-            try handle.validateTrustedReceipt(receipt, metadataCost: warmOn)
+-            var batches: [[String: Any]] = []
+-            let iterations = 32
+-            for mode in ["baseline", "clockOff", "clockOn", "clockOn", "clockOff", "baseline"] {
+-                let measurement: OfficialSourceMetadataCost? = mode == "baseline" ? nil
+-                    : OfficialSourceMetadataCost(clockEnabled: mode == "clockOn")
+-                let beforeCPU = try cpu()
+-                let start = now()
+-                for _ in 0..<iterations {
+-                    try Task.checkCancellation()
+-                    try handle.validateTrustedReceipt(receipt, metadataCost: measurement)
+-                }
+-                let end = now()
+-                let afterCPU = try cpu()
+-                var record: [String: Any] = ["mode": mode, "successfulCalls": iterations,
+-                    "wallNanoseconds": end - start,
+-                    "userCPUNanoseconds": afterCPU.user - beforeCPU.user,
+-                    "systemCPUNanoseconds": afterCPU.system - beforeCPU.system]
+-                if let measurement {
+-                    let counts = measurement.snapshot()
+-                    let calls = UInt64(iterations)
+-                    try require(counts.total.count == calls && counts.binding.count == 3 * calls
+-                        && counts.receiptNames.count == calls && counts.root.count == 4 * calls
+-                        && counts.listing.count == 2 * calls && counts.fileOpen.count == 2 * files * calls
+-                        && counts.heldStat.count == 2 * files * calls && counts.namedStat.count == 2 * files * calls
+-                        && counts.fileCheckAndRemember.count == 2 * files * calls
+-                        && counts.fileClose.count == 2 * files * calls, "actual check counts differ")
+-                    record["actualIntervals"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(counts))
+-                } else {
+-                    record["actualIntervalsMeasured"] = false
+-                }
+-                batches.append(record)
+-            }
+-            let result: [String: Any] = ["passed": true, "metadataOnly": true,
+-                "payloadBytesReadByAuditedPath": 0, "modelConstructed": false,
+-                "payloadReadEvidence": "Static call-path audit. Fixed sizeCheckTrustedReceipt policy and handle validation. No model or tensor calls. Not system IO tracing.",
+-                "sourceDescriptorSHA256": receipt.descriptorContentSHA256,
+-                "receiptFileCount": receipt.files.count, "steadyValidationCalls": iterations * 6,
+-                "warmValidationCalls": 3, "trustedReceiptMetadataNanoseconds": verifyEnd - verifyStart,
+-                "handleInitializationNanoseconds": handleEnd - handleStart,
+-                "initializationUserCPUNanoseconds": afterInitCPU.user - initCPU.user,
+-                "initializationSystemCPUNanoseconds": afterInitCPU.system - initCPU.system,
+-                "batches": batches,
+-                "zeroMeaning": "Clock-off duration is unmeasured. Baseline primitive counts are unmeasured.",
+-                "scope": "Current exact metadata validation only. No new validator or app throughput qualification."]
+-            let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+-            try data.write(to: output, options: .atomic)
+-            print(String(decoding: data, as: UTF8.self))
+-        } catch {
+-            FileHandle.standardError.write(Data("metadata diagnostic failed: \(error)\n".utf8))
+-            if !FileManager.default.fileExists(atPath: output.path) {
+-                do {
+-                    let data = try JSONSerialization.data(withJSONObject: ["passed": false, "error": String(describing: error)], options: [.sortedKeys])
+-                    try data.write(to: output, options: .atomic)
+-                } catch { FileHandle.standardError.write(Data("failure receipt write failed: \(error)\n".utf8)) }
+-            }
+-            exit(1)
+-        }
+-    }
+-}
+diff --git a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift
+--- a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift
++++ b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift
+@@ -273,60 +273,44 @@
+     /// the held FD AND its current literal directory entry. No payload is read.
+     /// The receipt v1 records marker bytes by SHA, not marker inode; the
+     /// handle's own marker inode is rechecked by validateBinding on both sides.
+-    package func validateTrustedReceipt(_ receipt: OfficialSourceTrustReceipt,
+-                                        metadataCost: OfficialSourceMetadataCost? = nil) throws {
+-        let totalStart = metadataCost?.start()
+-        defer { metadataCost?.end(.total, start: totalStart) }
+-        func requireBinding() throws {
+-            let start = metadataCost?.start()
+-            defer { metadataCost?.end(.binding, start: start) }
+-            try validateBinding()
+-        }
+-        try requireBinding()
+-        func requireReceiptNames() throws -> Set<String> {
+-            let start = metadataCost?.start()
+-            defer { metadataCost?.end(.receiptNames, start: start) }
+-            let markerDigest: String
+-            let descriptorContentSHA256: String
+-            if let fastValidation {
+-                markerDigest = fastValidation.markerSHA256
+-                descriptorContentSHA256 = fastValidation.descriptorContentSHA256
+-            } else {
+-                markerDigest = SHA256.hash(data: markerBytes).map {
+-                    String(format: "%02x", $0)
+-                }.joined()
+-                let descriptor = try OfficialSourceDescriptor.decodeStrict(data: markerBytes)
+-                descriptorContentSHA256 = descriptor.contentSHA256
+-            }
+-            guard receipt.logicalModelPath == registrationPath,
+-                  receipt.sourceRoot == sourcePath,
+-                  receipt.markerSHA256 == markerDigest,
+-                  receipt.descriptorContentSHA256 == descriptorContentSHA256 else {
+-                throw OfficialSourceHandleError.replaced("trusted source marker or path changed")
+-            }
+-            // The handle's 26 shards and 7 pinned sidecars are already restricted
+-            // by the descriptor. The verifier also fingerprints six inert sidecars
+-            // which this helper may inspect but never makes openFile-allowlisted.
+-            let expected: Set<String>
+-            if let fastValidation {
+-                expected = fastValidation.expectedInventory
+-            } else {
+-                let extra: Set<String> = ["LICENSE", "README.md", "chat_template.jinja",
+-                                          "merges.txt", "vocab.json",
+-                                          OfficialQwenPayloadVerifier.checksumManifestFile]
+-                expected = allowedNames.union(extra)
+-            }
+-            let names = receipt.files.map(\.filename)
+-            guard names.count == expected.count, Set(names) == expected,
+-                  names == names.sorted() else {
+-                throw OfficialSourceHandleError.replaced("trusted receipt file inventory changed")
+-            }
+-            return expected
+-        }
+-        let expected = try requireReceiptNames()
++    package func validateTrustedReceipt(_ receipt: OfficialSourceTrustReceipt) throws {
++        try validateBinding()
++        let markerDigest: String
++        let descriptorContentSHA256: String
++        if let fastValidation {
++            markerDigest = fastValidation.markerSHA256
++            descriptorContentSHA256 = fastValidation.descriptorContentSHA256
++        } else {
++            markerDigest = SHA256.hash(data: markerBytes).map {
++                String(format: "%02x", $0)
++            }.joined()
++            let descriptor = try OfficialSourceDescriptor.decodeStrict(data: markerBytes)
++            descriptorContentSHA256 = descriptor.contentSHA256
++        }
++        guard receipt.logicalModelPath == registrationPath,
++              receipt.sourceRoot == sourcePath,
++              receipt.markerSHA256 == markerDigest,
++              receipt.descriptorContentSHA256 == descriptorContentSHA256 else {
++            throw OfficialSourceHandleError.replaced("trusted source marker or path changed")
++        }
++        // The handle's 26 shards and 7 pinned sidecars are already restricted
++        // by the descriptor. The verifier also fingerprints six inert sidecars
++        // which this helper may inspect but never makes openFile-allowlisted.
++        let expected: Set<String>
++        if let fastValidation {
++            expected = fastValidation.expectedInventory
++        } else {
++            let extra: Set<String> = ["LICENSE", "README.md", "chat_template.jinja",
++                                      "merges.txt", "vocab.json",
++                                      OfficialQwenPayloadVerifier.checksumManifestFile]
++            expected = allowedNames.union(extra)
++        }
++        let names = receipt.files.map(\.filename)
++        guard names.count == expected.count, Set(names) == expected,
++              names == names.sorted() else {
++            throw OfficialSourceHandleError.replaced("trusted receipt file inventory changed")
++        }
+         func requireRoot() throws {
+-            let start = metadataCost?.start()
+-            defer { metadataCost?.end(.root, start: start) }
+             var held = stat()
+             guard fstat(sourceFD, &held) == 0,
+                   Self.matchesFingerprint(held, receipt.rootFingerprint) else {
+@@ -345,70 +329,42 @@
+                 throw OfficialSourceHandleError.replaced("trusted source root name changed")
+             }
+         }
+-        func heldStat(_ fd: Int32, _ info: inout stat) -> Int32 {
+-            let start = metadataCost?.start()
+-            defer { metadataCost?.end(.heldStat, start: start) }
+-            return fstat(fd, &info)
+-        }
+-        func namedStat(_ name: String, _ info: inout stat) -> Int32 {
+-            let start = metadataCost?.start()
+-            defer { metadataCost?.end(.namedStat, start: start) }
+-            return fstatat(sourceFD, name, &info, AT_SYMLINK_NOFOLLOW)
+-        }
+-        func requireFile(_ fd: Int32, entry: OfficialSourceTrustReceipt.FileEntry) throws {
+-            let start = metadataCost?.start()
+-            defer { metadataCost?.end(.fileCheckAndRemember, start: start) }
+-            var held = stat()
+-            var named = stat()
+-            guard heldStat(fd, &held) == 0,
+-                  namedStat(entry.filename, &named) == 0,
+-                  (held.st_mode & S_IFMT) == S_IFREG, held.st_nlink == 1,
+-                  Self.matchesFingerprint(held, entry.fingerprint),
+-                  Self.matchesFingerprint(named, entry.fingerprint),
+-                  FileIdentity(held) == FileIdentity(named) else {
+-                throw OfficialSourceHandleError.replaced(
+-                    "trusted source file changed: \(entry.filename)")
+-            }
+-            if allowedNames.contains(entry.filename) {
+-                try remember(name: entry.filename, identity: FileIdentity(held))
+-            }
+-        }
+         func scan() throws {
+             try requireRoot()
+-            let listingStart = metadataCost?.start()
+-            let currentNames: Set<String>
+-            do { currentNames = try Self.entryNames(sourceFD, path: sourcePath) }
+-            catch {
+-                metadataCost?.end(.listing, start: listingStart)
+-                throw error
+-            }
+-            metadataCost?.end(.listing, start: listingStart)
++            let currentNames = try Self.entryNames(sourceFD, path: sourcePath)
+             guard expected.isSubset(of: currentNames) else {
+                 throw OfficialSourceHandleError.replaced("trusted source file name disappeared")
+             }
+             for entry in receipt.files {
+                 try Task.checkCancellation()
+-                let openStart = metadataCost?.start()
+                 let fd = openat(sourceFD, entry.filename,
+                                 O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+-                metadataCost?.end(.fileOpen, start: openStart)
+                 guard fd >= 0 else {
+                     throw OfficialSourceHandleError.replaced(
+                         "trusted source file unavailable: \(entry.filename)")
+                 }
+-                defer {
+-                    let start = metadataCost?.start()
+-                    close(fd)
+-                    metadataCost?.end(.fileClose, start: start)
++                defer { close(fd) }
++                var held = stat()
++                var named = stat()
++                guard fstat(fd, &held) == 0,
++                      fstatat(sourceFD, entry.filename, &named, AT_SYMLINK_NOFOLLOW) == 0,
++                      (held.st_mode & S_IFMT) == S_IFREG, held.st_nlink == 1,
++                      Self.matchesFingerprint(held, entry.fingerprint),
++                      Self.matchesFingerprint(named, entry.fingerprint),
++                      FileIdentity(held) == FileIdentity(named) else {
++                    throw OfficialSourceHandleError.replaced(
++                        "trusted source file changed: \(entry.filename)")
+                 }
+-                try requireFile(fd, entry: entry)
++                if allowedNames.contains(entry.filename) {
++                    try remember(name: entry.filename, identity: FileIdentity(held))
++                }
+             }
+             try requireRoot()
+         }
+         try scan()
+-        try requireBinding()
++        try validateBinding()
+         try scan()
+-        try requireBinding()
++        try validateBinding()
+     }
+ 
+     private static func matchesFingerprint(
+diff --git a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift
++++ /dev/null
+@@ -1,56 +0,0 @@
+-import Foundation
+-
+-package enum OfficialSourceMetadataCostSite {
+-    case total, binding, receiptNames, root, listing, fileOpen
+-    case heldStat, namedStat, fileCheckAndRemember, fileClose
+-}
+-
+-package struct OfficialSourceMetadataCostCounter: Codable {
+-    package var count: UInt64 = 0
+-    package var wallNanoseconds: UInt64 = 0
+-    mutating func add(_ duration: UInt64) {
+-        count += 1
+-        wallNanoseconds += duration
+-    }
+-}
+-
+-package struct OfficialSourceMetadataCostSnapshot: Codable {
+-    package var total = OfficialSourceMetadataCostCounter()
+-    package var binding = OfficialSourceMetadataCostCounter()
+-    package var receiptNames = OfficialSourceMetadataCostCounter()
+-    package var root = OfficialSourceMetadataCostCounter()
+-    package var listing = OfficialSourceMetadataCostCounter()
+-    package var fileOpen = OfficialSourceMetadataCostCounter()
+-    package var heldStat = OfficialSourceMetadataCostCounter()
+-    package var namedStat = OfficialSourceMetadataCostCounter()
+-    package var fileCheckAndRemember = OfficialSourceMetadataCostCounter()
+-    package var fileClose = OfficialSourceMetadataCostCounter()
+-}
+-
+-// One synchronous command owns this object. It has no callbacks or locks.
+-package final class OfficialSourceMetadataCost {
+-    package let clockEnabled: Bool
+-    private var totals = OfficialSourceMetadataCostSnapshot()
+-    package init(clockEnabled: Bool) { self.clockEnabled = clockEnabled }
+-    package func start() -> UInt64? {
+-        clockEnabled ? DispatchTime.now().uptimeNanoseconds : nil
+-    }
+-    package func end(_ site: OfficialSourceMetadataCostSite, start: UInt64?) {
+-        let duration: UInt64
+-        if let start { duration = DispatchTime.now().uptimeNanoseconds - start }
+-        else { duration = 0 }
+-        switch site {
+-        case .total: totals.total.add(duration)
+-        case .binding: totals.binding.add(duration)
+-        case .receiptNames: totals.receiptNames.add(duration)
+-        case .root: totals.root.add(duration)
+-        case .listing: totals.listing.add(duration)
+-        case .fileOpen: totals.fileOpen.add(duration)
+-        case .heldStat: totals.heldStat.add(duration)
+-        case .namedStat: totals.namedStat.add(duration)
+-        case .fileCheckAndRemember: totals.fileCheckAndRemember.add(duration)
+-        case .fileClose: totals.fileClose.add(duration)
+-        }
+-    }
+-    package func snapshot() -> OfficialSourceMetadataCostSnapshot { totals }
+-}

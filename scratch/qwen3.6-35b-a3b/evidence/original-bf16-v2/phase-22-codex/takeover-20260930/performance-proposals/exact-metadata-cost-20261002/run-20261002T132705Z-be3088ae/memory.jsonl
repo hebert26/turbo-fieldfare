@@ -1,0 +1,1 @@
+{"elapsedSeconds": 5.500391125679016e-06, "exit": 0, "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 57%\n", "stderr": "", "freePercent": 57}

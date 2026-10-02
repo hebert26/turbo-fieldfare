@@ -1,0 +1,19 @@
+{
+  "command": [
+    "git",
+    "diff",
+    "--quiet",
+    "3fe330585beb148cb1954419a0c41cb70ebbd672",
+    "2adb70c2251f98af73bc349a58db7a75564ee751",
+    "--",
+    "Sources",
+    "Tests",
+    "Scripts",
+    "Package.swift",
+    "Package.resolved"
+  ],
+  "exit": 0,
+  "app019731HashesMatch": true,
+  "app019ReceiptSHA256": "ad80270396f15832a763f92af037fe233ad6ecd3729ae4795090184f47d35289",
+  "preflightExecuted": false
+}

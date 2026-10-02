@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareExactMetadataCost"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "8cb0e7b1a05072290d5fdbcb44aa1ad30c6e44517e6432ea4b3296a5fcd83ad4",
+  "binarySHA256": "0df287fefd8c03336352ca291b623887838df5ea569cff4d72eee19f1d446e04",
+  "stageHashesSHA256": "a34a64232e31c241a076726da34ab278e4770e5686d5602ed6fdb96364f3ab9e"
+}

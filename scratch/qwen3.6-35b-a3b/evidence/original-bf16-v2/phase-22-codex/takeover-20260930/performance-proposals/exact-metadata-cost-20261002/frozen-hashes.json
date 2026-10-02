@@ -1,0 +1,17 @@
+{
+  "baseline-hashes.json": "a98985200377e808ad5ba28d6532825a564e30d61e8e13a4550b443b8f4de771",
+  "baseline-proof.json": "3e82aaf9efea410e7ab70b60c75a12f45e65a207b2aa0b7cc9988354d19b4cae",
+  "build.py": "e8e723a12cb797235f4f18b7da6fa5d8e1a9a42029e3e683f5835f82daf50841",
+  "candidate/Package.swift": "377f7d95bb977b122464afddfc67cd11e51311c34d53ed9ebcb2e29efe74b3e0",
+  "candidate/Sources/TurboFieldfareExactMetadataCost/Command.swift": "b659f5d63f6139c18d5bbfb9fc538d3eea8d0319fbe2bfc3c7dc5b2e5b684958",
+  "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift": "bf14093470b912135bf33ab2bbc9d3999591480a3605f9df888db2dfc57a3150",
+  "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift": "65108e8656f50b037b357bc9dcd7e78e8af152b5037c5c2ca0ef9f8ff2f93b85",
+  "evidence_helpers.py": "edb42e483d4255df6800aa2208807e45a380436cd86750fb598d24b62b2288f4",
+  "patch/forward.diff": "ac62ad054cca0b62a8b354c91f27eaeaf2aa9202e5a2e60f153d189d16d05dfb",
+  "patch/inverse.diff": "5718cfd97612094a809c3f35bb0572e83688fb151f48b15b88cf9b0b3ced6346",
+  "patch/preflight.diff": "025623892eb57ee900238bddf11ca6b0d14c2efb4a8a51f2027ed449ffd05691",
+  "preflight-plan.json": "a2af334139da6e502e3d67a85d35f2d2de423e9c51380cec0fe7866560f46ed4",
+  "preflight.py": "fcce926490fc4e0fc18693cb6f55eff95d49796ea3b9c69b7a155ede7df37648",
+  "prepare.py": "5867bdab693749d046437cdad172aa9e5d728cc990f8e981342d875b1ad1599c",
+  "run.py": "3672b5b992adae2369928827ca9921d60bdf41abb40e079b4763b33e5db16d14"
+}

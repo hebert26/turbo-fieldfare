@@ -1,0 +1,176 @@
+{
+  "status": "Computed solely from saved numeric traces. No live probes, tests, models, payload reads or source edits.",
+  "sources": {
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/context-64k-trial-20261001/qwen-metal-driver-app-capture-001-trace.jsonl.runtime-measurements.jsonl": {
+      "sha256": "bccfc4d3f5549ec03d3278923c56135757b24bd3c83498911171556e24c04775"
+    },
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/context-64k-trial-20261001/qwen-metal-driver-app-capture-001-process.jsonl": {
+      "sha256": "3e3c67dee8220aab5a4797d897df2f1facfa2b9724db01215a010d342672cced"
+    }
+  },
+  "schema_evidence": [
+    "167 phase1 marks decode begin; phase3 marks request completion, in CLOCK_UPTIME_RAW nanoseconds.",
+    "QwenProductionTiming.swift:67 uses clock_gettime_nsec_np(CLOCK_UPTIME_RAW).",
+    "sample-qwen-process.py:48-56 resolves the same SDK constant and samples it before/after proc_pid_rusage; saved configuration clockID=8.",
+    "MacOSX.sdk/usr/include/_time.h:166 defines CLOCK_UPTIME_RAW=8. No GPU or wall-clock alignment used."
+  ],
+  "validation": {
+    "unique_phase_markers": true,
+    "stable_process_identity": true,
+    "successful_samples": 290,
+    "counter_monotonicity": true,
+    "sample_intervals_nonoverlapping": true,
+    "excluded_failed_samples": [
+      {
+        "kind": "sample",
+        "utc": "2026-10-02T05:16:18.770847+00:00",
+        "pid": 52916,
+        "startUptimeNanos": 2069516868399333,
+        "endUptimeNanos": 2069516868411625,
+        "returnCode": -1,
+        "errno": 3
+      }
+    ],
+    "exclusion_reason": "One ESRCH sample occurs after request completion and after every selected bracket sample; no failed sample is used or zero-filled."
+  },
+  "phases": {
+    "prefill": {
+      "begin_uptime_ns": 2069287581785333,
+      "end_uptime_ns": 2069446674627375,
+      "duration_seconds": 159.092842042,
+      "exact_counter_snapshots_at_phase_boundaries": false,
+      "inside_sample_count": 159,
+      "counter_bounds": {
+        "ri_diskio_bytesread": {
+          "lower": 58485460992,
+          "upper": 59233427456
+        },
+        "ri_diskio_byteswritten": {
+          "lower": 0,
+          "upper": 0
+        },
+        "ri_pageins": {
+          "lower": 23,
+          "upper": 71
+        }
+      },
+      "outer_boundary_uncertainty_seconds": {
+        "begin": 0.596109583,
+        "end": 0.940915791
+      },
+      "samples": {
+        "before_begin": {
+          "utc": "2026-10-02T05:12:28.886766+00:00",
+          "startUptimeNanos": 2069286985675750,
+          "endUptimeNanos": 2069286985685458,
+          "ri_diskio_bytesread": 77011263488,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 424
+        },
+        "first_inside": {
+          "utc": "2026-10-02T05:12:29.891986+00:00",
+          "startUptimeNanos": 2069287990883916,
+          "endUptimeNanos": 2069287990897500,
+          "ri_diskio_bytesread": 77011972096,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 450
+        },
+        "last_inside": {
+          "utc": "2026-10-02T05:15:08.516547+00:00",
+          "startUptimeNanos": 2069446614490125,
+          "endUptimeNanos": 2069446614524541,
+          "ri_diskio_bytesread": 135497433088,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 473
+        },
+        "after_end": {
+          "utc": "2026-10-02T05:15:09.517568+00:00",
+          "startUptimeNanos": 2069447615529416,
+          "endUptimeNanos": 2069447615543166,
+          "ri_diskio_bytesread": 136244690944,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 495
+        }
+      }
+    },
+    "decode": {
+      "begin_uptime_ns": 2069446674627375,
+      "end_uptime_ns": 2069476455415000,
+      "duration_seconds": 29.780787625,
+      "exact_counter_snapshots_at_phase_boundaries": false,
+      "inside_sample_count": 29,
+      "counter_bounds": {
+        "ri_diskio_bytesread": {
+          "lower": 31634501632,
+          "upper": 33241169920
+        },
+        "ri_diskio_byteswritten": {
+          "lower": 0,
+          "upper": 0
+        },
+        "ri_pageins": {
+          "lower": 18,
+          "upper": 64
+        }
+      },
+      "outer_boundary_uncertainty_seconds": {
+        "begin": 0.06013725,
+        "end": 0.261379958
+      },
+      "samples": {
+        "before_begin": {
+          "utc": "2026-10-02T05:15:08.516547+00:00",
+          "startUptimeNanos": 2069446614490125,
+          "endUptimeNanos": 2069446614524541,
+          "ri_diskio_bytesread": 135497433088,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 473
+        },
+        "first_inside": {
+          "utc": "2026-10-02T05:15:09.517568+00:00",
+          "startUptimeNanos": 2069447615529416,
+          "endUptimeNanos": 2069447615543166,
+          "ri_diskio_bytesread": 136244690944,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 495
+        },
+        "last_inside": {
+          "utc": "2026-10-02T05:15:37.618480+00:00",
+          "startUptimeNanos": 2069475716277583,
+          "endUptimeNanos": 2069475716290083,
+          "ri_diskio_bytesread": 167879192576,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 513
+        },
+        "after_end": {
+          "utc": "2026-10-02T05:15:38.618991+00:00",
+          "startUptimeNanos": 2069476716778083,
+          "endUptimeNanos": 2069476716794958,
+          "ri_diskio_bytesread": 168738603008,
+          "ri_diskio_byteswritten": 16384,
+          "ri_pageins": 537
+        }
+      }
+    }
+  },
+  "decode_process_attributed_bytes_per_consumed_forward": {
+    "lower": 1020467794.5806452,
+    "upper": 1072295803.8709677
+  },
+  "interpretation": {
+    "logical_expert_payload_bytes": 39837499392,
+    "misses": 6332,
+    "pair_bytes": 6291456,
+    "consumed_forwards": 31,
+    "generated_outputs": 32,
+    "logical_source": "Previous independent app013 cache-plan join hit-driver-result.json. Formula6332*6291456 is requested expert payload, not a new source-I/O counter.",
+    "process_attributed": "These are counter bounds around exact recorded host phase markers, not exact boundary counter samples. All service activity in the interval is included.",
+    "physical_SSD_bytes": null,
+    "filesystem_cache": "Logical payload may be served by the OS cache. Logical bytes minus attributed bytes does not measure exact cache-hit bytes because accounting scope and timing differ.",
+    "lower_bound": "Inner delta bounds the observed monotone process counter increase for this run only. It is not an algorithmic, attainable future-run, or physical-I/O lower bound.",
+    "hardware_ceiling": "No sustainable physical SSD service bandwidth or 20tokens/s hardware ceiling follows from these logical/process counts."
+  },
+  "correction": "App013 has compatible source-side phase clocks and process sample clocks. Phase-based bounds are computable and supersede the earlier output-wall-time inferred capture bracket. Plain-run estimates are unchanged.",
+  "remaining_gap": "Exact counter snapshots at both phase boundaries and physical-device attribution are absent. Tighter process totals would need proc_pid_rusage at those existing markers in a future authorized diagnostic, not a new run to establish the bounds reported here.",
+  "reproducibility": "Use analyze-process-brackets.py boundary algorithm on these two saved inputs, after explicitly rejecting failed samples within phases and excluding the recorded late ESRCH sample. Upper=first sample after phase-end minus last sample before phase-begin. Lower=last wholly-inside sample minus first wholly-inside sample."
+}
