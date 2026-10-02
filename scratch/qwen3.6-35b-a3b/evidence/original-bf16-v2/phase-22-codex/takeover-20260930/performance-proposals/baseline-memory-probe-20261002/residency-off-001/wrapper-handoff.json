@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "executionCommit": "e7efc113fe94a507cabf41698cad7f7fbcb17756",
+  "originalBuildCommit": "82a1266a005b0602ec368201c9f3d27a970d6c92",
+  "product": "TurboFieldfareBaselineMemoryProbe",
+  "mode": "serial",
+  "command": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/residency-off-001/run.py",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+  ],
+  "analysisCommand": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/residency-off-001/analyze.py",
+    "RUN_PATH_FROM_RUN_STDOUT"
+  ],
+  "mainOnly": true,
+  "oneModelChild": true,
+  "rebuildPerformed": false,
+  "onlyFlagChange": {
+    "TURBO_QWEN_EXPERT_CACHE_RESIDENCY": {
+      "from": "1",
+      "to": "0"
+    }
+  },
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "originalBinarySHA256": "ce7857fd53fa956edd2079e88ff78cb3a0b3d9f7edf638f8b7a492ffb298bead",
+  "originalFrozenStageSHA256": "cca94dc3e8d3efbfd0b692928c3ac4cb06ffecaa7ae4964b7dfdd38abe9a917d",
+  "originalSourceReceiptSHA256": "74131797cb603f9a0b9211de43dbba28df7428431b30e26ac0b895b607a1026b",
+  "admissionMinimumFreePercent": 50,
+  "liveGuardMinimumFreePercent": 30,
+  "observedMinimumFreePercent": "Measured minimum, saved separately from the guard floor.",
+  "wholeRunTimeoutSeconds": 420,
+  "sampleSeconds": 2,
+  "sampler": "Unchanged parent sampler. Runs apart from the stop guard.",
+  "settings": "1175 inputs, up to29 outputs including EOS, 8192 context,16 LFU expert slots.",
+  "expectedResidency": "No request. Residency owner fields can be null. Expert cache allocation remains unchanged. Existing per-encoder resource use remains.",
+  "partialEvidence": "Keep stdout, stderr phases, process/system samples, exits and hash proof on abort. No completed correctness or speed result after abort.",
+  "correctness": "Unchanged parent serial output, cycle, final state and cleanup checks run only on complete exit0 evidence.",
+  "staticChecks": "Python AST, JSON, one-flag comparison, existing frozen file and binary hashes only. No model, test, preflight or build run.",
+  "files": {
+    "run.py": "61ea5b65c58a3496c36f3de219fb884d86ae24c21d4a4a4965552b0e90cf5447",
+    "preflight.py": "8d4ed0bc629a07d1580cb0cd7144a8f87210d007987f88f57c207bb1de2b1463",
+    "preflight-plan.json": "b8e29f6df3f6bc76911fb3dc02abbe3c3db2d1bb3560b1ed0bd730d05765b7e9",
+    "analyze.py": "b404740a4bcf0169e22b4eca6872657eacaa48b6529c9266ae15f5e8e22b2277"
+  }
+}
