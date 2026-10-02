@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareExactBlockProbe"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "4c44b52d7c9ddf1b48a40e8a2ea5cbf7bf1c32e09ef355c8af4c3a30b7428d57",
+  "binarySHA256": "cd1ebb543f2598769463c039a2ac9c00ff39c20a151fae7b8518c2381716196f",
+  "stageHashesSHA256": "ae2f47a8e887e3b60e287d8d5c7bf1e6e87ebfcd9cbb8867fd9c172fcefca659"
+}
