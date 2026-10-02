@@ -1,0 +1,13 @@
+Scoped PASS for Main’s one frozen standalone CPU-hint screen. No execution blocker found. No build, test, model run or weight read performed by this review.
+
+Verified all 24 manifest entries against their actual files. Manifest SHA256 `2528950663e2ff8a224735e4953ca4e93f6c290e5bc53441a413c5d10d885c92`. Forward patch SHA256 `0f014e3bc3dc38a4f05346ed3c7dbb8c045de8caa315133da0d4df6fb4e7f698`.
+
+`QwenCPUExpertHint.candidates` pins 256×2048 geometry, contiguous complete chunk rows, shared storage, alignment and checked byte lengths before pointer reads. Fixed width is divisible by eight. `withExtendedLifetime((weights,chunks))` retains buffers through all reads. No buffer mutation or converted router cache is introduced. SIMD8 ordering may change hint ranking, as explicitly intended, without changing model arithmetic.
+
+`diagnosticCPUExpertCandidates` requires a drained collector and idle usable runner. Its sole caller is the post-decode scorer. Candidate IDs never enter actual routing, cache admission, source offsets, sampling or logits. Both diagnostic phase boundary source validations remain. The baseline forward diff removes no original demand source validation, protected read, lease or publication check. Omitting per-hint scans is scoped to these untrusted CPU hints, not a general resident-weight exemption.
+
+The passive collector retains bounded Swift value arrays, leaves hooks `.none`, records the actual pre-plan 16-slot inventory under existing locks, and converts actual miss member indices through actual expert IDs. It requires all 29 sampled IDs including EOS, 28 consumed forwards, 1120 maps and 1092 early cases. The target-layer inventory argument holds because this probe performs no speculative cache writes.
+
+The predeclared gate is implemented: early Top8 only, central q=1.26 ms/a=1 ms at least 65 ms/output, positive 0.63/2.52 ms sensitivity cases, and no absent causal windows. All negative scenario scores survive. Predictor timing includes actor entry, geometry checks, normalization, BF16 conversion, dot products and sorting. Phase source checks are separately reported. This remains a hypothetical queue score, not measured overlap or app gain. Collection may inflate windows and resident CPU reads may alter caches. `passed:true` means valid completed capture, while `fixedScreenPassed` decides the predictor screen.
+
+The wrapper binds stage, overlay and built binary hashes, runs pinned clean-source/app019/process/platform/disk guards, strips inherited experiment flags, and monitors its own child at 30% minimum free memory with a 420-second deadline. Build success and passing fresh preflight remain required before launch. No prefetch or production integration is approved by this review.

@@ -1,0 +1,11 @@
+{
+  "forwardApplyCheck": 0,
+  "inverseApplyCheck": 0,
+  "pythonAST": "passed",
+  "liveCheckoutClean": true,
+  "app019SourceHashes": 731,
+  "buildOrRun": false,
+  "testCodeAdded": false,
+  "GPUHintMethodRemoved": true,
+  "PrefetchImplemented": false
+}

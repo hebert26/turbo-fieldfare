@@ -1,0 +1,43 @@
+{
+  "status": "FROZEN_STAGED_NO_EXECUTION",
+  "baselineCommit": "5cafe018b01bc932cab911091f76cd7da01cb00b",
+  "changedSourceCopies": [
+    "Package.swift",
+    "Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenCPUExpertHint.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPredictCPUProbe.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPredictionCapture.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "Sources/TurboFieldfareExpertPredictCPU/Command.swift"
+  ],
+  "forwardSHA256": "0f014e3bc3dc38a4f05346ed3c7dbb8c045de8caa315133da0d4df6fb4e7f698",
+  "inverseSHA256": "2fa3ebc298520e44567a8ebfb846aa49a6ec1c0ca0c5be6db3f3efb76be9761d",
+  "deltaFromGPURecallSHA256": "ed0f413694f1a0f8a7d4aad9304b1b2fc4ebb714f5ccea7a028eddbde954ca94",
+  "hashes": "frozen-hashes.json",
+  "fixedPolicy": "EARLY only, Top8 only, SIMD8 dot with ascending lane reduction and lower-ID tie break. No per-case tuning. One run only. Failure parks this predictor family. Actual prefetch remains parked.",
+  "request": "Same raw841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285capture;1175input IDs,29actual sampled IDs including EOS,28consumed forwards.8192capacity/7017request maxNew;64sample diagnostic cap but unchanged natural EOS and every ID checked.1120actual maps and1092early hints. Actual model samples alone feed subsequent model inputs.",
+  "hintDataflow": "QwenCPUExpertHint reads only existing immutable shared BF16 router chunks through inspectedChunks, next-layer postNorm, and saved earlier hidden. requireShape fixes role/router256x2048. Chunks must cover rows contiguously without overlap, have bounded row count, checked element/byte multiplication, adequate shared buffer length and UInt16 alignment. weights/chunks owners retained withExtendedLifetime across all read-only pointer access. No router payload copy, FP32 router cache, shard access or GPU projection. Temporary2048-element normalized vector,8laneBF16 expansion and256scores only. Returns8candidate IDs; no model logits/rank weights/identity/offset/payload or route admission is supplied.",
+  "trustBoundary": "This is a hint-only diagnostic function, not a general resident-data validation exemption or public source bypass. Original demand produce/premap/postmap/reader/admission/preGPU checks remain unchanged. Candidate IDs never reach model maps, arithmetic, readers or sampler. Invalid geometry/nonfinite hints reject the diagnostic report. Shared router owners remain alive. Entire posthoc phase has two fresh full-source validations; either failure rejects the report. Newly added old GPU hint scans are absent here only under this restricted data flow.",
+  "measurements": "Full hint elapsed includes actor call, geometry/owner inspection, RMSNorm, BF16 expansion, SIMD8 dot and fixed Top8. No source check or GPU/read command is issued per hint. Two phase-boundary validation calls are separately timed and included in whole posthoc wall. Reusable-hint scenario excludes those diagnostic boundary calls; it includes declared additional1ms hypothetical prefetch validation per case. Actual recall/waste, window ceilings and raw sensitivity rows are recomputed from these CPU IDs.",
+  "capture": "Same passive owned Mutex collector and actual preplan16slot snapshots/miss member indices/assignedslots/successful mapEnd. Retains only EARLY residual arrays; hooks.none keeps ordinary grouped prefill and decode scheduling. No prefill state storage. Arrays retain Swift values, not mutable scratch pointers. Duplicate/missing/failed maps or alignment errors reject the report. Target-layer inventory is unchanged between current-layer launch and its next map because each layer has a private cache and no prefetch/other writer exists.",
+  "scenario": "min(actualMapWall,covered*q)-max(0,nonresident*q-window)-hintCost-a. Negative cases retained. q0.63/1.26/2.52ms remains historical slope sensitivity. a0/1/2ms remains declared extra validation sensitivity. Wasted nonresident pairs count bytes and time even if their scenario window hides them. Early launch is after current map end, next-layer map start ends window. No absent/noncausal window is substituted.",
+  "fixedScreen": "Central q1.26ms/a1ms>=65ms per29outputs AND q0.63ms/a1ms>0 AND q2.52ms/a1ms>0;all1092causal cases and29exact IDs;external systemfree>=30%. Passing only supports later design/calibration review, not speed or actual prefetch qualification. Memory gate enforced by wrapper, not claimed from source.",
+  "memory": "One source-loaded model/runner/LFU16cache as prior probe. Hard residual bound32*39*2048*4=10223616bytes; expected28*39*2048*4=8945664bytes. No late hidden arrays, new weight/cache or additional model. At most1280map rows,1092raw result rows with9scenarios. Per-hint working arrays are~9KiB plus small chunk/ID metadata. JSON/container overhead remains bounded by those record counts.30%free whole-child watchdog unchanged.",
+  "guard": "Full HEAD5cafe018b01bc932cab911091f76cd7da01cb00b pinned.3fe..HEAD production-input equality proven. All731app019source hashes match. Same installedapp019/Gemma metadata/OS26/Swift6.2/disk20GiB/free30/process guards. Source-only overlay, pinned dependency caches, source/binary hash linkage and raw command/stdout/stderr/exit receipts. Main-only420s owned-child timeout and2s memory checks. No guard executed by Sol.",
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-cpu-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-cpu-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-cpu-20261002/run.py",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+    ]
+  ],
+  "verification": "Static patch and PythonAST checks only. No root edits, unit tests, builds/runs/models/app changes or commits."
+}

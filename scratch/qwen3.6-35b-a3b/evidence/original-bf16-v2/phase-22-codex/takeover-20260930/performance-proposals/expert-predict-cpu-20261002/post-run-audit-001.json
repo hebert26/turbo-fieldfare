@@ -1,0 +1,42 @@
+{
+  "status": "PASS_FOR_DIAGNOSTIC_ONLY",
+  "auditedAt": "2026-10-02T14:41:57.507841+00:00",
+  "head": "5cafe018b01bc932cab911091f76cd7da01cb00b",
+  "run": "run-20261002T143735Z-ad72b5f9",
+  "frozenFiles": 24,
+  "stableOverlayInputs": 5296,
+  "binarySHA256": "f5a97c2ca4d82a012ecb21b774065afc64592af45aaf63f2b4859bff94e252f2",
+  "buildExit": 0,
+  "childExit": 0,
+  "wallSeconds": 162.17380699981004,
+  "ownedPIDGone": 26270,
+  "outputIDsMatched": 29,
+  "caseScoresIndependentlyRecomputed": 1092,
+  "scenarioTotalsIndependentlyRecomputed": 9,
+  "minimumSystemFreePercent": 30,
+  "fixedScreenPassed": true,
+  "centralScenarioMillisecondsPerOutput": 92.4832196551724,
+  "lowScenarioMillisecondsPerOutput": 26.918591620689657,
+  "highScenarioMillisecondsPerOutput": 49.00287896551724,
+  "payloadReadsOrHashesByAudit": false,
+  "productionSourceAndInstalledAppChanged": false,
+  "files": {
+    "run-20261002T143735Z-ad72b5f9/result.json": "f686e08f56fa956d36dc261c0676d8dc093fd384ec31cae3dc9551b1d6d4472c",
+    "run-20261002T143735Z-ad72b5f9/receipt.json": "1e5ac33757331e6a7301eea87910717f8e75140c36a1b7b0300f83f1ccdbc1c9",
+    "run-20261002T143735Z-ad72b5f9/probe.stdout": "6b6fd54cea81fee08a5762741704153024096846e1990a014dd181528616ccee",
+    "run-20261002T143735Z-ad72b5f9/memory.jsonl": "101a3e4441e055a02a80f51c83e6730278b1b6131919b426f43035c4fd8d7caa",
+    "receipt.json": "be7132a7627d32062378884e034321d65f80c1df5c576c2f8355fc517515164f",
+    "build-receipt.json": "821bb9d6b9fa922e65f2bf22cc763105dd04f9c22e7b877b3e5c9449ec0b4b76",
+    "frozen-hashes.json": "2528950663e2ff8a224735e4953ca4e93f6c290e5bc53441a413c5d10d885c92"
+  },
+  "limits": [
+    "One frozen request, 8192 capacity, 1175 occupied input tokens.",
+    "Posthoc hints only. No actual prefetch, measured app gain or 64K qualification.",
+    "Minimum free30% gives no proven spare headroom for a new prefetch buffer.",
+    "q/a are declared sensitivity assumptions; collection can inflate available windows."
+  ],
+  "installedAfterRun": {
+    "TurboFieldfareDecodeService": "083e80a7155db7993af86d391ef84cf634cc2785b62289d79758c8e04f81a046",
+    "TurboFieldfareMac": "4985b79913c6cd289f5de7b9ac4c6d284dda404d79a9916a96741a9dcc94fe28"
+  }
+}
