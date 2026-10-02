@@ -1,0 +1,69 @@
+{
+  "scope": "Exploratory analysis of same captured data; no new prediction/model run. One fixed recorded-ID prefixK per workload, never per-case oracle. Keeps measured full8 prediction cost. q1.26ms/a0 optimistic assumptions. Not independent validation or measured speed.",
+  "rows": [
+    {
+      "predictor": "early",
+      "globalRecordedPrefixK": 1,
+      "coveredMisses": 439,
+      "nonresidentPredictions": 478,
+      "wastedPredictions": 39,
+      "netMillisecondsPerOutputScenario": -93.95290379310345
+    },
+    {
+      "predictor": "early",
+      "globalRecordedPrefixK": 2,
+      "coveredMisses": 940,
+      "nonresidentPredictions": 1056,
+      "wastedPredictions": 116,
+      "netMillisecondsPerOutputScenario": -72.18531758620689
+    },
+    {
+      "predictor": "early",
+      "globalRecordedPrefixK": 4,
+      "coveredMisses": 1940,
+      "nonresidentPredictions": 2346,
+      "wastedPredictions": 406,
+      "netMillisecondsPerOutputScenario": -28.758186862068968
+    },
+    {
+      "predictor": "early",
+      "globalRecordedPrefixK": 8,
+      "coveredMisses": 3448,
+      "nonresidentPredictions": 5345,
+      "wastedPredictions": 1897,
+      "netMillisecondsPerOutputScenario": 27.496379206896552
+    },
+    {
+      "predictor": "late",
+      "globalRecordedPrefixK": 1,
+      "coveredMisses": 485,
+      "nonresidentPredictions": 504,
+      "wastedPredictions": 19,
+      "netMillisecondsPerOutputScenario": -91.77278813793103
+    },
+    {
+      "predictor": "late",
+      "globalRecordedPrefixK": 2,
+      "coveredMisses": 1021,
+      "nonresidentPredictions": 1077,
+      "wastedPredictions": 56,
+      "netMillisecondsPerOutputScenario": -68.48451227586207
+    },
+    {
+      "predictor": "late",
+      "globalRecordedPrefixK": 4,
+      "coveredMisses": 2122,
+      "nonresidentPredictions": 2390,
+      "wastedPredictions": 268,
+      "netMillisecondsPerOutputScenario": -23.999124586206896
+    },
+    {
+      "predictor": "late",
+      "globalRecordedPrefixK": 8,
+      "coveredMisses": 3798,
+      "nonresidentPredictions": 5404,
+      "wastedPredictions": 1606,
+      "netMillisecondsPerOutputScenario": -8.947516551724139
+    }
+  ]
+}

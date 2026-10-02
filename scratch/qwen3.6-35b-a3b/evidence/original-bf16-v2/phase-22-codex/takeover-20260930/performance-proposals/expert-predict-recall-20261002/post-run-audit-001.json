@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-02T14:19:24.028308+00:00",
+  "overlayFilesMatched": 5295,
+  "frozenFilesMatched": 22,
+  "binaryMatched": true,
+  "resultSHA256": "2383b80a091c553d3c91b72b847330f452de6f324516219062233182b31da778",
+  "receiptSHA256": "52ffccb55cd6b79c9234e0c4219a4d7f3f9088ded400c60f61dc5204d768ea9c",
+  "buildReceiptSHA256": "c56db4cec1c7134c5e8b2c018af4e43b6273e81a066efdc46c6c8ee7dbe5b709",
+  "stdoutMatchesResult": true,
+  "stderrEmpty": true,
+  "all29SampledIDsMatchFrozenCapture": true,
+  "predictionRows": 2184,
+  "rootStatus": "",
+  "probeExited": true
+}

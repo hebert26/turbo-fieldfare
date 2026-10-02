@@ -1,0 +1,51 @@
+{
+  "status": "FROZEN_STAGED_NO_EXECUTION",
+  "baselineCommit": "fc0af645727d469e7e56cae6b037f6e80165401b",
+  "changedSourceCopies": [
+    "Package.swift",
+    "Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPredictRecallProbe.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPredictionCapture.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "Sources/TurboFieldfareExpertPredictRecall/Command.swift"
+  ],
+  "forwardSHA256": "0fe8b1dc7783f4a96e2d57206fa215b9535a724ad693fe5f4e23714020b2f024",
+  "inverseSHA256": "34c134774963cc86568a1e63ae47f70697e6ef420677748e177c29398447f92b",
+  "hashes": "frozen-hashes.json",
+  "request": "Raw exact capture SHA841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285,1175input IDs,29sampled IDs including tool EOS.8192context,7017effective maxNew from request. Isolated diagnostic cap64samples, but EOS naturally terminates at29 or the exactness check rejects. No recorded ID is supplied as an input. Actual samples alone extend history.28consumed decode forwards,1120successful maps,1092next-layer cases per fixed predictor. No layer39\u2192next-token-layer0 prediction.",
+  "capture": "Fixed owned Sendable Mutex collector, not transaction or activation hooks. Observe existing CPU residual arrays only; no intermediate GPU readback. All hooks.none flags and grouped prefill/normal GPU-linear scheduling stay unchanged. Actual preplan16slot IDs snapshot under existing coordinator IO/state locks, actual plan.experts/miss member indices/assigned slots, successful mapEnd at runner return. No approximate LFU replay. Arrays retain Swift value storage; no mutable scratch pointer. Collector drops no in-bound observations silently; missing/duplicate/malformed records fail the probe.",
+  "causality": "Predictor method accepts only an earlier hidden vector and the fixed next-layer index. RMSNorm uses next-layer postNorm, then existing encodeProjection route with officialSourceCPU arithmetic. No actual future route/cache/miss information reaches that method. The scorer receives those records separately. Posthoc method requires collector drained and runner idle. No fitted parameters or per-case predictor selection.",
+  "residencyProof": "One private cache/coordinator per layer. Serial decode makes one map per layer at a position and no prefetch or other cache writer exists. Next-layer preplan inventory therefore equals its inventory at both preceding-layer launch points. Assert nonresident predicted actual-route IDs equal covered actual miss IDs. Missing or inconsistent alignment fails without LFU repair.",
+  "windows": "Early launch=current layer mapEnd, not earlier hidden availability. Late launch=residual-after-MoE time. End=next-layer mapStart. Clock uses existing production uptime and actual existing phase boundaries. Absent/noncausal windows excluded and counted, never substituted. Per-row window/map wall plus aggregate ideal window ceiling reported. Observations include collector overhead; collection callback clocks measure lock wait/body, not unlock/later COW/allocation effects. No calibration model replay.",
+  "cost": "Each posthoc prediction timing includes guard/cancellation, fresh full-source validation before and after, next-layer norm, actual resident router projection/settlement/readback and official-source routing. Whole posthoc wall also reported. Map wall is actual coordinator time, not a pure disk read q. Existing per-map IO-read wall is not exported by this lean collector; no new read timers added.",
+  "score": "Separate fixed early and late global totals. N=P\\resident; covered=N\u2229actualMisses; waste=N\\actualRoute. Serialized-predictor/drain scenario=min(actualMapWall,covered*q)-max(0,N*q-window)-predictorCost-a. Negative rows retained. Wasted read bytes and q time reported even if hypothetical window hides them. q0.63/1.26/2.52ms is old slope sensitivity, not measured new per-miss latency. a0/1/2ms is explicit extra validation sensitivity; a0 optimistic unknown.65/130ms per29outputs screen only prioritizes next investigation. No app gain or prefetch correctness is qualified.",
+  "memory": "Exactly one model and one runner, LFU16,12GiB residency budget as frozen probe. Residual storage hard bound32*39*2*width*4bytes (<=39MiB for allowedwidth4096); expected28*39*2*width*4bytes. At most1280map rows and2184result rows with9scenarios each. Small metadata/JSON containers add tens ofMiB (estimate, not measured). No prefix/state snapshots or second cache/model. External>=30%free guard covers full prefill/decode/posthoc.",
+  "unchanged": "No routed arithmetic/order/source-check/open/read/publication/lease/cancellation/error changes. No expert prefetch, cache substitution/policy change, transaction hooks or extra sampler source scan. Existing per-token runner recovery remains. No parser/tool/public journal publication.",
+  "guard": "Current fc0af645 pinned.3fe..fc0af Sources/Tests/Scripts/Package equality and731app019source hashes proven. Installedapp019/Gemma metadata/macOS26/Swift6.2/disk20GiB/free30/process guards unchanged. Build uses source-only overlay and cached dependencies. Raw streams and source/binary linkage preserved. Single owned child420s deadline plus2s free-memory checks; only own child is terminated if guard fails.",
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-recall-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-recall-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-recall-20261002/run.py",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+    ]
+  ],
+  "flags": {
+    "TURBO_QWEN_SOURCE_VALIDATION_FAST": "1",
+    "TURBO_QWEN_EXPERT_CACHE_RESIDENCY": "1",
+    "TURBO_QWEN_GPU_LINEAR_PREPARATION": "1",
+    "TURBO_QWEN_GROUPED_LINEAR_PREFILL": "1",
+    "TURBO_QWEN_EXPERT_PROJECTION_BATCH": "0",
+    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN": "0",
+    "TURBO_QWEN_EXPERT_READ_KNOWN_NONE_4": "0",
+    "TURBO_QWEN_EXACT_TOKEN_CAPTURE": "0"
+  },
+  "verification": "Patch checks and PythonAST only. No builds/tests/model runs, root edits or commits. Main reviews/builds/runs."
+}
