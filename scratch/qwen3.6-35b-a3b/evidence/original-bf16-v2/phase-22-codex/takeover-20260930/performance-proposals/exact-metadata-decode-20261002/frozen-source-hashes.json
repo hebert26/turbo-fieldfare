@@ -1,0 +1,12 @@
+{
+  "candidate/Package.swift": "55599eaca26bc079e68ce8845fcd0b7ee2a2cad73a8401b79fd48b3df5dc9265",
+  "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift": "86f70b9daa5b2694c07b4d5862802530fe05fac1c10609e56e300088409ef44e",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactMetadataDecodeProbe.swift": "0303ece3621a13963da6d7bb95583db1cc51b19a5a192645e2febae65b1c2ac3",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenMetadataDecodeCapture.swift": "9759ebfc82f2a2ae6fb62957980743b8c4c84bffdbc9b11929db950c2abb1f3a",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": "40b3b0b9419b9bb2b2adc6dbaaf97801943d965537faf3a388cb826df41e54a0",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift": "720b90a1de8f1350740abf4c9d6fc806b876781e87ae74798613da60d6e2c1eb",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift": "2c31ef9a0517ad3ba587f73968470031bb089a203db075d5b180a4de34a8541e",
+  "candidate/Sources/TurboFieldfareExactMetadataDecode/Command.swift": "d84fee0188627492798e11dd9fb8d14d481307b3bec2e0eeca1bc787c3241a8a",
+  "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceDecodeValidation.swift": "b2271374aabc175fd50e1aabe4e45a6202fa55c26532a35f21980de1e67e2ac0",
+  "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift": "6d2ebaabdabf620c74d7ab6a259b4e30c2fd5ee5d34d6a87e7e02ee6577041c9"
+}

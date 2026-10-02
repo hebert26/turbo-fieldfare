@@ -1,0 +1,820 @@
+diff --git a/Package.swift b/Package.swift
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,6 +8,7 @@
+         .iOS(.v26),
+     ],
+     products: [
++        .executable(name: "TurboFieldfareExactMetadataDecode", targets: ["TurboFieldfareExactMetadataDecode"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -26,6 +27,7 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
++        .executableTarget(name: "TurboFieldfareExactMetadataDecode", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareExactMetadataDecode"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+diff --git a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+--- a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
++++ b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+@@ -828,7 +828,8 @@
+         hooks = readHooks
+     }
+ 
+-    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil) async throws -> QwenBF16ExpertLease {
++    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil,
++             observation: QwenMetadataDecodeMapContext? = nil) async throws -> QwenBF16ExpertLease {
+         do {
+             guard expertIDs.count <= slotCount else {
+                 throw QwenExpertMappingError.insufficientUnpinnedSlots
+@@ -856,7 +857,7 @@
+             let outcome: Result<FetchResult, Error> = await withCheckedContinuation { continuation in
+                 DispatchQueue.global(qos: .userInitiated).async { [self] in
+                     let outcome = Result {
+-                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement)
++                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement, observation: observation)
+                     }
+                     handoff?.completed()
+                     continuation.resume(returning: outcome)
+@@ -895,7 +896,7 @@
+     }
+ 
+     private func performFetch(expertIDs: [Int], canceled: CancellationFlag,
+-                              measurement: QwenCacheMapContext?) throws -> FetchResult {
++                              measurement: QwenCacheMapContext?, observation: QwenMetadataDecodeMapContext?) throws -> FetchResult {
+         ioLock.lock()
+         defer { ioLock.unlock() }
+         if canceled.isCanceled() {
+@@ -911,6 +912,7 @@
+                                                        snapshot: cache.measurementSnapshot)
+         }
+         let mapID = measurement.map { $0.capture.beginQwenCacheMap($0) }
++        let residents = observation == nil ? [] : cache.measurementSnapshot().expertIDs
+         let reserved: (UInt64, ExpertCachePlan)
+         do {
+             reserved = try withStateLock {
+@@ -949,6 +951,10 @@
+                 measurement.capture.recordQwenCacheOutcome(mapID, status: error is CancellationError ? 2 : 1, stage: 1)
+             }
+             throw error
++        }
++        if let observation {
++            observation.capture.plan(position: observation.position, layer: observation.layer,
++                                     plan: reserved.1, residents: residents)
+         }
+         do {
+             let buffers = try cache.load(reserved.1, hooks: hooks,
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactMetadataDecodeProbe.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactMetadataDecodeProbe.swift
+new file mode 100644
+--- /dev/null
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactMetadataDecodeProbe.swift
+@@ -0,0 +1,193 @@
++import Foundation
++import Darwin
++import Metal
++import CryptoKit
++import TurboFieldfareOfficialQwenSource
++
++private struct MetadataDecodeProbeError: Error { let detail: String }
++private func requireMetadataDecode(_ condition: Bool, _ detail: String) throws {
++    if !condition { throw MetadataDecodeProbeError(detail: detail) }
++}
++
++// Source-copy command only. It publishes no parser, tools or conversation state.
++public enum QwenExactMetadataDecodeProbe {
++    @MainActor public static func run(registrationURL: URL, requestURL: URL, enabled: Bool) async throws -> Data {
++        let raw = try Data(contentsOf: requestURL)
++        let digest = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
++        try requireMetadataDecode(digest == "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285", "capture hash")
++        guard let request = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
++              let prefixInts = request["inputTokenIDs"] as? [Int],
++              let recordedInts = request["sampledTokenIDs"] as? [Int],
++              let settings = request["settings"] as? [String: Any],
++              let stops = settings["extraStopTokens"] as? [Int],
++              let strings = settings["stopStrings"] as? [String],
++              let temperature = settings["temperature"] as? NSNumber,
++              let penalty = settings["repetitionPenalty"] as? NSNumber,
++              let maxNew = settings["maxNewTokens"] as? Int,
++              let maxContext = request["maximumContext"] as? Int,
++              let eosInt = request["codecEOS"] as? Int else {
++            throw MetadataDecodeProbeError(detail: "capture fields")
++        }
++        try requireMetadataDecode(prefixInts.count == 1175 && recordedInts.count == 29
++            && request["complete"] as? Bool == true && request["terminal"] as? String == "committed"
++            && request["fixtureSamples"] as? Bool == false && request["checkpointResume"] as? Bool == false
++            && request["preparedPromptPresent"] as? Bool == false && request["visionStorePresent"] as? Bool == false
++            && maxContext == 8192 && prefixInts.allSatisfy { Int32(exactly: $0) != nil }
++            && recordedInts.allSatisfy { Int32(exactly: $0) != nil }, "frozen capture geometry")
++        let prefix = prefixInts.map { Int32($0) }
++        let recorded = recordedInts.map { Int32($0) }
++        let eos = Int32(eosInt)
++        var config = GenerationConfig(maxNewTokens: maxNew,
++            temperature: Float(temperature.doubleValue), topK: settings["topK"] as? Int,
++            topP: (settings["topP"] as? NSNumber).map { Float($0.doubleValue) },
++            repetitionPenalty: Float(penalty.doubleValue), seed: nil,
++            stopStrings: strings, extraStopTokens: Set(stops.map { Int32($0) }))
++        config.logitTransform = .raw
++        try config.validate()
++        try requireMetadataDecode(config.temperature == 0 && config.extraStopTokens.contains(eos)
++            && recorded.last == eos, "greedy terminal capture")
++        var minimumFree = try memoryGuard()
++        let context = try MetalContext()
++        let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
++            integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
++            expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024)
++        guard let source = model.sourceIdentity else { throw MetadataDecodeProbeError(detail: "source identity") }
++        try requireMetadataDecode(source.descriptorContentSHA256 == (request["sourceDescriptorSHA256"] as? String)
++            && source.markerSHA256 == (request["sourceMarkerSHA256"] as? String)
++            && source.checksumManifestSHA256 == (request["sourceManifestSHA256"] as? String)
++            && source.shardSetSHA256 == (request["sourceShardSetSHA256"] as? String), "official source mismatch")
++        try requireMetadataDecode(model.architecture.layers == 40 && model.architecture.hiddenSize == 2048 && model.architecture.experts == 256,
++                              "bounded architecture")
++        let capture = QwenMetadataDecodeCapture()
++        let measurement = OfficialSourceDecodeMeasurement()
++        guard let validator = try model.makeDecodeReceiptValidator() else {
++            throw MetadataDecodeProbeError(detail: "trusted receipt required")
++        }
++        let runner = try QwenOfficialSourceRunner(model: model, maxContext: maxContext,
++            expertSlotCount: 16, hooks: .none, metadataCapture: capture,
++            decodeReceiptValidator: validator, decodeMeasurement: measurement)
++        let scratch = try RawCompletionScratch(context: context, vocab: model.architecture.vocabularySize)
++        let prefillStart = QwenProductionTimingMeasurement.uptime()
++        var logits = try await runner.prefill(tokenIDs: prefix, position: 0)
++        let prefillEnd = QwenProductionTimingMeasurement.uptime()
++        minimumFree = min(minimumFree, try memoryGuard())
++        capture.begin()
++        var history = prefix
++        var generated: [Int32] = []
++        var forwardTimes: [UInt64] = []
++        var foundStop = false
++        let cpuBefore = try cpuUsage()
++        let decodeStart = QwenProductionTimingMeasurement.uptime()
++        // Recorded IDs only check outputs. They never supply decode inputs.
++        for index in 0..<min(config.maxNewTokens, 64) {
++            try Task.checkCancellation()
++            try QwenSourceSamplerBoundary.publishFP32Logits(logits, into: scratch.logits,
++                vocabularySize: model.architecture.vocabularySize)
++            guard let command = context.queue.makeCommandBuffer() else {
++                throw MetadataDecodeProbeError(detail: "sampler command")
++            }
++            scratch.sampler.sample(commandBuffer: command, logits: scratch.logits, probs: scratch.probs,
++                history: history, config: config, position: index, outToken: scratch.outToken)
++            try Task.checkCancellation()
++            command.commit()
++            await command.completed()
++            try requireMetadataDecode(command.status == .completed && command.error == nil, "sampler GPU error")
++            let sampled = scratch.outToken.contents().load(as: UInt32.self)
++            try requireMetadataDecode(sampled < UInt32(model.architecture.vocabularySize), "invalid sampled ID")
++            let token = Int32(sampled)
++            try requireMetadataDecode(index < recorded.count && token == recorded[index], "sample differs at index \(index)")
++            generated.append(token)
++            if config.extraStopTokens.contains(token) { foundStop = true; break }
++            let start = QwenProductionTimingMeasurement.uptime()
++            logits = try await runner.produce(token: token, position: history.count)
++            forwardTimes.append(QwenProductionTimingMeasurement.uptime() - start)
++            history.append(token)
++        }
++        let decodeEnd = QwenProductionTimingMeasurement.uptime()
++        let cpuAfter = try cpuUsage()
++        try requireMetadataDecode(foundStop && generated == recorded && forwardTimes.count == 28,
++                                 "incomplete frozen generation")
++        let finalPosition = await runner.position
++        let usable = !(await runner.isUnusable)
++        let state = capture.snapshot()
++        try requireMetadataDecode(finalPosition == 1203 && usable && measurement.drained(), "terminal runner/entry-lane state")
++        try requireMetadataDecode(!state.duplicate && state.routes.count == 1120 && state.plans.count == 1120,
++                                 "missing or duplicate decode evidence")
++        for position in 1175..<1203 {
++            for layer in 0..<40 {
++                let key = QwenMetadataDecodeCapture.Key(position: position, layer: layer)
++                guard let route = state.routes[key], let plan = state.plans[key] else {
++                    throw MetadataDecodeProbeError(detail: "missing route/plan")
++                }
++                let residents = Set(plan.residents.filter { $0 >= 0 })
++                try requireMetadataDecode(route.experts == plan.experts && route.experts.count == 8
++                    && route.weightBits.count == 8 && Set(route.experts).count == 8
++                    && plan.residents.count == 16 && plan.assignedSlots.count == 8
++                    && Set(plan.assignedSlots).count == 8 && plan.assignedSlots.allSatisfy { (0..<16).contains($0) }
++                    && plan.residents.allSatisfy { $0 == -1 || (0..<256).contains($0) }
++                    && residents.count == plan.residents.filter { $0 >= 0 }.count
++                    && Set(plan.missIndices).count == plan.missIndices.count
++                    && plan.missIndices.allSatisfy { plan.experts.indices.contains($0) }, "route/plan shape")
++                try requireMetadataDecode(Set(plan.missIndices.map { plan.experts[$0] })
++                    == Set(plan.experts).subtracting(residents), "actual miss membership")
++            }
++        }
++        let order: (QwenMetadataDecodeCapture.Key, QwenMetadataDecodeCapture.Key) -> Bool = {
++            $0.position == $1.position ? $0.layer < $1.layer : $0.position < $1.position
++        }
++        let routes = state.routes.keys.sorted(by: order).map { state.routes[$0]! }
++        let plans = state.plans.keys.sorted(by: order).map { state.plans[$0]! }
++        let sourceValidation = measurement.snapshot()
++        try requireMetadataDecode(sourceValidation.count == 2296 && sourceValidation.entryChecks == 2296 * 78
++            && sourceValidation.failures == 0 && sourceValidation.maximumEntryFDs > 0
++            && sourceValidation.maximumEntryFDs <= (enabled ? 4 : 1)
++            && sourceValidation.parallelCount == (enabled ? sourceValidation.count : 0), "source counters")
++        minimumFree = min(minimumFree, try memoryGuard())
++        let cpuProcess = try cpuUsage()
++        let result: [String: Any] = ["schema": 1, "mode": enabled ? "on" : "off",
++            "captureSHA256": digest, "outputIDs": generated.map(Int.init), "expectedOutputIDsMatched": true,
++            "promptWallNanoseconds": prefillEnd - prefillStart,
++            "decodeWallNanoseconds": decodeEnd - decodeStart, "forwardWallNanoseconds": forwardTimes,
++            "routes": try json(routes), "plans": plans.map { plan -> [String: Any] in
++                ["position": plan.position, "layer": plan.layer, "experts": plan.experts,
++                 "assignedSlots": plan.assignedSlots, "missIndices": plan.missIndices,
++                 "residents": plan.residents.map { value -> Any in value < 0 ? NSNull() : NSNumber(value: value) }]
++            }, "sourceValidation": try json(sourceValidation), "minimumFreePercent": minimumFree,
++            "safety": ["captureComplete": true, "runnerUsable": usable,
++                       "position": finalPosition, "pendingTokens": 1],
++            "processCPUUserMicroseconds": cpuProcess.user, "processCPUSystemMicroseconds": cpuProcess.system,
++            "decodeCPUUserMicroseconds": cpuAfter.user - cpuBefore.user,
++            "decodeCPUSystemMicroseconds": cpuAfter.system - cpuBefore.system,
++            "rollbackExercised": false, "terminalEOSLeftPending": true,
++            "timingLimits": "Decode includes all29 samples and28 forwards. Per-forward timings are secondary. Source wall is synchronous whole validator wall, including owned dispatch/join and counter overhead. Process CPU is separate and not additive proof for intervals. Prefill and all non-produce validations remain serial.",
++            "scope": "Source-copy isolated diagnostic. Same fresh receipt entries and two complete scans with unchanged binding/root/list boundaries. Four contiguous ascending lanes each stop at first indexed error and join before lowest observed indexed error returns. One produce-owned cancellation latch bridges caller cancellation. No new await between post-map source validation and GPU submission. Up to three extra concurrent entry FDs can introduce EMFILE/ENFILE failure. Inter-entry visitation and temporal error precedence differ. No serial retry, prefetch or arithmetic change."]
++        return try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
++    }
++    private static func json<T: Encodable>(_ value: T) throws -> Any {
++        try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
++    }
++    private static func cpuUsage() throws -> (user: UInt64, system: UInt64) {
++        var usage = rusage()
++        guard getrusage(RUSAGE_SELF, &usage) == 0,
++              usage.ru_utime.tv_sec >= 0, usage.ru_utime.tv_usec >= 0,
++              usage.ru_stime.tv_sec >= 0, usage.ru_stime.tv_usec >= 0 else {
++            throw MetadataDecodeProbeError(detail: "process CPU unavailable")
++        }
++        return (UInt64(usage.ru_utime.tv_sec) * 1_000_000 + UInt64(usage.ru_utime.tv_usec),
++                UInt64(usage.ru_stime.tv_sec) * 1_000_000 + UInt64(usage.ru_stime.tv_usec))
++    }
++    private static func memoryGuard() throws -> Int {
++        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/memory_pressure")
++        process.arguments = ["-Q"]
++        let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
++        try process.run(); process.waitUntilExit()
++        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
++        let regex = try NSRegularExpression(pattern: "free percentage: ([0-9]+)%")
++        let range = NSRange(text.startIndex..<text.endIndex, in: text)
++        guard process.terminationStatus == 0, let match = regex.firstMatch(in: text, range: range),
++              let valueRange = Range(match.range(at: 1), in: text), let value = Int(text[valueRange]), value >= 30 else {
++            throw MetadataDecodeProbeError(detail: "system free memory below30% or guard unavailable")
++        }
++        return value
++    }
++}
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenMetadataDecodeCapture.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenMetadataDecodeCapture.swift
+new file mode 100644
+--- /dev/null
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenMetadataDecodeCapture.swift
+@@ -0,0 +1,52 @@
++import Foundation
++import Synchronization
++
++// Fixed decode evidence only. No activation or transaction callback is installed.
++final class QwenMetadataDecodeCapture: Sendable {
++    struct Key: Hashable, Sendable { let position: Int; let layer: Int }
++    struct Route: Codable, Sendable {
++        let position: Int
++        let layer: Int
++        let experts: [Int]
++        let weightBits: [UInt32]
++    }
++    struct Plan: Codable, Sendable {
++        let position: Int
++        let layer: Int
++        let experts: [Int]
++        let assignedSlots: [Int]
++        let missIndices: [Int]
++        let residents: [Int]
++    }
++    struct State: Sendable {
++        var active = false
++        var routes: [Key: Route] = [:]
++        var plans: [Key: Plan] = [:]
++        var duplicate = false
++    }
++    private let storage = Mutex(State())
++    func begin() { storage.withLock { $0.active = true } }
++    func snapshot() -> State { storage.withLock { $0 } }
++    func route(position: Int, layer: Int, experts: [Int], weights: [Float]) {
++        storage.withLock { value in
++            guard value.active, (1175..<1203).contains(position), (0..<40).contains(layer) else { return }
++            let key = Key(position: position, layer: layer)
++            if value.routes[key] != nil { value.duplicate = true }
++            value.routes[key] = Route(position: position, layer: layer, experts: experts, weightBits: weights.map(\.bitPattern))
++        }
++    }
++    func plan(position: Int, layer: Int, plan: ExpertCachePlan, residents: [Int]) {
++        storage.withLock { value in
++            guard value.active, (1175..<1203).contains(position), (0..<40).contains(layer) else { return }
++            let key = Key(position: position, layer: layer)
++            if value.plans[key] != nil { value.duplicate = true }
++            value.plans[key] = Plan(position: position, layer: layer, experts: plan.experts,
++                assignedSlots: plan.assignedSlots, missIndices: plan.misses, residents: residents)
++        }
++    }
++}
++struct QwenMetadataDecodeMapContext: Sendable {
++    let capture: QwenMetadataDecodeCapture
++    let position: Int
++    let layer: Int
++}
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
+@@ -5,6 +5,8 @@
+ /// path. Synchronous read gates run inside bounded paired-read workers; async
+ /// gates never supply bytes, offsets, buffers, or an admission identity.
+ struct QwenOfficialSourceTransactionHooks: Sendable {
++    private let knownNone: Bool
++    var isKnownNone: Bool { knownNone }
+     let beforeProtectedExpertRead:
+         @Sendable (Int, Int, QwenBF16ExpertReadHooks.Stream) throws -> Void
+     let afterActualGPUSubmission: @Sendable (String) async throws -> Void
+@@ -43,6 +45,7 @@
+         observeActivation: (@Sendable (Int, Int, String, [Float]) -> Void)? = nil,
+         observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)? = nil
+     ) {
++        knownNone = false
+         self.beforeProtectedExpertRead = beforeProtectedExpertRead
+         self.afterActualGPUSubmission = afterActualGPUSubmission ?? { _ in }
+         self.afterActualGPUCompletion = afterActualGPUCompletion ?? { _ in }
+@@ -61,7 +64,24 @@
+         self.observeConsumedInput = observeConsumedInput
+     }
+ 
+-    static let none = Self()
++    private init(provenNone: Void) {
++        knownNone = true
++        beforeProtectedExpertRead = { _, _, _ in }
++        afterActualGPUSubmission = { _ in }
++        afterActualGPUCompletion = { _ in }
++        requiresSeparateGPUStages = false
++        requiresTokenMajorPrefill = false
++        requiresOrderedPrefillStages = false
++        betweenConsumedTokens = { _ in }
++        beforeTurnCommit = {}
++        beforeRollbackRestore = {}
++        observeRoute = { _, _, _, _, _, _ in }
++        observeRawLogits = { _, _, _ in }
++        observePublicLogitsAndSample = { _, _, _ in }
++        observeActivation = nil
++        observeConsumedInput = nil
++    }
++    static let none = Self(provenNone: ())
+ }
+ 
+ struct QwenOfficialSourceSamplingInput: Sendable {
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
+@@ -484,6 +484,20 @@
+         else { try source.validateAcceptedFiles() }
+     }
+ 
++    func makeDecodeReceiptValidator() throws -> OfficialSourceHandle.DecodeReceiptValidator? {
++        guard let trustReceipt else { return nil }
++        return try source.makeDecodeReceiptValidator(trustReceipt)
++    }
++
++    func revalidateSource(validator: OfficialSourceHandle.DecodeReceiptValidator,
++                          latch: OfficialSourceDecodeCancellation, parallel: Bool,
++                          measurement: OfficialSourceDecodeMeasurement) throws {
++        guard let trustReceipt, validator.matches(handle: source, receipt: trustReceipt) else {
++            throw ModelError.indexCorrupt(detail: "decode receipt owner changed")
++        }
++        try validator.validate(latch: latch, parallel: parallel, measurement: measurement)
++    }
++
+     /// Compare the service's claimed digest with this admitted model, then
+     /// recheck its retained receipt and literal source names.
+     package func revalidateLoadedSource(contentDigest: String) throws {
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -1,6 +1,7 @@
+ import Foundation
+ import Metal
+ import Synchronization
++import TurboFieldfareOfficialQwenSource
+ 
+ struct QwenOfficialSourceRunnerDiagnosticSnapshot: Sendable, Equatable {
+     let position: Int
+@@ -61,6 +62,10 @@
+     private let moeConfiguration: QwenMoEConfiguration
+     private let expertSlotCount: Int
+     private let hooks: QwenOfficialSourceTransactionHooks
++    private let metadataCapture: QwenMetadataDecodeCapture?
++    private let decodeReceiptValidator: OfficialSourceHandle.DecodeReceiptValidator?
++    private let decodeMeasurement: OfficialSourceDecodeMeasurement?
++    private let useMetadataFour: Bool
+     private let useGPULinearPreparation: Bool
+     private let useGroupedLinearPrefill: Bool
+     /// Only this actor mutates the dictionary. A GPU lease can independently
+@@ -109,7 +114,13 @@
+     init(model: QwenOfficialSourceModel, maxContext: Int,
+          expertSlotCount: Int,
+          hooks: QwenOfficialSourceTransactionHooks = .none,
+-         useExpertCacheResidency: Bool? = nil) throws {
++         useExpertCacheResidency: Bool? = nil,
++         metadataCapture: QwenMetadataDecodeCapture? = nil,
++         decodeReceiptValidator: OfficialSourceHandle.DecodeReceiptValidator? = nil,
++         decodeMeasurement: OfficialSourceDecodeMeasurement? = nil) throws {
++        if decodeReceiptValidator != nil, !hooks.isKnownNone {
++            throw QwenTextRunnerError.invalidState(detail: "decode receipt lanes require hooks.none")
++        }
+         let architecture = model.architecture
+         let context = model.context
+         let useGroupedLinearPrefill = ProcessInfo.processInfo.environment[
+@@ -230,6 +241,10 @@
+         self.model = model
+         self.context = context
+         self.hooks = hooks
++        self.metadataCapture = metadataCapture
++        self.decodeReceiptValidator = decodeReceiptValidator
++        self.decodeMeasurement = decodeMeasurement
++        useMetadataFour = ProcessInfo.processInfo.environment["TURBO_QWEN_DECODE_METADATA_FOUR"] == "1"
+         // Internal trial only, fixed for this runner's lifetime. Legacy
+         // diagnostic hooks still select the linear step's separated fallback.
+         useGPULinearPreparation = ProcessInfo.processInfo.environment[
+@@ -280,22 +295,45 @@
+     func produce(token: Int32, position: Int,
+                  featureRow: [Float]? = nil,
+                  mropePosition: QwenMRoPEPosition? = nil) async throws -> [Float] {
++        if decodeReceiptValidator != nil, decodeMeasurement != nil {
++            let latch = OfficialSourceDecodeCancellation()
++            return try await withTaskCancellationHandler {
++                try await produceWithLatch(token: token, position: position, featureRow: featureRow,
++                                           mropePosition: mropePosition, latch: latch)
++            } onCancel: { latch.cancel() }
++        }
++        return try await produceWithLatch(token: token, position: position, featureRow: featureRow,
++                                          mropePosition: mropePosition, latch: nil)
++    }
++
++    private func produceWithLatch(token: Int32, position: Int, featureRow: [Float]?,
++                                  mropePosition: QwenMRoPEPosition?,
++                                  latch: OfficialSourceDecodeCancellation?) async throws -> [Float] {
+         if let location = QwenCacheMapMeasurement.capture?.qwenProductionLocation(
+             position: position, tokenCount: 1, forward: true) {
+             return try await QwenProductionTimingMeasurement.$location.withValue(location) {
+                 let span = QwenProductionTimingMeasurement.span(.forward)
+                 defer { span?.finish() }
+                 return try await produceToken(token: token, position: position, featureRow: featureRow,
+-                    mropePosition: mropePosition, withinPrefill: false)
++                    mropePosition: mropePosition, withinPrefill: false, latch: latch)
+             }
+         }
+         return try await produceToken(token: token, position: position, featureRow: featureRow,
+-                                      mropePosition: mropePosition, withinPrefill: false)
++                                      mropePosition: mropePosition, withinPrefill: false, latch: latch)
++    }
++
++    private func revalidateDecodeSource(latch: OfficialSourceDecodeCancellation?) throws {
++        if let latch, let decodeReceiptValidator, let decodeMeasurement {
++            try decodeMeasurement.measure(parallel: useMetadataFour) {
++                try model.revalidateSource(validator: decodeReceiptValidator, latch: latch,
++                    parallel: useMetadataFour, measurement: decodeMeasurement)
++            }
++        } else { try model.revalidateSource() }
+     }
+ 
+     private func produceToken(token: Int32, position: Int,
+                               featureRow: [Float]?, mropePosition: QwenMRoPEPosition?,
+-                              withinPrefill: Bool) async throws -> [Float] {
++                              withinPrefill: Bool, latch: OfficialSourceDecodeCancellation? = nil) async throws -> [Float] {
+         guard !inFlight, !unusable, !prefillInFlight || withinPrefill else {
+             throw QwenTextRunnerError.operationInProgress
+         }
+@@ -318,7 +356,7 @@
+         inFlight = true
+         defer { inFlight = false }
+         try Task.checkCancellation()
+-        try model.revalidateSource()
++        try revalidateDecodeSource(latch: latch)
+         let linearCheckpoint = try linearState.retainCheckpoint()
+         let fullSnapshot = try fullKV.snapshot()
+         do {
+@@ -348,7 +386,7 @@
+                 hooks.observeActivation?(position, layer, "residual-after-mixer", hidden)
+                 let post = try qwenOfficialSourceRMSNorm(hidden, weights.postNorm)
+                 hooks.observeActivation?(position, layer, "post-norm", post)
+-                let routed = try await moeStep(input: post, layer: layer)
++                let routed = try await moeStep(input: post, layer: layer, latch: latch)
+                 guard routed.count == width else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                 hidden = zip(hidden, routed).map(+)
+                 guard hidden.allSatisfy(\.isFinite) else {
+@@ -363,7 +401,7 @@
+                 model.entryWeights, model.headName, input: final,
+                 outputCount: model.architecture.vocabularySize, timingStage: .head)
+             try Task.checkCancellation()
+-            try model.revalidateSource()
++            try revalidateDecodeSource(latch: latch)
+             guard logits.count == model.architecture.vocabularySize,
+                   logits.allSatisfy(\.isFinite) else {
+                 throw QwenTextRunnerError.execution(detail: "nonfinite source logits")
+@@ -937,10 +975,10 @@
+         return read(outputBuffer, count: outputCount)
+     }
+ 
+-    private func moeStep(input: [Float], layer: Int) async throws -> [Float] {
++    private func moeStep(input: [Float], layer: Int, latch: OfficialSourceDecodeCancellation? = nil) async throws -> [Float] {
+         if let location = QwenProductionTimingMeasurement.location, location.layer != layer {
+             return try await QwenProductionTimingMeasurement.$location.withValue(location.atLayer(layer)) {
+-                try await moeStep(input: input, layer: layer)
++                try await moeStep(input: input, layer: layer, latch: latch)
+             }
+         }
+         let row = model.layers[layer]
+@@ -963,9 +1001,10 @@
+             ? routeLogits[ranked[model.architecture.expertsPerToken - 1]]
+                 - routeLogits[ranked[model.architecture.expertsPerToken]]
+             : 0
++        metadataCapture?.route(position: committedPosition, layer: layer, experts: experts, weights: routeWeights)
+         hooks.observeRoute(committedPosition, layer, routeLogits,
+                            experts, routeWeights, cutoff)
+-        try model.revalidateSource()
++        try revalidateDecodeSource(latch: latch)
+         let coordinator = try expertCoordinator(layer: layer)
+         lastRoutedExpertCount = experts.count
+         let measurement = QwenCacheMapMeasurement.capture.map {
+@@ -973,7 +1012,8 @@
+         }
+         let mapSpan = QwenProductionTimingMeasurement.span(.expertMap)
+         let lease: QwenBF16ExpertLease
+-        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement) }
++        let observation = metadataCapture.map { QwenMetadataDecodeMapContext(capture: $0, position: committedPosition, layer: layer) }
++        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement, observation: observation) }
+         catch { mapSpan?.finish(); throw error }
+         mapSpan?.finish()
+         // Mapping has succeeded. Later GPU failure/cancellation cannot undo
+@@ -986,7 +1026,7 @@
+             // every slice. Recheck the complete source once after mapping so
+             // changes to other receipt files reject this layer before GPU use.
+             // Keep this inside the lease cleanup scope if validation throws.
+-            try model.revalidateSource()
++            try revalidateDecodeSource(latch: latch)
+             let hiddenBuffer = try floats(input, label: "source MoE input")
+             let routingBuffer = try floats(routeWeights, label: "source MoE routing")
+             let output = try buffer(elements: model.architecture.hiddenSize,
+diff --git a/Sources/TurboFieldfareExactMetadataDecode/Command.swift b/Sources/TurboFieldfareExactMetadataDecode/Command.swift
+new file mode 100644
+--- /dev/null
++++ b/Sources/TurboFieldfareExactMetadataDecode/Command.swift
+@@ -0,0 +1,32 @@
++import Foundation
++import Darwin
++import TurboFieldfare
++
++@main struct ExactMetadataDecodeCommand {
++    @MainActor static func main() async {
++        guard CommandLine.arguments.count == 4 else {
++            FileHandle.standardError.write(Data("usage: TurboFieldfareExactMetadataDecode registration.json request.json report.json\n".utf8))
++            exit(2)
++        }
++        let output = URL(fileURLWithPath: CommandLine.arguments[3])
++        do {
++            guard !FileManager.default.fileExists(atPath: output.path) else {
++                throw CocoaError(.fileWriteFileExists)
++            }
++            let data = try await QwenExactMetadataDecodeProbe.run(
++                registrationURL: URL(fileURLWithPath: CommandLine.arguments[1]),
++                requestURL: URL(fileURLWithPath: CommandLine.arguments[2]),
++                enabled: ProcessInfo.processInfo.environment["TURBO_QWEN_DECODE_METADATA_FOUR"] == "1")
++            try data.write(to: output, options: .atomic)
++            print(String(decoding: data, as: UTF8.self))
++        } catch {
++            let failure = ["passed": false, "error": String(describing: error)] as [String: Any]
++            do {
++                let data = try JSONSerialization.data(withJSONObject: failure, options: [.sortedKeys])
++                if !FileManager.default.fileExists(atPath: output.path) { try data.write(to: output, options: .atomic) }
++            } catch { FileHandle.standardError.write(Data("failure receipt write: \(error)\n".utf8)) }
++            FileHandle.standardError.write(Data("exact metadata decode probe failed: \(error)\n".utf8))
++            exit(1)
++        }
++    }
++}
+diff --git a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceDecodeValidation.swift b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceDecodeValidation.swift
+new file mode 100644
+--- /dev/null
++++ b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceDecodeValidation.swift
+@@ -0,0 +1,57 @@
++import Foundation
++import Synchronization
++
++// One produce call owns this latch and retains it until all entry lanes join.
++package final class OfficialSourceDecodeCancellation: Sendable {
++    private let canceled = Mutex(false)
++    package init() {}
++    package func cancel() { canceled.withLock { $0 = true } }
++    package func check() throws {
++        if canceled.withLock({ $0 }) { throw CancellationError() }
++    }
++}
++
++// Counters cover decode only. Locks never cover filesystem work or worker joins.
++package final class OfficialSourceDecodeMeasurement: Sendable {
++    package struct Snapshot: Codable, Sendable {
++        package var count: UInt64 = 0
++        package var wallNanoseconds: UInt64 = 0
++        package var failures: UInt64 = 0
++        package var parallelCount: UInt64 = 0
++        package var parallelWallNanoseconds: UInt64 = 0
++        package var entryChecks: UInt64 = 0
++        package var maximumEntryFDs: Int = 0
++    }
++    private struct State: Sendable { var snapshot = Snapshot(); var activeFDs = 0 }
++    private let state = Mutex(State())
++    package init() {}
++    package func snapshot() -> Snapshot { state.withLock { $0.snapshot } }
++    package func measure<T>(parallel: Bool, _ body: () throws -> T) rethrows -> T {
++        let start = DispatchTime.now().uptimeNanoseconds
++        var success = false
++        defer {
++            let wall = DispatchTime.now().uptimeNanoseconds - start
++            state.withLock { value in
++                value.snapshot.count += 1
++                value.snapshot.wallNanoseconds += wall
++                if parallel {
++                    value.snapshot.parallelCount += 1
++                    value.snapshot.parallelWallNanoseconds += wall
++                }
++                if !success { value.snapshot.failures += 1 }
++            }
++        }
++        let result = try body()
++        success = true
++        return result
++    }
++    package func entry() { state.withLock { $0.snapshot.entryChecks += 1 } }
++    package func opened() {
++        state.withLock { value in
++            value.activeFDs += 1
++            value.snapshot.maximumEntryFDs = max(value.snapshot.maximumEntryFDs, value.activeFDs)
++        }
++    }
++    package func closed() { state.withLock { $0.activeFDs -= 1 } }
++    package func drained() -> Bool { state.withLock { $0.activeFDs == 0 } }
++}
+diff --git a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift
+--- a/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift
++++ b/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift
+@@ -1,6 +1,7 @@
+ import CryptoKit
+ import Darwin
+ import Foundation
++import Synchronization
+ import TurboFieldfareFormat
+ 
+ /// Protected access to the names pinned by a registered source descriptor.
+@@ -274,6 +275,16 @@
+     /// The receipt v1 records marker bytes by SHA, not marker inode; the
+     /// handle's own marker inode is rechecked by validateBinding on both sides.
+     package func validateTrustedReceipt(_ receipt: OfficialSourceTrustReceipt) throws {
++        try validateReceipt(receipt, operation: nil)
++    }
++
++    private struct DecodeOperation {
++        let latch: OfficialSourceDecodeCancellation
++        let parallel: Bool
++        let measurement: OfficialSourceDecodeMeasurement
++    }
++    private func validateReceipt(_ receipt: OfficialSourceTrustReceipt,
++                                 operation: DecodeOperation?) throws {
+         try validateBinding()
+         let markerDigest: String
+         let descriptorContentSHA256: String
+@@ -335,28 +346,30 @@
+             guard expected.isSubset(of: currentNames) else {
+                 throw OfficialSourceHandleError.replaced("trusted source file name disappeared")
+             }
+-            for entry in receipt.files {
+-                try Task.checkCancellation()
+-                let fd = openat(sourceFD, entry.filename,
+-                                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+-                guard fd >= 0 else {
+-                    throw OfficialSourceHandleError.replaced(
+-                        "trusted source file unavailable: \(entry.filename)")
++            if let operation, operation.parallel {
++                let lanes = (0..<4).map { lane in
++                    ReceiptLane(handle: self, entries: receipt.files,
++                        range: (lane * receipt.files.count / 4)..<((lane + 1) * receipt.files.count / 4),
++                        operation: operation)
+                 }
+-                defer { close(fd) }
+-                var held = stat()
+-                var named = stat()
+-                guard fstat(fd, &held) == 0,
+-                      fstatat(sourceFD, entry.filename, &named, AT_SYMLINK_NOFOLLOW) == 0,
+-                      (held.st_mode & S_IFMT) == S_IFREG, held.st_nlink == 1,
+-                      Self.matchesFingerprint(held, entry.fingerprint),
+-                      Self.matchesFingerprint(named, entry.fingerprint),
+-                      FileIdentity(held) == FileIdentity(named) else {
+-                    throw OfficialSourceHandleError.replaced(
+-                        "trusted source file changed: \(entry.filename)")
++                let group = DispatchGroup()
++                for lane in lanes {
++                    group.enter()
++                    DispatchQueue.global(qos: .userInitiated).async {
++                        defer { group.leave() }
++                        lane.run()
++                    }
+                 }
+-                if allowedNames.contains(entry.filename) {
+-                    try remember(name: entry.filename, identity: FileIdentity(held))
++                group.wait()
++                var first: (Int, any Error)?
++                for lane in lanes {
++                    if let error = lane.failure(), first == nil || error.0 < first!.0 { first = error }
++                }
++                if let first { throw first.1 }
++            } else {
++                for entry in receipt.files {
++                    try Task.checkCancellation()
++                    try validateReceiptEntry(entry, measurement: operation?.measurement)
+                 }
+             }
+             try requireRoot()
+@@ -365,6 +378,79 @@
+         try validateBinding()
+         try scan()
+         try validateBinding()
++    }
++
++    private func validateReceiptEntry(_ entry: OfficialSourceTrustReceipt.FileEntry,
++                                      measurement: OfficialSourceDecodeMeasurement?) throws {
++        measurement?.entry()
++        let fd = openat(sourceFD, entry.filename,
++                O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
++        guard fd >= 0 else {
++            throw OfficialSourceHandleError.replaced(
++                "trusted source file unavailable: \(entry.filename)")
++        }
++        measurement?.opened()
++        defer { close(fd); measurement?.closed() }
++        var held = stat()
++        var named = stat()
++        guard fstat(fd, &held) == 0,
++              fstatat(sourceFD, entry.filename, &named, AT_SYMLINK_NOFOLLOW) == 0,
++              (held.st_mode & S_IFMT) == S_IFREG, held.st_nlink == 1,
++              Self.matchesFingerprint(held, entry.fingerprint),
++              Self.matchesFingerprint(named, entry.fingerprint),
++              FileIdentity(held) == FileIdentity(named) else {
++            throw OfficialSourceHandleError.replaced(
++                "trusted source file changed: \(entry.filename)")
++        }
++        if allowedNames.contains(entry.filename) {
++            try remember(name: entry.filename, identity: FileIdentity(held))
++        }
++    }
++
++    // Immutable inputs and one lane-owned outcome cross the Dispatch boundary.
++    private final class ReceiptLane: @unchecked Sendable {
++        let handle: OfficialSourceHandle
++        let entries: [OfficialSourceTrustReceipt.FileEntry]
++        let range: Range<Int>
++        let operation: DecodeOperation
++        private let outcome = Mutex<(Int, any Error)?>(nil)
++        init(handle: OfficialSourceHandle, entries: [OfficialSourceTrustReceipt.FileEntry],
++             range: Range<Int>, operation: DecodeOperation) {
++            self.handle = handle; self.entries = entries; self.range = range; self.operation = operation
++        }
++        func run() {
++            for index in range {
++                do {
++                    try operation.latch.check()
++                    try handle.validateReceiptEntry(entries[index], measurement: operation.measurement)
++                } catch {
++                    outcome.withLock { $0 = (index, error) }
++                    break
++                }
++            }
++        }
++        func failure() -> (Int, any Error)? { outcome.withLock { $0 } }
++    }
++
++    // Construction proves serial admission of this exact retained handle/receipt.
++    package final class DecodeReceiptValidator: @unchecked Sendable {
++        private let handle: OfficialSourceHandle
++        private let receipt: OfficialSourceTrustReceipt
++        fileprivate init(handle: OfficialSourceHandle, receipt: OfficialSourceTrustReceipt) {
++            self.handle = handle; self.receipt = receipt
++        }
++        package func matches(handle: OfficialSourceHandle, receipt: OfficialSourceTrustReceipt) -> Bool {
++            self.handle === handle && self.receipt == receipt
++        }
++        package func validate(latch: OfficialSourceDecodeCancellation, parallel: Bool,
++                              measurement: OfficialSourceDecodeMeasurement) throws {
++            try handle.validateReceipt(receipt, operation: DecodeOperation(latch: latch,
++                parallel: parallel, measurement: measurement))
++        }
++    }
++    package func makeDecodeReceiptValidator(_ receipt: OfficialSourceTrustReceipt) throws -> DecodeReceiptValidator {
++        try validateTrustedReceipt(receipt)
++        return DecodeReceiptValidator(handle: self, receipt: receipt)
+     }
+ 
+     private static func matchesFingerprint(

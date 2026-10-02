@@ -1,0 +1,42 @@
+{
+  "at": "2026-10-02T16:20:24.946785+00:00",
+  "commit": "b43390cee318d759fa3415fcc789f8eea3cdb7cf",
+  "comparison": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/comparison-20261002T161328.527135Z-09aab4c889434a49bfa35331789a4a27/receipt.json",
+  "comparisonSHA256": "82cc96f79f47f394938004b4b4ad9159f8a05e029725570b959534734cf3d04f",
+  "checks": {
+    "rootClean": true,
+    "stageStable": true,
+    "overlayStable": true,
+    "binaryStable": true,
+    "childrenExited": true,
+    "evidenceHashes0": true,
+    "processGone0": true,
+    "memory0": true,
+    "counts0": true,
+    "evidenceHashes1": true,
+    "processGone1": true,
+    "memory1": true,
+    "counts1": true,
+    "outputIDsEqual": true,
+    "routesEqual": true,
+    "plansEqual": true,
+    "safetyEqual": true,
+    "exactExpected": true
+  },
+  "allChecksPass": true,
+  "metrics": {
+    "offDecodeSeconds": 20.402703417,
+    "onDecodeSeconds": 19.366123042,
+    "onOffRatio": 0.949193969357203,
+    "onMeanValidationNs": 1134995.3789198606,
+    "offTokensPerSecond": 1.4213802655111154,
+    "onTokensPerSecond": 1.4974602782966249,
+    "decodeCPUIncreaseRatio": 1.121409806278956
+  },
+  "decision": "Not accepted: fixed ON validation mean limit missed. Reverse pair not run. First pair full-decode gain is a diagnostic signal only. No installed-app change.",
+  "limits": [
+    "Not repeatable representative app evidence.",
+    "No cancellation/rollback faults exercised.",
+    "No hardware ceiling established."
+  ]
+}

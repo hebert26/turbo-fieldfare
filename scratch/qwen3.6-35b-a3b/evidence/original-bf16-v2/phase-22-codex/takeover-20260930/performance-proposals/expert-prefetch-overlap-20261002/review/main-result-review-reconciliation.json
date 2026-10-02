@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-02T15:54:47.758180+00:00",
+  "reviewHashes": {
+    "opus-result-review.md": "c9007b50dd1a22f4c2dccb87a1f7cc2cf76d786fea8408da6984fff785831565",
+    "grok-prefetch-contention.md": "ac4355ccc375985d76842764742c4a6593ae22d87b4c7c8cb6274bb4e78d934f",
+    "astra-parallel-integration-boundary.md": "10a9a773399ca1ab21c6a169297b0df00cbf3886bde79db947866ee50b9429cb"
+  },
+  "acceptedFindings": [
+    "Fixed prefetch candidate fails headline speed gate despite exact outputs/routes/plans and memory passing.",
+    "Source code does not hold a coarse userspace lock around the filesystem calls. Actual lock/system-call/scheduler shares remain unmeasured.",
+    "No revival or tuning of early reads selected.",
+    "Four-lane normal-decode receipt scans are scoped separately, using prior measured idle parallel-scan benefit and unchanged safety boundaries."
+  ],
+  "corrections": [
+    "Grok sentence saying2.925916720s scan increase is smaller than2.067373208s total increase is arithmetically false: it is larger. Net categories still include map savings and other costs; this does not change rejection.",
+    "Opus wording excludes Swift lock waiting too strongly: no coarse filesystem-held lock is proved, but short identity-lock contention is not measured and cannot be excluded."
+  ],
+  "notSelected": "Additional metadata-only quiet/busy contention discriminator is not needed to retry prefetch, which is closed. Current experiment tests decode scan parallelism without competing early reads.",
+  "nextOwner": "Sol6.1 source and wrapper agents already running; no duplicates."
+}
