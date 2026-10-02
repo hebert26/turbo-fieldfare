@@ -1,0 +1,17 @@
+{
+  "at": "2026-10-02T16:39:07.050430+00:00",
+  "checks": {
+    "frozenFiles": true,
+    "stdoutMatchesResult": true,
+    "exitZero": true,
+    "stderrEmpty": true,
+    "traceHashCurrent": true,
+    "requestHashCurrent": true,
+    "gateArithmetic": true,
+    "actualCount": true,
+    "pairedSimulationCounts": true
+  },
+  "allPass": true,
+  "review": "Main read complete script. Demand-only groups, full currentTop8 exclusion from victims, fixed initial640, no early reads or resets. No grouped-pinning optimality proof claimed.",
+  "decision": "Reject this prescribed offline screen. No runtime change or timing claim."
+}

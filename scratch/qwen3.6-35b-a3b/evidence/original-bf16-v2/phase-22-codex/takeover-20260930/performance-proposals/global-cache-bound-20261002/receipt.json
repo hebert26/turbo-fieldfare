@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "status": "completed; fixed gate failed",
+  "commit": "47df2419b2b0730fd3a75de287b698c45df234cb",
+  "exit": 0,
+  "offlineOnly": true,
+  "rootClean": true,
+  "reconstruction": {
+    "everyPreplanSnapshotMatched": true,
+    "allRecordedHitSlotsMatched": true,
+    "allRecordedMissIndicesMatched": true,
+    "allPostpublicationTop8Present": true,
+    "initialLayers": 40,
+    "slotsPerLayer": 16,
+    "initialPairs": 640,
+    "maps": 1120,
+    "consumers": 8960,
+    "recordedMisses": 5337,
+    "recordedHits": 3623
+  },
+  "capacity": {
+    "pairs": 640,
+    "bytes": 4026531840,
+    "gibibytes": 3.75,
+    "pairBytes": 6291456,
+    "sameInitialBytes": true,
+    "preloadOrFreeWarmup": false,
+    "allEightCurrentConsumersPinned": true
+  },
+  "results": {
+    "recordedLFUMisses": 5337,
+    "partitionedFutureAwareMisses": 4052,
+    "globalFutureAwareMisses": 3549,
+    "globalMissesSavedVsLocal": 503,
+    "globalReductionVsLocal": 0.12413622902270484,
+    "logicalBytesSavedVsLocal": 3164602368,
+    "compulsoryFirstTouches": 2709,
+    "compulsoryLogicalReadBytes": 17043554304
+  },
+  "gate": {
+    "preRegisteredMinimumReduction": 0.25,
+    "passed": false,
+    "decision": "Do not proceed from this screen. No threshold tuning."
+  },
+  "algorithm": "At each saved map remove its future queue entries, pin its complete8(layer,expert) set, count demand misses, evict enough nonrequired residents with farthest next use, then insert only requested misses. Local pools each hold16; global pool holds640. Identity breaks equal-distance ties. Every step asserts capacity and current group residency.",
+  "optimality": "The policies use forbidden runtime future knowledge. Counts are achievable clairvoyant upper bounds on the minimum misses, not proven grouped-pin optimal minima. Compulsory first touches give a separate lower bound. Failure rejects the selected same-policy screen, not all possible global architectures.",
+  "limitations": [
+    "Saved successful29-output tool request only. No new reference outputs or route data.",
+    "Actual LFU slot transitions are exact. Initial LFU frequency/age counters are absent, so victim ranking is not recomputed from unknown prefill history.",
+    "Global initial inventory combines each layer first snapshot. The accepted serial decode has no prior write to an unvisited layer.",
+    "Logical6MiB bytes exclude metadata checks, hits, publication, actual I/O, ownership transfers, GPU execution and wall time. No speed or causal-policy claim."
+  ],
+  "artifacts": {
+    "script": "analyze.py",
+    "rawCommand": "command.json",
+    "rawStdout": "stdout.json",
+    "rawStderr": "stderr.txt",
+    "execution": "execution.json",
+    "result": "output/result.json",
+    "actualTransitions": "output/actual-transitions.json",
+    "initialInventory": "output/initial-residents.json",
+    "localSimulation": "output/local-maps.json",
+    "globalSimulation": "output/global-maps.json",
+    "inputProvenance": "input-hashes.json"
+  }
+}

@@ -1,0 +1,734 @@
+{
+  "schema": 1,
+  "completed": true,
+  "tracePath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/run-20261002T161328.568847Z-1ea5d43faad8453c9627769b9fe8750b/result.json",
+  "traceSHA256": "01ef209b031e2d8a7e6bc6c0bba4465d83c8f49390c2ce0a2d5f8559c1d3e5f7",
+  "requestPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/request.json",
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "scriptSHA256": "3735c8f8d629ff13a9e3ab76c75f9f581db41c5fe73de43af42a3cee5820c428",
+  "maps": 1120,
+  "forwardGroups": 28,
+  "consumers": 8960,
+  "capacityPairs": 640,
+  "capacityBytes": 4026531840,
+  "pairBytes": 6291456,
+  "initialResidentPairs": 640,
+  "allCurrentTop8Pinned": true,
+  "recordedLFU": {
+    "misses": 5337,
+    "hits": 3623,
+    "logicalReadBytes": 33577500672
+  },
+  "localFutureAware": {
+    "misses": 4052,
+    "hits": 4908,
+    "logicalReadBytes": 25492979712,
+    "compulsoryFirstTouches": 2709
+  },
+  "globalFutureAware": {
+    "misses": 3549,
+    "hits": 5411,
+    "logicalReadBytes": 22328377344,
+    "compulsoryFirstTouches": 2709
+  },
+  "globalMissesSavedVsLocal": 503,
+  "globalMissReductionVsLocal": 0.12413622902270484,
+  "logicalBytesSavedVsLocal": 3164602368,
+  "perLayer": [
+    {
+      "layer": 0,
+      "recordedLFU": {
+        "misses": 186,
+        "hits": 38
+      },
+      "localFutureAware": {
+        "misses": 158,
+        "hits": 66
+      },
+      "globalFutureAware": {
+        "misses": 113,
+        "hits": 111
+      },
+      "globalMissesSavedVsLocal": 45,
+      "compulsoryFirstTouches": 89
+    },
+    {
+      "layer": 1,
+      "recordedLFU": {
+        "misses": 176,
+        "hits": 48
+      },
+      "localFutureAware": {
+        "misses": 141,
+        "hits": 83
+      },
+      "globalFutureAware": {
+        "misses": 120,
+        "hits": 104
+      },
+      "globalMissesSavedVsLocal": 21,
+      "compulsoryFirstTouches": 96
+    },
+    {
+      "layer": 2,
+      "recordedLFU": {
+        "misses": 143,
+        "hits": 81
+      },
+      "localFutureAware": {
+        "misses": 122,
+        "hits": 102
+      },
+      "globalFutureAware": {
+        "misses": 121,
+        "hits": 103
+      },
+      "globalMissesSavedVsLocal": 1,
+      "compulsoryFirstTouches": 96
+    },
+    {
+      "layer": 3,
+      "recordedLFU": {
+        "misses": 165,
+        "hits": 59
+      },
+      "localFutureAware": {
+        "misses": 123,
+        "hits": 101
+      },
+      "globalFutureAware": {
+        "misses": 108,
+        "hits": 116
+      },
+      "globalMissesSavedVsLocal": 15,
+      "compulsoryFirstTouches": 85
+    },
+    {
+      "layer": 4,
+      "recordedLFU": {
+        "misses": 145,
+        "hits": 79
+      },
+      "localFutureAware": {
+        "misses": 115,
+        "hits": 109
+      },
+      "globalFutureAware": {
+        "misses": 102,
+        "hits": 122
+      },
+      "globalMissesSavedVsLocal": 13,
+      "compulsoryFirstTouches": 81
+    },
+    {
+      "layer": 5,
+      "recordedLFU": {
+        "misses": 137,
+        "hits": 87
+      },
+      "localFutureAware": {
+        "misses": 102,
+        "hits": 122
+      },
+      "globalFutureAware": {
+        "misses": 93,
+        "hits": 131
+      },
+      "globalMissesSavedVsLocal": 9,
+      "compulsoryFirstTouches": 72
+    },
+    {
+      "layer": 6,
+      "recordedLFU": {
+        "misses": 110,
+        "hits": 114
+      },
+      "localFutureAware": {
+        "misses": 85,
+        "hits": 139
+      },
+      "globalFutureAware": {
+        "misses": 83,
+        "hits": 141
+      },
+      "globalMissesSavedVsLocal": 2,
+      "compulsoryFirstTouches": 67
+    },
+    {
+      "layer": 7,
+      "recordedLFU": {
+        "misses": 106,
+        "hits": 118
+      },
+      "localFutureAware": {
+        "misses": 74,
+        "hits": 150
+      },
+      "globalFutureAware": {
+        "misses": 68,
+        "hits": 156
+      },
+      "globalMissesSavedVsLocal": 6,
+      "compulsoryFirstTouches": 53
+    },
+    {
+      "layer": 8,
+      "recordedLFU": {
+        "misses": 117,
+        "hits": 107
+      },
+      "localFutureAware": {
+        "misses": 92,
+        "hits": 132
+      },
+      "globalFutureAware": {
+        "misses": 85,
+        "hits": 139
+      },
+      "globalMissesSavedVsLocal": 7,
+      "compulsoryFirstTouches": 68
+    },
+    {
+      "layer": 9,
+      "recordedLFU": {
+        "misses": 122,
+        "hits": 102
+      },
+      "localFutureAware": {
+        "misses": 96,
+        "hits": 128
+      },
+      "globalFutureAware": {
+        "misses": 77,
+        "hits": 147
+      },
+      "globalMissesSavedVsLocal": 19,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 10,
+      "recordedLFU": {
+        "misses": 137,
+        "hits": 87
+      },
+      "localFutureAware": {
+        "misses": 107,
+        "hits": 117
+      },
+      "globalFutureAware": {
+        "misses": 93,
+        "hits": 131
+      },
+      "globalMissesSavedVsLocal": 14,
+      "compulsoryFirstTouches": 69
+    },
+    {
+      "layer": 11,
+      "recordedLFU": {
+        "misses": 132,
+        "hits": 92
+      },
+      "localFutureAware": {
+        "misses": 104,
+        "hits": 120
+      },
+      "globalFutureAware": {
+        "misses": 91,
+        "hits": 133
+      },
+      "globalMissesSavedVsLocal": 13,
+      "compulsoryFirstTouches": 72
+    },
+    {
+      "layer": 12,
+      "recordedLFU": {
+        "misses": 121,
+        "hits": 103
+      },
+      "localFutureAware": {
+        "misses": 96,
+        "hits": 128
+      },
+      "globalFutureAware": {
+        "misses": 89,
+        "hits": 135
+      },
+      "globalMissesSavedVsLocal": 7,
+      "compulsoryFirstTouches": 67
+    },
+    {
+      "layer": 13,
+      "recordedLFU": {
+        "misses": 130,
+        "hits": 94
+      },
+      "localFutureAware": {
+        "misses": 104,
+        "hits": 120
+      },
+      "globalFutureAware": {
+        "misses": 87,
+        "hits": 137
+      },
+      "globalMissesSavedVsLocal": 17,
+      "compulsoryFirstTouches": 62
+    },
+    {
+      "layer": 14,
+      "recordedLFU": {
+        "misses": 127,
+        "hits": 97
+      },
+      "localFutureAware": {
+        "misses": 95,
+        "hits": 129
+      },
+      "globalFutureAware": {
+        "misses": 83,
+        "hits": 141
+      },
+      "globalMissesSavedVsLocal": 12,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 15,
+      "recordedLFU": {
+        "misses": 116,
+        "hits": 108
+      },
+      "localFutureAware": {
+        "misses": 91,
+        "hits": 133
+      },
+      "globalFutureAware": {
+        "misses": 77,
+        "hits": 147
+      },
+      "globalMissesSavedVsLocal": 14,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 16,
+      "recordedLFU": {
+        "misses": 119,
+        "hits": 105
+      },
+      "localFutureAware": {
+        "misses": 91,
+        "hits": 133
+      },
+      "globalFutureAware": {
+        "misses": 77,
+        "hits": 147
+      },
+      "globalMissesSavedVsLocal": 14,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 17,
+      "recordedLFU": {
+        "misses": 114,
+        "hits": 110
+      },
+      "localFutureAware": {
+        "misses": 86,
+        "hits": 138
+      },
+      "globalFutureAware": {
+        "misses": 75,
+        "hits": 149
+      },
+      "globalMissesSavedVsLocal": 11,
+      "compulsoryFirstTouches": 56
+    },
+    {
+      "layer": 18,
+      "recordedLFU": {
+        "misses": 107,
+        "hits": 117
+      },
+      "localFutureAware": {
+        "misses": 80,
+        "hits": 144
+      },
+      "globalFutureAware": {
+        "misses": 63,
+        "hits": 161
+      },
+      "globalMissesSavedVsLocal": 17,
+      "compulsoryFirstTouches": 51
+    },
+    {
+      "layer": 19,
+      "recordedLFU": {
+        "misses": 112,
+        "hits": 112
+      },
+      "localFutureAware": {
+        "misses": 87,
+        "hits": 137
+      },
+      "globalFutureAware": {
+        "misses": 77,
+        "hits": 147
+      },
+      "globalMissesSavedVsLocal": 10,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 20,
+      "recordedLFU": {
+        "misses": 117,
+        "hits": 107
+      },
+      "localFutureAware": {
+        "misses": 92,
+        "hits": 132
+      },
+      "globalFutureAware": {
+        "misses": 78,
+        "hits": 146
+      },
+      "globalMissesSavedVsLocal": 14,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 21,
+      "recordedLFU": {
+        "misses": 122,
+        "hits": 102
+      },
+      "localFutureAware": {
+        "misses": 86,
+        "hits": 138
+      },
+      "globalFutureAware": {
+        "misses": 73,
+        "hits": 151
+      },
+      "globalMissesSavedVsLocal": 13,
+      "compulsoryFirstTouches": 52
+    },
+    {
+      "layer": 22,
+      "recordedLFU": {
+        "misses": 142,
+        "hits": 82
+      },
+      "localFutureAware": {
+        "misses": 99,
+        "hits": 125
+      },
+      "globalFutureAware": {
+        "misses": 87,
+        "hits": 137
+      },
+      "globalMissesSavedVsLocal": 12,
+      "compulsoryFirstTouches": 69
+    },
+    {
+      "layer": 23,
+      "recordedLFU": {
+        "misses": 140,
+        "hits": 84
+      },
+      "localFutureAware": {
+        "misses": 88,
+        "hits": 136
+      },
+      "globalFutureAware": {
+        "misses": 72,
+        "hits": 152
+      },
+      "globalMissesSavedVsLocal": 16,
+      "compulsoryFirstTouches": 57
+    },
+    {
+      "layer": 24,
+      "recordedLFU": {
+        "misses": 109,
+        "hits": 115
+      },
+      "localFutureAware": {
+        "misses": 86,
+        "hits": 138
+      },
+      "globalFutureAware": {
+        "misses": 66,
+        "hits": 158
+      },
+      "globalMissesSavedVsLocal": 20,
+      "compulsoryFirstTouches": 50
+    },
+    {
+      "layer": 25,
+      "recordedLFU": {
+        "misses": 136,
+        "hits": 88
+      },
+      "localFutureAware": {
+        "misses": 101,
+        "hits": 123
+      },
+      "globalFutureAware": {
+        "misses": 81,
+        "hits": 143
+      },
+      "globalMissesSavedVsLocal": 20,
+      "compulsoryFirstTouches": 58
+    },
+    {
+      "layer": 26,
+      "recordedLFU": {
+        "misses": 116,
+        "hits": 108
+      },
+      "localFutureAware": {
+        "misses": 91,
+        "hits": 133
+      },
+      "globalFutureAware": {
+        "misses": 79,
+        "hits": 145
+      },
+      "globalMissesSavedVsLocal": 12,
+      "compulsoryFirstTouches": 64
+    },
+    {
+      "layer": 27,
+      "recordedLFU": {
+        "misses": 128,
+        "hits": 96
+      },
+      "localFutureAware": {
+        "misses": 92,
+        "hits": 132
+      },
+      "globalFutureAware": {
+        "misses": 83,
+        "hits": 141
+      },
+      "globalMissesSavedVsLocal": 9,
+      "compulsoryFirstTouches": 63
+    },
+    {
+      "layer": 28,
+      "recordedLFU": {
+        "misses": 158,
+        "hits": 66
+      },
+      "localFutureAware": {
+        "misses": 109,
+        "hits": 115
+      },
+      "globalFutureAware": {
+        "misses": 85,
+        "hits": 139
+      },
+      "globalMissesSavedVsLocal": 24,
+      "compulsoryFirstTouches": 64
+    },
+    {
+      "layer": 29,
+      "recordedLFU": {
+        "misses": 129,
+        "hits": 95
+      },
+      "localFutureAware": {
+        "misses": 95,
+        "hits": 129
+      },
+      "globalFutureAware": {
+        "misses": 80,
+        "hits": 144
+      },
+      "globalMissesSavedVsLocal": 15,
+      "compulsoryFirstTouches": 58
+    },
+    {
+      "layer": 30,
+      "recordedLFU": {
+        "misses": 140,
+        "hits": 84
+      },
+      "localFutureAware": {
+        "misses": 103,
+        "hits": 121
+      },
+      "globalFutureAware": {
+        "misses": 91,
+        "hits": 133
+      },
+      "globalMissesSavedVsLocal": 12,
+      "compulsoryFirstTouches": 74
+    },
+    {
+      "layer": 31,
+      "recordedLFU": {
+        "misses": 152,
+        "hits": 72
+      },
+      "localFutureAware": {
+        "misses": 116,
+        "hits": 108
+      },
+      "globalFutureAware": {
+        "misses": 106,
+        "hits": 118
+      },
+      "globalMissesSavedVsLocal": 10,
+      "compulsoryFirstTouches": 83
+    },
+    {
+      "layer": 32,
+      "recordedLFU": {
+        "misses": 137,
+        "hits": 87
+      },
+      "localFutureAware": {
+        "misses": 108,
+        "hits": 116
+      },
+      "globalFutureAware": {
+        "misses": 94,
+        "hits": 130
+      },
+      "globalMissesSavedVsLocal": 14,
+      "compulsoryFirstTouches": 71
+    },
+    {
+      "layer": 33,
+      "recordedLFU": {
+        "misses": 122,
+        "hits": 102
+      },
+      "localFutureAware": {
+        "misses": 90,
+        "hits": 134
+      },
+      "globalFutureAware": {
+        "misses": 80,
+        "hits": 144
+      },
+      "globalMissesSavedVsLocal": 10,
+      "compulsoryFirstTouches": 70
+    },
+    {
+      "layer": 34,
+      "recordedLFU": {
+        "misses": 137,
+        "hits": 87
+      },
+      "localFutureAware": {
+        "misses": 94,
+        "hits": 130
+      },
+      "globalFutureAware": {
+        "misses": 96,
+        "hits": 128
+      },
+      "globalMissesSavedVsLocal": -2,
+      "compulsoryFirstTouches": 64
+    },
+    {
+      "layer": 35,
+      "recordedLFU": {
+        "misses": 125,
+        "hits": 99
+      },
+      "localFutureAware": {
+        "misses": 96,
+        "hits": 128
+      },
+      "globalFutureAware": {
+        "misses": 94,
+        "hits": 130
+      },
+      "globalMissesSavedVsLocal": 2,
+      "compulsoryFirstTouches": 70
+    },
+    {
+      "layer": 36,
+      "recordedLFU": {
+        "misses": 157,
+        "hits": 67
+      },
+      "localFutureAware": {
+        "misses": 119,
+        "hits": 105
+      },
+      "globalFutureAware": {
+        "misses": 116,
+        "hits": 108
+      },
+      "globalMissesSavedVsLocal": 3,
+      "compulsoryFirstTouches": 84
+    },
+    {
+      "layer": 37,
+      "recordedLFU": {
+        "misses": 138,
+        "hits": 86
+      },
+      "localFutureAware": {
+        "misses": 108,
+        "hits": 116
+      },
+      "globalFutureAware": {
+        "misses": 96,
+        "hits": 128
+      },
+      "globalMissesSavedVsLocal": 12,
+      "compulsoryFirstTouches": 73
+    },
+    {
+      "layer": 38,
+      "recordedLFU": {
+        "misses": 152,
+        "hits": 72
+      },
+      "localFutureAware": {
+        "misses": 109,
+        "hits": 115
+      },
+      "globalFutureAware": {
+        "misses": 98,
+        "hits": 126
+      },
+      "globalMissesSavedVsLocal": 11,
+      "compulsoryFirstTouches": 76
+    },
+    {
+      "layer": 39,
+      "recordedLFU": {
+        "misses": 158,
+        "hits": 66
+      },
+      "localFutureAware": {
+        "misses": 121,
+        "hits": 103
+      },
+      "globalFutureAware": {
+        "misses": 112,
+        "hits": 112
+      },
+      "globalMissesSavedVsLocal": 9,
+      "compulsoryFirstTouches": 83
+    }
+  ],
+  "gate": {
+    "rule": "global misses <=75% of local misses",
+    "passed": false,
+    "decision": "reject this fixed shared-cache screen"
+  },
+  "algorithm": "Demand-only admission, equal-sized pair identity(layer,expert), complete currentTop8 pinned. Evict farthest next requested unpinned resident; no-future-use ranks last. Fixed identity tie break. Same method and initial bytes in both layouts.",
+  "optimality": "These are achievable clairvoyant simulation counts, hence upper bounds on minimum misses under their respective storage constraints. Grouped-pin optimality is not proved. They are not certified lower bounds or causal policy results.",
+  "limits": [
+    "Future routes are available only to offline victim selection. No future preload, free rewarm or cache reset.",
+    "Initial global inventory comes from the first pre-plan snapshot of each private layer. Serial execution has no writer to that layer before its first map.",
+    "Recorded slot transitions are reconstructed exactly. Initial LFU use counts/last-use clocks are absent, so its victim ranking is not independently recomputed.",
+    "Initial prefill-resident pages are not counted as compulsory first touches. A first request for any other pair is compulsory in every demand-only policy.",
+    "No physical I/O, source checks, GPU leases, memory pressure, residency transfer or runtime latency is simulated. Logical bytes are not SSD bytes.",
+    "A failed greedy clairvoyant comparison is the assigned preliminary screen, not a proof that all global policies or architectures fail. No runtime speed claim."
+  ]
+}

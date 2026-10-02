@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-02T16:33:47.742800+00:00",
+  "reviews": {
+    "opus-result-next-step.md": "48d694ab29f15070cc653136f389abe4f1ed8a1ab2b584e2ef9c2a4a626ba6e3",
+    "grok-result-next-step.md": "374343379816651aac61e655800ad1b3a3abdbfa8ccc8cb06d4d53d91a74ae50",
+    "astra-next-direction.md": "df55237534adf7baac70a7209e163a83368101294599b48938ef534403f4efec"
+  },
+  "decision": "First execute cheap offline fixed640-entry global versus partitioned16-per-layer future-aware cache replay on saved data. No model/code integration. Sol owns separate global-cache-bound-20261002 directory.",
+  "provenance": "Main selected an earlier saved Astra draft before its final rewrite. Sol was told explicitly that the offline scope stands. Final Astra selects in-path interval capture, retained as subsequent option.",
+  "qualifications": [
+    "All parallel-metadata and prefetch rejection gates remain unchanged.",
+    "Global replay must reconstruct recorded slots and misses exactly before any comparison.",
+    "Use full current Top8 pins, same initial cache, demand loading only, no larger capacity.",
+    "Farthest-next-use counts under grouped pins must not be called mathematical optima without proof. A failed preliminary screen does not prove all global cache designs fail.",
+    "Opus standalone A/B/C is not selected: zero-byte paths omit checks; removing checks or bytes changes contention and memory state. Cross-arm subtraction cannot prove an additive critical-path cost.",
+    "Grok28-token teacher-forced union is not selected: known future token sequence is not live generation; union changes actual caching and may not preserve captured plans; added612MiB may threaten30% free-memory floor. Proposed1.6\u20131.8tokens/s ceiling is conditional, not measured or a hardware limit.",
+    "Any later protected-read interval capture needs unchanged workload and a separate observation-overhead gate. No new unit-test code for these experiments."
+  ],
+  "productionChange": false
+}
