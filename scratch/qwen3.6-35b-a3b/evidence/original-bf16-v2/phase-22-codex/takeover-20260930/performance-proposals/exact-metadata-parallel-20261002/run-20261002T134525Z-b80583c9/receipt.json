@@ -1,0 +1,64 @@
+{
+  "commit": "d6d7bc519f5110de21286cc9f3320a8a8c4b3f75",
+  "commands": [
+    {
+      "argv": [
+        "python3",
+        "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/preflight.py"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "pgrep",
+        "-fl",
+        "TurboFieldfareExactMetadataCost|TurboFieldfareExactMetadataParallel|TurboFieldfareExactBlockProbe|resident-kernel-timing|source64-token4|qwen.*harness"
+      ],
+      "exit": 1
+    },
+    {
+      "argv": [
+        "system_profiler",
+        "SPHardwareDataType"
+      ],
+      "exit": 0
+    }
+  ],
+  "environment": {
+    "TURBO_QWEN_SOURCE_VALIDATION_FAST": "1",
+    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN": "0"
+  },
+  "memorySamplingSeconds": 2,
+  "wholeRunTimeoutSeconds": 60,
+  "binarySHA256": "e25d15035eb532ad7ad55c246f00793615a0a92ba5be52d383eced15a0e7d943",
+  "stageHashes": {
+    "baseline/Package.swift": "c36fc9a06e7bc5c22102c5954739fab2122b7d1d74b8450bbb39287f8e570eaa",
+    "baseline/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift": "4686ec27e9c81d9901865270ded1618c116907169f21127ef831cd84c6a33766",
+    "baseline-hashes.json": "d182b5129706ca2c4d3233b9ff01d45e5eac10b29c161a7cca38ee098eb0a43b",
+    "baseline-proof.json": "dd17d8e61bb9fb526d177466c19880e31dd5f089444a217f0ac49762fb1e37e4",
+    "build.py": "f636d2fc2111232c09eadb4abbca2bea7d1cfd5837ee5e0b9987489348d864ef",
+    "candidate/Package.swift": "56dd295a98457969e310a185c368e7df26934f79e54354eb7f623f3aadef07e7",
+    "candidate/Sources/TurboFieldfareExactMetadataParallel/Command.swift": "154ed243472bb818adc83396e7687eacf32c42c5d67f1f0f77decb2a285d8073",
+    "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift": "2ae4425f4d178bdc226d10ed369ad2fc23becaea3a7f181b1075ffb8f601921a",
+    "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift": "ac581c155e9f581124559f6e8e83b29fd740cafdbb8e3d20469a7068924040b9",
+    "evidence_helpers.py": "edb42e483d4255df6800aa2208807e45a380436cd86750fb598d24b62b2288f4",
+    "patch/forward.diff": "120d84bb8e1754b5eed89b9deb8f7eec58682672c4d6791b3446f06c992dd3e1",
+    "patch/inverse.diff": "3317d5874d5cd1bd236112ebee29418d110bcaa33641cff5409cdbc61d117885",
+    "patch/vs-metadata-cost.diff": "6fb71e8cfc60a9b8ff5ca250db70a63f07cae27542e17c7790fff0a3658058a8",
+    "preflight-plan.json": "e756f0371532715788bb38207bd3ebe458fb89a8edb6f33a81e96fbe41b06c42",
+    "preflight.py": "734239e5f882e5b06c825a2b952a277c6090f39bd470b23ccf34e829c28087a0",
+    "prepare.py": "67510a10721f831befa8fec76d170acc34c9187c70e9f97f813a3ba9855dfbdc",
+    "receipt.json": "d6ca1efdd09692940da05e6d466b774013074d5b021c65da7340248db3c044dd",
+    "run.py": "897b1b5fd650ebccdec8c420490a6b3e218bba213eeb662371f0045a3ecd6541",
+    "static-checks.json": "cbe9071cdc6de756bcccffe131f0ce86423bf4ab40d95d746961742b9911917d"
+  },
+  "probeCommand": [
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/build/release/TurboFieldfareExactMetadataParallel",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/run-20261002T134525Z-b80583c9/result.json"
+  ],
+  "ownedPID": 38266,
+  "childExit": 0,
+  "exit": 0,
+  "wallSeconds": 5.067816082853824
+}

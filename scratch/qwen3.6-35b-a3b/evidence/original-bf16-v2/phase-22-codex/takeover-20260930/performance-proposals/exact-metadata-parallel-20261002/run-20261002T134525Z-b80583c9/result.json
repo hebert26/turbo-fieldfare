@@ -1,0 +1,2308 @@
+{
+  "batches" : [
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 0,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 139205000,
+      "userCPUNanoseconds" : 14204000,
+      "wallNanoseconds" : 153529916,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 0,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 187348000,
+      "userCPUNanoseconds" : 20208000,
+      "wallNanoseconds" : 130678833,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 0,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 210339000,
+      "userCPUNanoseconds" : 20988000,
+      "wallNanoseconds" : 93449584,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 0,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 209275000,
+      "userCPUNanoseconds" : 20855000,
+      "wallNanoseconds" : 93168333,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 0,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 170949000,
+      "userCPUNanoseconds" : 17872000,
+      "wallNanoseconds" : 118383583,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 0,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 136275000,
+      "userCPUNanoseconds" : 14134000,
+      "wallNanoseconds" : 150726542,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 1,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 130119000,
+      "userCPUNanoseconds" : 13462000,
+      "wallNanoseconds" : 143837167,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 1,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 162235000,
+      "userCPUNanoseconds" : 17132000,
+      "wallNanoseconds" : 112893833,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 1,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 240175000,
+      "userCPUNanoseconds" : 23127000,
+      "wallNanoseconds" : 106656875,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 1,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 249328000,
+      "userCPUNanoseconds" : 24215000,
+      "wallNanoseconds" : 112244083,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 1,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 170330000,
+      "userCPUNanoseconds" : 18333000,
+      "wallNanoseconds" : 118430292,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 1,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 131000000,
+      "userCPUNanoseconds" : 13349000,
+      "wallNanoseconds" : 144440583,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 2,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 133849000,
+      "userCPUNanoseconds" : 13497000,
+      "wallNanoseconds" : 147480459,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 2,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 173239000,
+      "userCPUNanoseconds" : 18544000,
+      "wallNanoseconds" : 127921792,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 2,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 218850000,
+      "userCPUNanoseconds" : 21524000,
+      "wallNanoseconds" : 96971500,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 2,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 210280000,
+      "userCPUNanoseconds" : 20985000,
+      "wallNanoseconds" : 93937542,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 2,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 170143000,
+      "userCPUNanoseconds" : 17693000,
+      "wallNanoseconds" : 117884917,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 2,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 134820000,
+      "userCPUNanoseconds" : 13609000,
+      "wallNanoseconds" : 148574750,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 3,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 131110000,
+      "userCPUNanoseconds" : 13508000,
+      "wallNanoseconds" : 144675500,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 3,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 161342000,
+      "userCPUNanoseconds" : 16999000,
+      "wallNanoseconds" : 112138291,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 3,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 259201000,
+      "userCPUNanoseconds" : 25239000,
+      "wallNanoseconds" : 112032166,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 3,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 317078000,
+      "userCPUNanoseconds" : 32036000,
+      "wallNanoseconds" : 140272041,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 3,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 187041000,
+      "userCPUNanoseconds" : 20825000,
+      "wallNanoseconds" : 130181083,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 3,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 138213000,
+      "userCPUNanoseconds" : 14076000,
+      "wallNanoseconds" : 152528708,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 4,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 135322000,
+      "userCPUNanoseconds" : 13940000,
+      "wallNanoseconds" : 149408000,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 4,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 180013000,
+      "userCPUNanoseconds" : 19332000,
+      "wallNanoseconds" : 125892041,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 4,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 225942000,
+      "userCPUNanoseconds" : 22622000,
+      "wallNanoseconds" : 99521333,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 4,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 215884000,
+      "userCPUNanoseconds" : 21572000,
+      "wallNanoseconds" : 95568167,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 4,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 167294000,
+      "userCPUNanoseconds" : 17180000,
+      "wallNanoseconds" : 115650833,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 4,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 136185000,
+      "userCPUNanoseconds" : 13998000,
+      "wallNanoseconds" : 150903084,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 5,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 131965000,
+      "userCPUNanoseconds" : 13626000,
+      "wallNanoseconds" : 145715083,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 5,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 166488000,
+      "userCPUNanoseconds" : 17927000,
+      "wallNanoseconds" : 115918833,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 5,
+      "order" : "1,2,4",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 225141000,
+      "userCPUNanoseconds" : 21850000,
+      "wallNanoseconds" : 99141750,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 5,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 238676000,
+      "userCPUNanoseconds" : 23578000,
+      "wallNanoseconds" : 116185375,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 5,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 167159000,
+      "userCPUNanoseconds" : 17668000,
+      "wallNanoseconds" : 116146042,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 384,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 256,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 9984,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 512,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        }
+      },
+      "clockEnabled" : false,
+      "cycle" : 5,
+      "order" : "4,2,1",
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 128,
+      "systemCPUNanoseconds" : 129603000,
+      "userCPUNanoseconds" : 13337000,
+      "wallNanoseconds" : 142987583,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5038332
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 3912434
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 696470
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 22602721
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 880021
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2402049
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 2506763
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 145875
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1282126
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 36422669
+        }
+      },
+      "clockEnabled" : true,
+      "cycle" : 0,
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 32757000,
+      "timingControlOnly" : true,
+      "userCPUNanoseconds" : 3668000,
+      "wallNanoseconds" : 36423709,
+      "workers" : 1
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5560450
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 5160048
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1021615
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 31387117
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1033085
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2471837
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 3430715
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 166084
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1613959
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 30666414
+        }
+      },
+      "clockEnabled" : true,
+      "cycle" : 1,
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 43751000,
+      "timingControlOnly" : true,
+      "userCPUNanoseconds" : 4898000,
+      "wallNanoseconds" : 30676125,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5721292
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 6579556
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1236686
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 43037066
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1222010
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2536589
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 4322491
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 160127
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1725373
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 25389292
+        }
+      },
+      "clockEnabled" : true,
+      "cycle" : 2,
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 57544000,
+      "timingControlOnly" : true,
+      "userCPUNanoseconds" : 5695000,
+      "wallNanoseconds" : 25397625,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5480081
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 7880588
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1424813
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 48036092
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1360237
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2580294
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 4906355
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 174209
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1465702
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 27421460
+        }
+      },
+      "clockEnabled" : true,
+      "cycle" : 3,
+      "peakTrackedActiveLanes" : 4,
+      "peakTrackedOwnedFileDescriptors" : 4,
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 63043000,
+      "timingControlOnly" : true,
+      "userCPUNanoseconds" : 6841000,
+      "wallNanoseconds" : 27431625,
+      "workers" : 4
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5555252
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 5407251
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1109214
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 32390512
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 1082193
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2626289
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 3593550
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 167129
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1518918
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 31333583
+        }
+      },
+      "clockEnabled" : true,
+      "cycle" : 4,
+      "peakTrackedActiveLanes" : 2,
+      "peakTrackedOwnedFileDescriptors" : 2,
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 45006000,
+      "timingControlOnly" : true,
+      "userCPUNanoseconds" : 5301000,
+      "wallNanoseconds" : 31343417,
+      "workers" : 2
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5147622
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 3911089
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 698218
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 22582017
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 893832
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2449706
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 2487593
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 162997
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1316714
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 36640625
+        }
+      },
+      "clockEnabled" : true,
+      "cycle" : 5,
+      "peakTrackedActiveLanes" : 1,
+      "peakTrackedOwnedFileDescriptors" : 1,
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 32896000,
+      "timingControlOnly" : true,
+      "userCPUNanoseconds" : 3702000,
+      "wallNanoseconds" : 36642291,
+      "workers" : 1
+    }
+  ],
+  "clockOnControlCalls" : 192,
+  "feasibilityGates" : [
+    {
+      "forwardTotalValidationRatio" : 0.82003820793314386,
+      "gainAtLeast15PercentBothOrders" : true,
+      "reverseTotalValidationRatio" : 0.80510890583026384,
+      "workers" : 2
+    },
+    {
+      "forwardTotalValidationRatio" : 0.68702410017338855,
+      "gainAtLeast15PercentBothOrders" : true,
+      "reverseTotalValidationRatio" : 0.73175005202709065,
+      "workers" : 4
+    }
+  ],
+  "handleInitializationNanoseconds" : 1001292,
+  "headlineSuccessfulCalls" : 4608,
+  "initializationSystemCPUNanoseconds" : 3678000,
+  "initializationUserCPUNanoseconds" : 4120000,
+  "metadataOnly" : true,
+  "modelConstructed" : false,
+  "overlaps" : "Worker durations are sums, not critical-path wall. heldStat\/namedStat nest in fileCheckAndRemember. All phases nest in total. Batch wall includes dispatch, allocations, joins and counter merges.",
+  "passed" : true,
+  "payloadBytesReadByAuditedPath" : 0,
+  "payloadReadEvidence" : "Static call-path audit. Fixed sizeCheckTrustedReceipt policy and handle validation. No model or tensor calls. Not system IO tracing.",
+  "productionBlockers" : [
+    "Inter-entry observation schedules differ under concurrent mutation.",
+    "Dispatch workers do not inherit caller task cancellation.",
+    "Up to four file descriptors may be open instead of one. Resource-limit failure behavior differs."
+  ],
+  "receiptFileCount" : 39,
+  "scope" : "Standalone feasibility only. Production validation stays serial. Passing cost gate permits review, not production or model-speed qualification.",
+  "sourceDescriptorSHA256" : "c1ac463726b716e7db3a9fbe5db4cb690f95be7e5779aea02e49c2020bca7a7a",
+  "trustedReceiptMetadataNanoseconds" : 13156041,
+  "warmValidationCalls" : 7,
+  "zeroMeaning" : "Clock-off primitive duration is unmeasured. Counts are actual."
+}

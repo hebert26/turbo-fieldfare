@@ -1,0 +1,9 @@
+Building for production...
+[0/6] Write sources
+[3/6] Write swift-version--58304C5D6DBC2206.txt
+[5/7] Compiling TurboFieldfareFormat GTurboFormatV1.swift
+[6/8] Compiling TurboFieldfareOfficialQwenSource OfficialIdentity.swift
+[7/9] Compiling TurboFieldfareExactMetadataParallel Command.swift
+[7/9] Write Objects.LinkFileList
+[8/9] Linking TurboFieldfareExactMetadataParallel
+Build of product 'TurboFieldfareExactMetadataParallel' complete! (24.81s)

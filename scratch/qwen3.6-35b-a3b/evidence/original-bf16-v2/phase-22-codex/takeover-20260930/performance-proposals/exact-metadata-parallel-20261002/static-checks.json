@@ -1,0 +1,9 @@
+{
+  "forwardApplyCheck": 0,
+  "inverseApplyCheck": 0,
+  "pythonAST": "passed",
+  "productionInputEquality": "passed",
+  "app019SourceHashes": 731,
+  "buildOrRun": false,
+  "testCodeAdded": false
+}

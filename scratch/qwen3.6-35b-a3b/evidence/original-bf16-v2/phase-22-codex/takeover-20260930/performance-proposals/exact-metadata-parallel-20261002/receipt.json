@@ -1,0 +1,47 @@
+{
+  "status": "FROZEN_STAGED_NO_EXECUTION",
+  "baselineCommit": "d6d7bc519f5110de21286cc9f3320a8a8c4b3f75",
+  "changedSourceCopies": [
+    "Package.swift",
+    "Sources/TurboFieldfareExactMetadataParallel/Command.swift",
+    "Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift",
+    "Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift"
+  ],
+  "forwardSHA256": "120d84bb8e1754b5eed89b9deb8f7eec58682672c4d6791b3446f06c992dd3e1",
+  "inverseSHA256": "3317d5874d5cd1bd236112ebee29418d110bcaa33641cff5409cdbc61d117885",
+  "deltaFromMetadataCostSHA256": "6fb71e8cfc60a9b8ff5ca250db70a63f07cae27542e17c7790fff0a3658058a8",
+  "schedule": "Factory completes one full serial validation on the same retained handle and immutable receipt. Warm OFF/ON once per worker mode. Six cycles of 1/2/4 then 4/2/1,128 calls per mode per order:4608 clock-off headline calls. Six32-call clock-on control batches:192 calls. Same LFU/model path is not used; no model is constructed.",
+  "gate": "Each2/4 mode must have whole-validation elapsed ratio<=0.85 versus worker1 in BOTH balanced orders. ClockON never qualifies a gain. No model trial is authorized by this receipt.",
+  "intervals": "Whole batch includes all dispatch, joins, allocations, result merges, resource counter locks and per-call guards. Total inclusive method wall overlaps all child intervals. Worker file intervals are sums, not critical-path wall. heldStat/namedStat nest in fileCheckAndRemember. Do not sum nested durations. OFF primitive wall zero means unmeasured; OFF counts are actual.",
+  "checkCounts": "Pinned N39. Every success has3bindings,4root checks,2full listings,78fresh file opens/fstats/fstatats/checks/closes. Both scans independently dispatch and join. Worker1 uses the original serial validation body with counters. Count checks apply equally to1/2/4.",
+  "ownership": "Private diagnostic lane is narrowly unchecked Sendable. It exposes no arbitrary closure. Its strong retained handle is used only for immutable sourceFD/allowedNames and existing locked remember. One dispatch job owns each lane-local collector. Completed scalar snapshot and first error cross a result lock; caller merges only after DispatchGroup.wait. Shared resource counters use one short lock with no filesystem call under it. No existing collector is shared with workers.",
+  "errors": "Sorted receipt has contiguous nonoverlapping lane partitions. Each lane continues through every assigned entry after an error. All lanes join and close owned file FDs before the lowest receipt-index error is thrown. On any entry error the post-scan root check is skipped, as in serial. Existing per-entry predicates and short-circuit stat order/messages/open flags remain. No retry, resource-limit increase or fallback hides errors.",
+  "resourceEvidence": "Tracks acquired-file ownership through deferred close and active lanes. Peaks are tracked ownership, not system-wide FD tracing. Worker1 has one serial active entry.2/4 have at most one open file per lane. Existing root descriptors remain retained. Diagnostic uses small fixed lane/result allocations only.",
+  "productionBlockers": [
+    "Concurrent inter-entry observation schedules differ under mutation. Lowest-index error is deterministic but not serial temporal equivalence.",
+    "Dispatch lacks caller task inheritance. Worker Task.checkCancellation is not linked to caller cancellation. This synchronous standalone command has no task cancellation source.",
+    "Up to4fresh file FDs can be held instead of1. EMFILE/failure timing can differ. No production integration is justified by success."
+  ],
+  "payloadReadEvidence": "Static audit only. Fixed OfficialSourceTrust.verify(.sizeCheckTrustedReceipt), OfficialSourceHandle init, serial factory validation and metadata-only diagnostic. No payload hash/read API, tensor/model construction or GPU. Output zero is an audited call-path assertion, not syscall-byte tracing.",
+  "guard": "Local preflight pins current d6d7bc5 and all731app019inputs.3fe..d6d Sources/Tests/Scripts/Package equality is proven. Same installedapp019, Gemma receipt/stat/manifest, OS26/Swift6.2/disk20GiB/free30/process checks. Main-only source-overlay build linkage and raw streams.60s owned-child deadline; memory sampling2s. No guard/build/command executed by Sol.",
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/run.py",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+    ]
+  ],
+  "flags": {
+    "TURBO_QWEN_SOURCE_VALIDATION_FAST": "1",
+    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN": "0"
+  },
+  "hashes": "frozen-hashes.json"
+}

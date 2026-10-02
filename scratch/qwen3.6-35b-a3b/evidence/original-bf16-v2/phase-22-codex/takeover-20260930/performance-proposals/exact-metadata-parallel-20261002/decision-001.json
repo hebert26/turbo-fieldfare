@@ -1,0 +1,60 @@
+{
+  "status": "STANDALONE_FEASIBILITY_PASS_PRODUCTION_NOT_QUALIFIED",
+  "baseline": "d6d7bc519f5110de21286cc9f3320a8a8c4b3f75",
+  "run": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-parallel-20261002/run-20261002T134525Z-b80583c9",
+  "buildExit": 0,
+  "exit": 0,
+  "childExit": 0,
+  "wallSeconds": 5.067816082853824,
+  "minSystemFreePercent": 55,
+  "headlineSuccessfulCalls": 4608,
+  "clockOnControlCalls": 192,
+  "warmCalls": 7,
+  "gates": [
+    {
+      "forwardTotalValidationRatio": 0.8200382079331439,
+      "gainAtLeast15PercentBothOrders": true,
+      "reverseTotalValidationRatio": 0.8051089058302638,
+      "workers": 2
+    },
+    {
+      "forwardTotalValidationRatio": 0.6870241001733886,
+      "gainAtLeast15PercentBothOrders": true,
+      "reverseTotalValidationRatio": 0.7317500520270906,
+      "workers": 4
+    }
+  ],
+  "measurements": [
+    {
+      "workers": 1,
+      "medianMillisecondsPerValidation": 1.15646566015625,
+      "peakTrackedReceiptFileDescriptors": 1,
+      "totalCPUSeconds": 1.772406
+    },
+    {
+      "workers": 2,
+      "medianMillisecondsPerValidation": 0.9229238281250001,
+      "peakTrackedReceiptFileDescriptors": 2,
+      "totalCPUSeconds": 2.283294
+    },
+    {
+      "workers": 4,
+      "medianMillisecondsPerValidation": 0.77602766796875,
+      "peakTrackedReceiptFileDescriptors": 4,
+      "totalCPUSeconds": 3.09876
+    }
+  ],
+  "finding": "Both 2 and 4 workers meet the fixed15% total-validation gain gate in bothorders. Four workers reduce elapsed validation time26.8%-31.3%. This is not measured model/app throughput.",
+  "productionBlockers": [
+    "Inter-entry observation schedules differ under concurrent mutation.",
+    "Dispatch workers do not inherit caller task cancellation.",
+    "Up to four file descriptors may be open instead of one. Resource-limit failure behavior differs."
+  ],
+  "limitations": [
+    "Per-file checks and full scan boundaries retained; concurrent mutation schedules are not serial-equivalent.",
+    "Resource peaks track ownership, not process/system syscall tracing. Serial max1 is structural.",
+    "Clock-off counts and allocations are included. Clock-on worker sums overlap and do not qualify gains.",
+    "No payload read/model/GPU by fixed audited call path. No app changes or hardware ceiling claim."
+  ],
+  "next": "Read independent result/next-lever reviews. Resolve cancellation, FD pressure and error semantics before any production integration; preserve exact arithmetic and source checks."
+}
