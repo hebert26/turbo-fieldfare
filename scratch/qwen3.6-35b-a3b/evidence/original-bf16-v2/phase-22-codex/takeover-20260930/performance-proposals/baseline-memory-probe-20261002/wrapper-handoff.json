@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "head": "82a1266a005b0602ec368201c9f3d27a970d6c92",
+  "product": "TurboFieldfareBaselineMemoryProbe",
+  "mode": "serial",
+  "files": {
+    "run.py": "0bbacb401dc3544ba8f053948d2c1e8434c48fc8379153487d104b57e2496974",
+    "preflight.py": "ce57d0ad4f3115b0d6815d1c34af283dd4b0fb3d033e7fa20f978a6fba1b75af",
+    "preflight-plan.json": "8e06557ef71b20ed96dffee87e367a9255956be8bed64b5b950305d732f9c11c",
+    "sampler.py": "ca130227ba43a9430c777efc4b7b2ffb07c8bf71e7120024e92a6ef34a14a918",
+    "analyze.py": "9021280fa0d63c51e9d7d3ee91be657bfd3a6a3694708a85480c44b105028f51"
+  },
+  "command": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/run.py",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+  ],
+  "analysisCommand": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/analyze.py",
+    "RUN_PATH_FROM_RUN_STDOUT"
+  ],
+  "mainOnly": true,
+  "oneModelChild": true,
+  "admissionMinimumFreePercent": 50,
+  "liveMinimumFreePercent": 30,
+  "wholeRunTimeoutSeconds": 420,
+  "memorySampleSeconds": 2,
+  "optionalSamplerSeconds": 2,
+  "clock": "SDK CLOCK_UPTIME_RAW",
+  "staticChecks": "Python AST and JSON parse only. No script, build, test, or model run.",
+  "partialEvidence": "Raw stderr phases and process/system samples survive abort. A result file is not required for partial memory evidence.",
+  "resultGate": "Complete exit 0, exact 29 IDs including EOS, 28 consumed inputs, 1120 accepted routes, final position1203/pending1, serial transaction and cleanup checks, internal and external memory floors.",
+  "timingLimit": "Exploratory timing only. Request excludes model load. No speed comparison.",
+  "markerLimit": "The last saved phase is evidence only. residencyRequestAfter means the call returned, not physical residency.",
+  "buildRequirement": "Main must use the source owner frozen inventory, stable build receipt, and matching overlay/binary hashes. This handoff is not build evidence."
+}

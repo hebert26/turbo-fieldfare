@@ -1,0 +1,79 @@
+{
+  "schema": 1,
+  "status": "frozen-not-built-not-run",
+  "head": "82a1266a005b0602ec368201c9f3d27a970d6c92",
+  "productionAnchor": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "product": "TurboFieldfareBaselineMemoryProbe",
+  "purpose": "Sparse memory attribution during one unchanged serial diagnostic. No memory or performance fix.",
+  "sourceManifest": "frozen-source-hashes.json",
+  "sourceManifestSHA256": "538afbb9638ec79b36f65b6a9ea694cc41f36a55ba6252d2ccc1c6e2d159158a",
+  "sourceCopies": [
+    "candidate/Package.swift",
+    "candidate/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift",
+    "candidate/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenBaselineMemoryPhaseProbe.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "candidate/Sources/TurboFieldfareBaselineMemoryProbe/Command.swift"
+  ],
+  "patches": [
+    "patch/forward.diff",
+    "patch/inverse.diff",
+    "patch/versus-recurrent.diff"
+  ],
+  "checks": "Forward patch check and copied-baseline inverse round trip passed. Source hashes and wrapper hashes match. Python AST only. No builds, tests, model runs or payload reads.",
+  "settings": {
+    "inputTokens": 1175,
+    "outputTokensIncludingEOS": 29,
+    "consumedDecodeInputs": 28,
+    "contextCapacity": 8192,
+    "expertSlotsPerLayer": 16,
+    "cachePolicy": "LFU",
+    "mode": "serial"
+  },
+  "memory": {
+    "admissionFreePercent": 50,
+    "liveFreePercent": 30,
+    "timeoutSeconds": 420,
+    "newRetainedMetalResources": 0,
+    "newTensorCopies": 0,
+    "stderrFramingBoundBytes": 204800,
+    "phaseRecordsMaximum": 50,
+    "notes": "Small local JSON allocations occur only at sparse boundaries. Runner scratch and layer locals may still be alive at markers. Existing cache and residency snapshots report actual owner state."
+  },
+  "semantics": "No callbacks, transaction hooks, payload reads, scheduling, pools, checks, arithmetic, routes or cache policy changes. Optional recorder defaults nil outside this product.",
+  "evidenceLimits": [
+    "Stderr lines remain available after normal process termination. Writes do not promise fsync-level crash durability.",
+    "Metal allocation size and process footprint are distinct.",
+    "Missing markers leave phase completion unknown.",
+    "No phase duration or cause is inferred from a missing marker.",
+    "Residency request return is not physical residency proof.",
+    "Request wall excludes model load."
+  ],
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/run.py",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/analyze.py",
+      "RUN_PATH_FROM_RUN_STDOUT"
+    ]
+  ],
+  "executionOwner": "Main only",
+  "next": "Main reviews frozen files, builds the source-only overlay, and runs one serial child."
+}

@@ -1,0 +1,20 @@
+{
+  "time": "2026-10-02T19:35:58.464251+00:00",
+  "run": "scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/run-20261002T192037.312697Z-2c4d23ceb7624e69b4d5bcfddf4da3d4",
+  "status": "guard-stopped-owned-child",
+  "childExit": -15,
+  "wrapperExit": 2,
+  "lastMarker": "prefillDone",
+  "wallSeconds": 172.299570709,
+  "lowestFreePercent": 28,
+  "maximumLifetimePhysicalFootprintBytes": 9212255600,
+  "completeCorrectnessResult": false,
+  "speedClaim": false,
+  "interpretation": "Optional residency request precedes wired-memory rise; compressor growth starts much earlier. No sole cause or owner attribution proved. Final zero footprint is after exit.",
+  "next": "Read Opus/Grok results; one otherwise unchanged residency-off resource comparison is proposed by Astra. Keep 30 percent floor and no retries without new evidence.",
+  "reviewsDispatched": [
+    "Astra",
+    "existing Zed Opus5.5",
+    "existing Zed Grok"
+  ]
+}
