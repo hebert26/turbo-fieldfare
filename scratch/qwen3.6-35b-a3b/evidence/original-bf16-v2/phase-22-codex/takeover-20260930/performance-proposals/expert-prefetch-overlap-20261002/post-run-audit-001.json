@@ -1,0 +1,60 @@
+{
+  "at": "2026-10-02T15:38:26.418486+00:00",
+  "status": "rejected-speed-gate; correctness and memory checks pass for this request",
+  "comparisonSHA256": "2e0e99e3c76d6a8ce2ef77bf10f4f634503a0aa0bd183d97e964be7fe21df74b",
+  "runs": [
+    {
+      "mode": "off",
+      "childPID": 28554,
+      "childGone": true,
+      "runReceiptSHA256": "f4dd2c28ce432630b12123f8528c9047a6980774026944531fcef6abcff19f33",
+      "resultSHA256": "30f9cccf51948a0b10ce76d9fa04f9dc688dc4d6dcd31f446fe815286f6383ee",
+      "memoryMinimum": 30,
+      "internalMemoryMinimum": 31,
+      "decodeSeconds": 19.955851667,
+      "promptSeconds": 130.985524,
+      "outputsPerSecond": 1.4532078351712676,
+      "logicalReads": 33577500672
+    },
+    {
+      "mode": "on",
+      "childPID": 43369,
+      "childGone": true,
+      "runReceiptSHA256": "454637f13b9dedd894d20dcc2744a55cd9a8533ecc0d94bf8ecd51420395670e",
+      "resultSHA256": "6713801922e07bf592a129f87c5110f3fe1c6209b7878b88c353eaa598d32547",
+      "memoryMinimum": 32,
+      "internalMemoryMinimum": 32,
+      "decodeSeconds": 22.023224875,
+      "promptSeconds": 128.674782333,
+      "outputsPerSecond": 1.316791712594271,
+      "logicalReads": 45512392704
+    }
+  ],
+  "ratio": 1.1035973428996124,
+  "durationIncreasePercent": 10.359734289961242,
+  "exactOutputs": 29,
+  "exactRouteAndPlanCases": 1120,
+  "overlayInputsMatched": 5297,
+  "frozenStageFilesMatched": 31,
+  "unusedLogicalBytes": 11934892032,
+  "stageCounterDeltaSeconds": {
+    "beforeCopyValidation": 0.708785087,
+    "copy": 1.645353681,
+    "demandProtectedRead": -33.260081231,
+    "drain": 0.153780572,
+    "fullSource": 2.92591672,
+    "hint": 0.341580389,
+    "hitValidation": -0.008986475,
+    "map": -2.486952333,
+    "publicationValidation": -0.011937252,
+    "speculativeProtectedRead": 17.414679555
+  },
+  "limits": [
+    "One fixed OFF/ON pair; reverse correctly not run after gate failure.",
+    "Summed worker timings overlap; not independent critical path costs.",
+    "Requested logical bytes are not physical SSD traffic.",
+    "No installed-app change or new app speed claim.",
+    "Cancellation and adversarial source mutation were statically reviewed, not exercised by successful request."
+  ],
+  "rootClean": true
+}

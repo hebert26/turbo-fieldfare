@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-02T15:26:46.086823+00:00",
+  "scope": "run.py and compare.py static review only",
+  "hashes": {
+    "run.py": "bf88e9d16116914cc7e384c71f0c6cfa5f4face2cf50b68802c18e856d9cffba",
+    "compare.py": "45cca1b9a23a4ef1ff7e1763da9804f32a9bbe32880e99e67a7bcbe3cd072827"
+  },
+  "observations": [
+    "Own child only watchdog and memory abort; no user app termination.",
+    "Fresh commit/source/binary/installed app/Gemma metadata/platform/process/memory guards before launch.",
+    "Raw stdout/stderr/exit and unique receipt paths retained.",
+    "Serial OFF/ON; reverse ON/OFF only if first full-decode ratio <=0.95 and exact result/routes/plans/safety pass.",
+    "Both orders required; no favorable subsets replace full decode.",
+    "Missing prior CPU probe process exclusion identified and fixed by wrapper owner."
+  ],
+  "execution": "Not run",
+  "referenceLimitation": "SwiftFairy has no active relevant scroll content; no guidance applied.",
+  "remaining": [
+    "Final integrated source review",
+    "Prepare/build",
+    "Guarded serial comparison and raw result audit"
+  ]
+}

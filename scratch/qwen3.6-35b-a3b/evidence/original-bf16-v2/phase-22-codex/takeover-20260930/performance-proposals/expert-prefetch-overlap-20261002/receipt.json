@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "status": "frozen for independent review; not built or run",
+  "commit": "f210c7067b20e5c12422f59d5759d0175f474502",
+  "exclusiveOwnership": "Only expert-prefetch-overlap-20261002; no live or earlier evidence edits",
+  "candidatePaths": [
+    "candidate/Package.swift",
+    "candidate/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenCPUExpertHint.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenEarlyPrefetchCapture.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPrefetchOverlapProbe.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenProtectedEarlyPrefetch.swift",
+    "candidate/Sources/TurboFieldfareExpertPrefetchOverlap/Command.swift"
+  ],
+  "flag": {
+    "name": "TURBO_QWEN_EXPERT_PREFETCH_OVERLAP",
+    "enabledOnlyWhen": "1",
+    "default": "off",
+    "scope": "Isolated command only; no app integration"
+  },
+  "request": {
+    "sha256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+    "inputIDs": 1175,
+    "outputsIncludingEOS": 29,
+    "consumedForwards": 28,
+    "maximumContext": 8192,
+    "cachePolicy": "lfu",
+    "slotsPerLayer": 16
+  },
+  "memory": {
+    "quarantinePairs": 8,
+    "quarantineBytes": 50331648,
+    "bothModesAllocateAndTouch": true,
+    "quota": "Existing model ExpertCacheQuota reservation; no budget increase",
+    "noHiddenCapture": true,
+    "minimumSystemFreePercent": 30,
+    "owners": "One model and runner per fresh child. Fixed buffers, admitted ranges, actual cache and both quota owners stay retained through join/import settlement. No quarantine buffer reaches GPU."
+  },
+  "schedule": [
+    "Original actual router and current demand map run first.",
+    "Fixed EARLY Top8 CPU hint uses current after-mixer residual and next-layer postNorm/router buffers.",
+    "Only nonresident hints enter a serial pair queue after current map success. Each pair joins its two original streams before starting the next pair.",
+    "Current MoE and next mixer may overlap reads. No kernel or GPU scheduler changes.",
+    "Next actual demand drains the whole batch before cache locks. Its original LFU plan alone chooses actual misses and destinations.",
+    "Invalidate actual victims, validate both ranges before import copy, join every original logical worker, then retain original serial publication hook/cancellation/validateBoth/slotExpert ordering."
+  ],
+  "checks": [
+    "Positive private hooks.none provenance; supplied callbacks are never eligible.",
+    "Typed owner binds the actual cache, retained source, admitted ranges, layer, geometry and original cache quota.",
+    "Every speculative slice uses unchanged preadTensorRange with fresh original checks. Hints cannot provide ranges or numeric source offsets.",
+    "Only settled owner/layer/expert/position/epoch-matching actual misses import. Copies cannot change after original publication validation.",
+    "Original hit, full-source, demand read, publication, lease and pre-GPU checks remain.",
+    "All worker outcomes drain. Pure expected cancellation remains cancellation. Mixed source/read failures retain original pair/stream order.",
+    "Production failures remain primary in a compound failure if speculative work also failed. Token rollback follows speculative drain."
+  ],
+  "lifecycleResolution": [
+    "Read group sentinel enters before the batch is published, so pending launch cannot look idle.",
+    "Pool keeps its draining batch visible until settlement completes. A second drain is rejected.",
+    "Cancellation joins read work, the drain owner and any returned import lease outside all locks.",
+    "Epoch becomes reusable only after every import job has settled. New start cannot overwrite live quarantine bytes."
+  ],
+  "timingIntervals": {
+    "headline": "Whole decode includes all29 samples and28 forwards; prompt separate. Both modes have the same passive route/plan evidence.",
+    "map": "Includes batch drain, original hit checks, remaining demand reads, import validation/copies and publication.",
+    "protectedRead": "Requested bytes and wall per protected call, including existing source checks. Worker sums overlap and are not critical-path time.",
+    "drain": "Wait until speculative streams settle, excluding later actual import jobs. Nested inside target map.",
+    "hint": "Norm, BF16 conversion, dot, fixed Top8 and owned next-cache nonresident selection.",
+    "copy": "Actual bounded CPU copies into original reserved slot buffers; worker sums may overlap.",
+    "beforeCopyValidation": "Fresh validateBoth before imported pair copies.",
+    "publicationValidation": "Original validateBoth after all workers settle. Serves the after-copy observation. No extra duplicate check.",
+    "fullSource": "Every existing direct runner revalidateSource call during decode. No new full source scan is added for hint computation.",
+    "limits": "No new full GPU trace. Requested bytes are logical, not measured physical disk bytes. Nested intervals must not be summed as independent savings."
+  },
+  "comparison": {
+    "orders": [
+      "off,on",
+      "on,off"
+    ],
+    "freshChildAndPrefillPerArm": true,
+    "sameBinary": true,
+    "firstPairStopsOn": "Any error, output/route-weight-bit/plan mismatch, memory below30%, or ON/OFF decode ratio>0.95",
+    "secondPairRequires": "First pair valid and ratio<=0.95",
+    "finalGate": "At least5% lower whole decode wall in BOTH order pairs. No tuning. No app qualification.",
+    "timeoutSecondsPerChild": 420,
+    "secondaryOnly": "Per-forward durations permit first3/later25 analysis. They never decide the gate."
+  },
+  "staticVerification": {
+    "commit": "f210c7067b20e5c12422f59d5759d0175f474502",
+    "cleanRoot": true,
+    "productionInputsEqualCommit": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+    "app019InputCount": 731,
+    "app019InputHashesMatched": true,
+    "app019ReceiptSHA256": "ad80270396f15832a763f92af037fe233ad6ecd3729ae4795090184f47d35289",
+    "baselineCopiesMatched": true,
+    "forwardApplyCheck": true,
+    "inverseCandidateApplyCheck": true,
+    "pythonASTParse": true,
+    "buildsTestsModelRuns": false
+  },
+  "commands": [
+    "python3 /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-prefetch-overlap-20261002/prepare.py",
+    "python3 /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-prefetch-overlap-20261002/build.py",
+    "python3 /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-prefetch-overlap-20261002/compare.py /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+  ],
+  "limits": [
+    "Cancellation and rollback are statically scoped but are not exercised by the fixed successful request. Failure does not publish a success report.",
+    "Extra protected observations and overlap change observation timing. This is not an adversarial interleaving equivalence claim.",
+    "48MiB is touched before eligibility and guarded throughout. No spare headroom is assumed.",
+    "Candidate is not compiled or executed by its coding owner. Main owns all execution."
+  ]
+}

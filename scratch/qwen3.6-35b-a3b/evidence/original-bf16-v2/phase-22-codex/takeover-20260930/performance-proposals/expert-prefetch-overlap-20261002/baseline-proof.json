@@ -1,0 +1,13 @@
+{
+  "commit": "f210c7067b20e5c12422f59d5759d0175f474502",
+  "cleanRoot": true,
+  "productionInputsEqualCommit": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "app019InputCount": 731,
+  "app019InputHashesMatched": true,
+  "app019ReceiptSHA256": "ad80270396f15832a763f92af037fe233ad6ecd3729ae4795090184f47d35289",
+  "baselineCopiesMatched": true,
+  "forwardApplyCheck": true,
+  "inverseCandidateApplyCheck": true,
+  "pythonASTParse": true,
+  "buildsTestsModelRuns": false
+}
