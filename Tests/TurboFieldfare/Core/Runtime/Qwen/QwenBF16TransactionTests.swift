@@ -37,6 +37,51 @@ import Testing
         #expect(after.routedExpertCount == 8)
     }
 
+    @Test func sourceTurnMeasurementReportsBothPhasesAndDetachesAfterCancellation() async throws {
+        let harness = try await makeSourceConversationHarness()
+        defer { harness.source.remove() }
+        let prompt: [Int32] = [1, 2]
+
+        let firstCapture = RuntimeMeasurementCapture()
+        _ = try await harness.session.generatePreparedTurn(
+            promptTokenIDs: prompt, config: greedyConfig(maxNewTokens: 2),
+            measurementCapture: firstCapture)
+        let firstRows = try drainSourceMeasurementRows(firstCapture)
+        #expect(firstRows.contains([135, 1, 1, 0, 0, 0]),
+                "a source turn must report an installed request collector")
+        let prefillReads = firstRows.filter { $0[0] == 134 && $0[1] == 2 }
+        let decodeReads = firstRows.filter { $0[0] == 134 && $0[1] == 1 }
+        #expect(prefillReads.reduce(UInt64(0)) { $0 + $1[3] } > 0,
+                "prefill must perform measured source checks")
+        #expect(decodeReads.reduce(UInt64(0)) { $0 + $1[3] } > 0,
+                "decode must perform measured source checks, including cache hits")
+        #expect(firstRows.contains { $0[0] == 133 && $0[1] == 2 && $0[3] > 0 },
+                "the cold fixture prefill must read actual payload bytes")
+        #expect(decodeReads.contains { $0[2] == 0 && $0[3] > 0 },
+                "the tiny fixture decode reuses experts but must validate its cache hits")
+
+        let failedCapture = RuntimeMeasurementCapture()
+        let failed = await captureAsync {
+            try await harness.session.generatePreparedTurn(
+                promptTokenIDs: prompt, config: greedyConfig(maxNewTokens: 2),
+                measurementCapture: failedCapture,
+                shouldStop: { true })
+        }
+        #expect(failed.value == nil)
+        #expect(failed.error != nil)
+        let failedRows = try drainSourceMeasurementRows(failedCapture)
+        #expect(failedRows.contains([135, 1, 1, 0, 0, 0]),
+                "a throwing turn must attach its own collector before failing")
+
+        let retryCapture = RuntimeMeasurementCapture()
+        _ = try await harness.session.generatePreparedTurn(
+            promptTokenIDs: prompt, config: greedyConfig(maxNewTokens: 2),
+            measurementCapture: retryCapture)
+        let retryRows = try drainSourceMeasurementRows(retryCapture)
+        #expect(retryRows.contains([135, 1, 1, 0, 0, 0]),
+                "the failed turn must detach so a later turn can attach")
+    }
+
     @Test func publishedSourceExpertCacheSurvivesRollbackAndRetry() async throws {
         let failure = QwenBF16TransactionTestSwitch()
         let hooks = QwenOfficialSourceTransactionHooks(
@@ -775,6 +820,18 @@ private func makeSourceConversationHarness(
         hooks: hooks)
     return QwenBF16SourceConversationHarness(
         source: source, context: context, model: model, session: session)
+}
+
+private func drainSourceMeasurementRows(_ capture: RuntimeMeasurementCapture) throws -> [[UInt64]] {
+    struct Batch: Decodable { let records: [[UInt64]] }
+    capture.finish(status: 0)
+    var result: [[UInt64]] = []
+    while let batch = capture.drainJSONBatch(
+        maximumBytes: RuntimeMeasurementCapture.maximumJSONBatchBytes) {
+        let decoded = try JSONDecoder().decode(Batch.self, from: batch.data)
+        result += decoded.records.filter { $0.count == 6 && (130...135).contains($0[0]) }
+    }
+    return result
 }
 
 private func mutateAcceptedSidecar(

@@ -232,6 +232,7 @@ final class QwenMoE {
     }
 
     let configuration: QwenMoEConfiguration
+    private let bf16ProjectionBatch: Bool
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let routingPipeline: MTLComputePipelineState
@@ -244,7 +245,10 @@ final class QwenMoE {
     private let bf16PipelineLock = NSLock()
     private var bf16Pipelines: [String: MTLComputePipelineState] = [:]
 
-    init(context: MetalContext, configuration: QwenMoEConfiguration) throws {
+    // Internal resident-test selection only. Packed and grouped paths ignore it.
+    init(context: MetalContext, configuration: QwenMoEConfiguration,
+         bf16ProjectionBatch: Bool = false) throws {
+        self.bf16ProjectionBatch = bf16ProjectionBatch
         self.configuration = configuration
         device = context.device
         queue = context.queue
@@ -673,7 +677,8 @@ final class QwenMoE {
                            sharedWeights: QwenBF16Weights,
                            sharedNames: QwenBF16SharedNames,
                            scratch: QwenMoEScratch,
-                           output: MTLBuffer) throws -> MTLCommandBuffer {
+                           output: MTLBuffer,
+                           timing: QwenProductionCommand? = nil) throws -> MTLCommandBuffer {
         try lease.requireUsable()
         guard lease.experts.count == configuration.topK else {
             throw QwenMoEError.invalidCount(
@@ -802,9 +807,48 @@ final class QwenMoE {
                                 count: configuration.sharedIntermediateSize)
         try requireDispatchable(try bf16Pipeline("qwen_moe_shared_epilogue_bf16"),
                                 count: configuration.hiddenSize)
-        return try lease.submit(on: queue) { command in
+        // Exact official single-token geometry only. Capability or shape drift
+        // keeps the original path; no additional scratch allocation by default.
+        let batchPipelines: [MTLComputePipelineState]
+        if bf16ProjectionBatch, configuration.hiddenSize == 2_048,
+           configuration.routedIntermediateSize == 512, configuration.topK == 8,
+           gateSelection.cooperative, downSelection.cooperative {
+            let pipelines = try ["qwen_moe_routed_gate_up_bf16_batch8",
+                                 "qwen_moe_routed_down_contribution_bf16_batch8",
+                                 "qwen_moe_routed_accumulate_bf16_batch8"].map { try bf16Pipeline($0) }
+            batchPipelines = pipelines.allSatisfy {
+                $0.threadExecutionWidth == 32 && $0.maxTotalThreadsPerThreadgroup >= 32
+            } ? pipelines : []
+        } else {
+            batchPipelines = []
+        }
+        let contributions: MTLBuffer?
+        if !batchPipelines.isEmpty {
+            let bytes = configuration.topK * configuration.hiddenSize * MemoryLayout<Float>.stride
+            guard bytes <= device.maxBufferLength,
+                  let buffer = device.makeBuffer(length: bytes, options: .storageModePrivate) else {
+                throw QwenMoEError.bufferTooSmall(name: "BF16 batch contributions", required: bytes, actual: 0)
+            }
+            buffer.label = "qwen.moe.batch8.contributions"
+            contributions = buffer
+        } else {
+            contributions = nil
+        }
+        return try lease.submit(on: queue, timing: timing) { command in
             try encodeClear(commandBuffer: command, buffer: output,
                             count: configuration.hiddenSize)
+            if let contributions {
+                // Explicit completion ownership also covers partial-encoding
+                // failure: lease.submit commits that work and retains its pins.
+                command.addCompletedHandler { _ in withExtendedLifetime(contributions) {} }
+                try encodeBF16ProjectionBatch(command: command, hidden: hidden,
+                    lease: lease, routingWeights: routingWeights, scratch: scratch,
+                    contributions: contributions, output: output, pipelines: batchPipelines)
+                try encodeSharedBF16(commandBuffer: command, hidden: hidden,
+                                     weights: sharedWeights, names: sharedNames,
+                                     scratch: scratch, output: output)
+                return
+            }
             // The pinned eager expert loop visits ascending expert ID. Retain
             // the original rank for the matching route weight and scratch row.
             let orderedExperts = lease.experts.enumerated().sorted {
@@ -866,6 +910,66 @@ final class QwenMoE {
         }
     }
 
+    /// Three routed dispatches, one existing lease-owned command. Every rank's
+    /// activation/contribution is fully overwritten before its first read.
+    private func encodeBF16ProjectionBatch(
+        command: MTLCommandBuffer, hidden: MTLBuffer, lease: QwenBF16ExpertLease,
+        routingWeights: MTLBuffer, scratch: QwenMoEScratch,
+        contributions: MTLBuffer, output: MTLBuffer,
+        pipelines: [MTLComputePipelineState]
+    ) throws {
+        var parameters = BF16RoutedParameters(
+            hiddenSize: UInt32(configuration.hiddenSize),
+            intermediateSize: UInt32(configuration.routedIntermediateSize), scratchOffset: 0)
+        // Slots 8...15 bind actual lease rank order, not sorted expert IDs.
+        for stage in 0..<2 {
+            guard let encoder = command.makeComputeCommandEncoder() else {
+                throw QwenMoEError.commandEncoderUnavailable
+            }
+            encoder.setComputePipelineState(pipelines[stage])
+            encoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                             index: QwenMetalBufferIndex.parameters.rawValue)
+            encoder.setBuffer(stage == 0 ? hidden : scratch.routedActivation, offset: 0,
+                              index: QwenMetalBufferIndex.input.rawValue)
+            if stage == 0 {
+                encoder.setBuffer(scratch.routedActivation, offset: 0,
+                                  index: QwenMetalBufferIndex.scratch.rawValue)
+            } else {
+                encoder.setBuffer(contributions, offset: 0,
+                                  index: QwenMetalBufferIndex.output.rawValue)
+                encoder.setBuffer(routingWeights, offset: 0,
+                                  index: QwenMetalBufferIndex.state.rawValue)
+            }
+            for (rank, mapped) in lease.experts.enumerated() {
+                let weights = stage == 0 ? mapped.gateUp : mapped.down
+                encoder.setBuffer(weights, offset: 0, index: 8 + rank)
+                encoder.useResource(weights, usage: .read)
+            }
+            encoder.dispatchThreadgroups(
+                MTLSize(width: stage == 0 ? configuration.routedIntermediateSize : configuration.hiddenSize,
+                        height: configuration.topK, depth: 1),
+                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+            encoder.endEncoding()
+        }
+        let orderedRanks = lease.experts.enumerated().sorted {
+            $0.element.expertID < $1.element.expertID
+        }.map { UInt32($0.offset) }
+        guard let encoder = command.makeComputeCommandEncoder() else {
+            throw QwenMoEError.commandEncoderUnavailable
+        }
+        encoder.setComputePipelineState(pipelines[2])
+        encoder.setBytes(&parameters, length: MemoryLayout<BF16RoutedParameters>.stride,
+                         index: QwenMetalBufferIndex.parameters.rawValue)
+        orderedRanks.withUnsafeBytes {
+            encoder.setBytes($0.baseAddress!, length: $0.count,
+                             index: QwenMetalBufferIndex.weights.rawValue)
+        }
+        encoder.setBuffer(contributions, offset: 0, index: QwenMetalBufferIndex.input.rawValue)
+        encoder.setBuffer(output, offset: 0, index: QwenMetalBufferIndex.output.rawValue)
+        try dispatch(encoder, pipeline: pipelines[2], count: configuration.hiddenSize)
+        encoder.endEncoding()
+    }
+
     /// The caller supplies consecutive chunks of globally ascending expert IDs.
     /// Each chunk binds only its current lease, retaining the original token rank
     /// for weights. Shared experts run after all routed chunks have settled.
@@ -885,6 +989,7 @@ final class QwenMoE {
         // Capture inside submit: its encoding failure path still commits the
         // partially encoded command and holds both buffers until completion.
         var submittedCommand: MTLCommandBuffer?
+        let timing = QwenProductionTimingMeasurement.command(.groupedMoE)
         let retainedBuffers = [hiddenRows, routingWeights, outputRows,
             scratch.routedActivation, scratch.sharedGate, scratch.sharedUp,
             scratch.sharedActivation, scratch.sharedOutput, scratch.sharedOutputGate]
@@ -1053,7 +1158,7 @@ final class QwenMoE {
             try requireDispatchable(downSelection.pipeline, count: configuration.hiddenSize)
             if initializeOutput { try requireDispatchable(clearPipeline, count: rowElements) }
             try Task.checkCancellation()
-            try lease.submit(on: queue) { command in
+            try lease.submit(on: queue, timing: timing) { command in
                 submittedCommand = command
                 command.label = "qwen.moe.grouped-bf16"
                 if initializeOutput {
@@ -1116,7 +1221,7 @@ final class QwenMoE {
                 // Await cleanup but preserve the original encoding error. If
                 // settlement invariants fail, this throw still rejects output
                 // and the coordinator keeps any unresolved slot pins reserved.
-                try? await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers)
+                try? await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers, timing: timing)
             } else {
                 try? lease.cancel()
             }
@@ -1125,7 +1230,7 @@ final class QwenMoE {
         guard let command = submittedCommand else {
             throw MetalError.commandBufferFailed("grouped lease submitted without a captured command")
         }
-        try await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers)
+        try await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers, timing: timing)
         try checkCommandBufferError(command)
         try Task.checkCancellation()
         guard lease.snapshot().succeeded == true else {
@@ -1135,11 +1240,13 @@ final class QwenMoE {
 
     private static func settleGroupedCommand(
         _ command: MTLCommandBuffer, lease: QwenBF16ExpertLease, buffers: [MTLBuffer],
+        timing: QwenProductionCommand? = nil,
         isolation: isolated (any Actor)? = #isolation
     ) async throws {
         // Unlike terminal status, waitUntilCompleted includes all completion
         // handlers. A background thread waits so no cooperative executor blocks.
         let completion = GroupedCommandCompletion(command: command, lease: lease, buffers: buffers)
+        timing?.willWait()
         await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global(qos: .userInitiated).async {
@@ -1150,6 +1257,7 @@ final class QwenMoE {
         } onCancel: {
             try? lease.cancel()
         }
+        timing?.resumed(command)
         let snapshot = lease.snapshot()
         guard snapshot.submitted, snapshot.completed else {
             throw MetalError.commandBufferFailed("grouped command finished before lease settlement")

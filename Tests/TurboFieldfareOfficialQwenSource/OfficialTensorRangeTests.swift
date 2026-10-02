@@ -145,6 +145,187 @@ struct OfficialTensorRangeTests {
         #expect(descriptorCount() == descriptorsWithToken)
     }
 
+    @Test func ioMeasurementCountsZeroPayloadInterruptionAndFailure() throws {
+        let fixture = try TinyTensorRangeFixture.make()
+        defer { fixture.remove() }
+        let token = try fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        let first = OfficialSourceIOMeasurement()
+        let second = OfficialSourceIOMeasurement()
+        #expect(fixture.handle.installIOMeasurement(first))
+        #expect(!fixture.handle.installIOMeasurement(second),
+                "a second request must not replace the active collector")
+        fixture.handle.removeIOMeasurement(second)
+        #expect(!fixture.handle.installIOMeasurement(second),
+                "removing a non-owner must leave the active collector attached")
+
+        _ = try fixture.handle.preadTensorRange(
+            token, byteOffset: 0, byteCount: 0,
+            expectedByteCount: 0, allocationBudget: 0)
+        first.setPhase(.decode)
+        _ = try fixture.handle.preadTensorRange(
+            token, byteOffset: 0, byteCount: 0,
+            expectedByteCount: 0, allocationBudget: 0)
+
+        var injectedInterruption = true
+        let payload = try fixture.handle.preadTensorRange(
+            token, byteOffset: 0, byteCount: 16,
+            expectedByteCount: 16, allocationBudget: 16,
+            readAt: { fd, buffer, count, offset in
+                if injectedInterruption {
+                    injectedInterruption = false
+                    return .interrupted
+                }
+                return darwinPread(fd, buffer, count, offset)
+            }, checkpoint: { _ in }, limits: nil)
+        #expect(payload == Data(TinyTensorRangeFixture.payload))
+        expectIOError(errno: EIO) {
+            _ = try fixture.handle.preadTensorRange(
+                token, byteOffset: 0, byteCount: 16,
+                expectedByteCount: 16, allocationBudget: 16,
+                readAt: { _, _, _, _ in .failure(EIO) },
+                checkpoint: { _ in }, limits: nil)
+        }
+
+        let snapshot = first.snapshot()
+        let prefillZero = 0
+        let decodeZero = 2
+        let decodePayload = 3
+        #expect(snapshot.reads[prefillZero] == 1)
+        #expect(snapshot.failedReads[prefillZero] == 0)
+        #expect(snapshot.reads[decodeZero] == 1)
+        #expect(snapshot.failedReads[decodeZero] == 0)
+        #expect(snapshot.reads[decodePayload] == 2)
+        #expect(snapshot.failedReads[decodePayload] == 1)
+        #expect(snapshot.preads[decodePayload].count == 3,
+                "one EINTR retry and one failed syscall are both counted")
+        #expect(snapshot.preads[decodePayload].bytes == 16)
+        #expect(snapshot.preads[decodePayload].interruptions == 1)
+        #expect(snapshot.preads[decodePayload].errors == 1)
+        #expect(snapshot.validations[prefillZero * 4].count == 0,
+                "initial cancellation is checked outside the validation counter")
+        #expect(snapshot.validations[prefillZero * 4 + 3].count == 1)
+        #expect(snapshot.validations[decodeZero * 4].count == 0)
+        #expect(snapshot.validations[decodeZero * 4 + 3].count == 1)
+        #expect(snapshot.validations[decodePayload * 4].count == 0)
+        #expect(snapshot.validations[decodePayload * 4 + 1].count == 3,
+                "the EINTR retry performs its before-read validation again")
+        #expect(snapshot.validations[decodePayload * 4 + 2].count == 1)
+        #expect(snapshot.validations[decodePayload * 4 + 3].count == 1)
+
+        fixture.handle.removeIOMeasurement(first)
+        #expect(fixture.handle.installIOMeasurement(second),
+                "detaching a completed request must allow the next request")
+        _ = try fixture.handle.preadTensorRange(
+            token, byteOffset: 0, byteCount: 1,
+            expectedByteCount: 1, allocationBudget: 1)
+        let detached = second.snapshot()
+        #expect(detached.reads[1] == 1)
+        fixture.handle.removeIOMeasurement(second)
+    }
+
+    @Test func ioMeasurementAggregatesConcurrentRangeReads() throws {
+        let fixture = try TinyTensorRangeFixture.make()
+        defer { fixture.remove() }
+        let token = try fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        let measurement = OfficialSourceIOMeasurement()
+        #expect(fixture.handle.installIOMeasurement(measurement))
+        defer { fixture.handle.removeIOMeasurement(measurement) }
+        let reader = ConcurrentRangeReader(handle: fixture.handle, token: token)
+        let failures = ConcurrentReadFailures()
+        let group = DispatchGroup()
+
+        for _ in 0..<8 {
+            group.enter()
+            Thread {
+                defer { group.leave() }
+                do {
+                    let bytes = try reader.handle.preadTensorRange(
+                        reader.token, byteOffset: 0, byteCount: 1,
+                        expectedByteCount: 1, allocationBudget: 1)
+                    if bytes != Data([0x00]) { failures.record() }
+                } catch {
+                    failures.record()
+                }
+            }.start()
+        }
+        #expect(group.wait(timeout: .now() + 5) == .success)
+        #expect(failures.count == 0)
+        let snapshot = measurement.snapshot()
+        #expect(snapshot.reads[1] == 8)
+        #expect(snapshot.failedReads[1] == 0)
+        #expect(snapshot.preads[1].count == 8)
+        #expect(snapshot.preads[1].bytes == 8)
+    }
+
+    @Test func ioMeasurementCountsFourMiBBoundaryAsTwoPayloadReads() throws {
+        let caseFile = try makeFourMiBBoundaryFixture()
+        defer { caseFile.fixture.remove() }
+        let token = try caseFile.fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        let measurement = OfficialSourceIOMeasurement()
+        #expect(caseFile.fixture.handle.installIOMeasurement(measurement))
+        defer { caseFile.fixture.handle.removeIOMeasurement(measurement) }
+
+        let result = try caseFile.fixture.handle.preadTensorRange(
+            token, byteOffset: 0, byteCount: UInt64(caseFile.payload.count),
+            expectedByteCount: UInt64(caseFile.payload.count),
+            allocationBudget: UInt64(caseFile.payload.count),
+            readAt: darwinPread, checkpoint: { _ in }, limits: nil)
+        #expect(result == Data(caseFile.payload))
+
+        let snapshot = measurement.snapshot()
+        let payloadIndex = 1 // prefill, non-zero byte class
+        #expect(snapshot.reads[payloadIndex] == 1)
+        #expect(snapshot.failedReads[payloadIndex] == 0)
+        #expect(snapshot.preads[payloadIndex].count == 2)
+        #expect(snapshot.preads[payloadIndex].bytes == UInt64(caseFile.payload.count))
+        #expect(snapshot.preads[payloadIndex].errors == 0)
+        #expect(snapshot.preads[payloadIndex].interruptions == 0)
+        #expect(snapshot.validations[payloadIndex * 4].count == 0)
+        #expect(snapshot.validations[payloadIndex * 4 + 1].count == 2)
+        #expect(snapshot.validations[payloadIndex * 4 + 2].count == 2)
+        #expect(snapshot.validations[payloadIndex * 4 + 3].count == 1)
+    }
+
+    @Test func ioMeasurementRecordsValidationFailureAfterPayloadMutation() throws {
+        let fixture = try TinyTensorRangeFixture.make()
+        defer { fixture.remove() }
+        let token = try fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        let measurement = OfficialSourceIOMeasurement()
+        #expect(fixture.handle.installIOMeasurement(measurement))
+        defer { fixture.handle.removeIOMeasurement(measurement) }
+
+        expectReplaced {
+            _ = try fixture.handle.preadTensorRange(
+                token, byteOffset: 0, byteCount: 16,
+                expectedByteCount: 16, allocationBudget: 16,
+                readAt: darwinPread,
+                checkpoint: { point in
+                    if case .afterPayloadRead = point {
+                        try overwriteFirstPayloadByteInPlace(fixture, with: 0x5a)
+                    }
+                }, limits: nil)
+        }
+
+        let snapshot = measurement.snapshot()
+        let payloadIndex = 1
+        #expect(snapshot.reads[payloadIndex] == 1)
+        #expect(snapshot.failedReads[payloadIndex] == 1)
+        #expect(snapshot.validations[payloadIndex * 4].count == 0)
+        #expect(snapshot.validations[payloadIndex * 4 + 1].count == 1)
+        #expect(snapshot.validations[payloadIndex * 4 + 2].count == 1)
+        #expect(snapshot.validations[payloadIndex * 4 + 2].errors == 1,
+                "the post-read identity check must be visible as a validation failure")
+        #expect(snapshot.validations[payloadIndex * 4 + 3].count == 0)
+    }
+
     @Test func readsWholeTensorAndLiteralUnalignedOddLengthSlice() throws {
         let fixture = try TinyTensorRangeFixture.make()
         defer { fixture.remove() }
@@ -726,11 +907,21 @@ struct OfficialTensorRangeTests {
                             header: TinyTensorRangeFixture.validHeader,
                             payload: TinyTensorRangeFixture.payload))
 
+        var destination = [UInt8](repeating: 0xee, count: 16)
+        var readCalls = 0
         expectReplaced {
-            _ = try fixture.handle.preadTensorRange(
-                token, byteOffset: 0, byteCount: 16, expectedByteCount: 16,
-                allocationBudget: 16)
+            try destination.withUnsafeMutableBytes { raw in
+                try fixture.handle.preadTensorRange(
+                    token, byteOffset: 0, byteCount: 16,
+                    expectedByteCount: 16, into: raw,
+                    readAt: { fd, buffer, count, offset in
+                        readCalls += 1
+                        return darwinPread(fd, buffer, count, offset)
+                    }, checkpoint: { _ in }, limits: nil)
+            }
         }
+        #expect(readCalls == 0)
+        #expect(destination.allSatisfy { $0 == 0xee })
         #expect(descriptorCount() == descriptorsWithToken)
     }
 
@@ -846,9 +1037,13 @@ struct OfficialTensorRangeTests {
         #expect(leafMutation.sameInode)
         #expect(leafMutation.sameSize)
         expectReplaced {
-            _ = try leafFixture.handle.preadTensorRange(
-                leafToken, byteOffset: 0, byteCount: 0,
-                expectedByteCount: 0, allocationBudget: 0)
+            var destination: [UInt8] = []
+            try destination.withUnsafeMutableBytes { raw in
+                try leafFixture.handle.preadTensorRange(
+                    leafToken, byteOffset: 0, byteCount: 0,
+                    expectedByteCount: 0, into: raw,
+                    readAt: darwinPread, checkpoint: { _ in }, limits: nil)
+            }
         }
         #expect(descriptorCount() == leafDescriptors)
 
@@ -860,9 +1055,13 @@ struct OfficialTensorRangeTests {
         let rootDescriptors = descriptorCount()
         try replaceSourceRoot(rootFixture)
         expectReplaced {
-            _ = try rootFixture.handle.preadTensorRange(
-                rootToken, byteOffset: 0, byteCount: 0,
-                expectedByteCount: 0, allocationBudget: 0)
+            var destination: [UInt8] = []
+            try destination.withUnsafeMutableBytes { raw in
+                try rootFixture.handle.preadTensorRange(
+                    rootToken, byteOffset: 0, byteCount: 0,
+                    expectedByteCount: 0, into: raw,
+                    readAt: darwinPread, checkpoint: { _ in }, limits: nil)
+            }
         }
         #expect(descriptorCount() == rootDescriptors)
     }
@@ -929,6 +1128,9 @@ struct OfficialTensorRangeTests {
         let token = try fixture.handle.admitTensor(
             shardName: TinyTensorRangeFixture.shardName,
             tensorName: TinyTensorRangeFixture.tensorName)
+        let measurement = OfficialSourceIOMeasurement()
+        #expect(fixture.handle.installIOMeasurement(measurement))
+        defer { fixture.handle.removeIOMeasurement(measurement) }
         let descriptorsWithToken = descriptorCount()
         var observedCancellation = false
 
@@ -948,6 +1150,62 @@ struct OfficialTensorRangeTests {
 
         #expect(observedCancellation)
         #expect(descriptorCount() == descriptorsWithToken)
+        let snapshot = measurement.snapshot()
+        #expect(snapshot.reads[1] == 1)
+        #expect(snapshot.failedReads[1] == 1)
+        #expect(snapshot.preads[1].count == 0,
+                "cancellation before the payload syscall must not report a pread")
+        #expect(snapshot.validations[4].count == 0)
+        #expect(snapshot.validations[5].count == 0)
+    }
+
+    @Test func preCancelledRangeReadSkipsCheckpointAndPayloadSyscall() async throws {
+        let fixture = try TinyTensorRangeFixture.make()
+        defer { fixture.remove() }
+        let token = try fixture.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        let measurement = OfficialSourceIOMeasurement()
+        #expect(fixture.handle.installIOMeasurement(measurement))
+        defer { fixture.handle.removeIOMeasurement(measurement) }
+        let reader = ConcurrentRangeReader(handle: fixture.handle, token: token)
+        let gate = RangeReadGate()
+        let checkpointCalls = ConcurrentReadFailures()
+        let task = Task { () throws -> Data in
+            await gate.wait()
+            var destination = [UInt8](repeating: 0xee, count: 16)
+            try destination.withUnsafeMutableBytes { raw in
+                try reader.handle.preadTensorRange(
+                    reader.token, byteOffset: 0, byteCount: 16,
+                    expectedByteCount: 16, into: raw,
+                    readAt: darwinPread,
+                    checkpoint: { _ in checkpointCalls.record() }, limits: nil)
+            }
+            return Data(destination)
+        }
+        while !(await gate.currentlyWaiting()) { await Task.yield() }
+        task.cancel()
+        await gate.release()
+
+        var wasCancelled = false
+        do {
+            _ = try await task.value
+            Issue.record("Expected a pre-cancelled range read to throw CancellationError")
+        } catch is CancellationError {
+            wasCancelled = true
+        } catch {
+            Issue.record("Expected CancellationError, got \(error)")
+        }
+        #expect(wasCancelled)
+        #expect(checkpointCalls.count == 0)
+        let snapshot = measurement.snapshot()
+        #expect(snapshot.reads[1] == 1)
+        #expect(snapshot.failedReads[1] == 1)
+        #expect(snapshot.preads[1].count == 0)
+        #expect(snapshot.validations[4].count == 0)
+        #expect(snapshot.validations[5].count == 0)
+        #expect(snapshot.validations[6].count == 0)
+        #expect(snapshot.validations[7].count == 0)
     }
 
     @Test func rangeReadCanReenterOnTheSameRetainedToken() throws {
@@ -993,6 +1251,51 @@ struct OfficialTensorRangeTests {
                 }, limits: nil)
         }
         #expect(descriptorCount() == descriptorsWithToken)
+    }
+
+    @Test func preexistingMarkerReplacementRejectsDirectReadsBeforePayloadAccess() throws {
+        let nonempty = try TinyTensorRangeFixture.make()
+        defer { nonempty.remove() }
+        let nonemptyToken = try nonempty.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        try replaceRegistrationMarker(nonempty)
+        var destination = [UInt8](repeating: 0xee, count: 16)
+        var nonemptyReadCalls = 0
+        expectReplaced {
+            try destination.withUnsafeMutableBytes { raw in
+                try nonempty.handle.preadTensorRange(
+                    nonemptyToken, byteOffset: 0, byteCount: 16,
+                    expectedByteCount: 16, into: raw,
+                    readAt: { fd, buffer, count, offset in
+                        nonemptyReadCalls += 1
+                        return darwinPread(fd, buffer, count, offset)
+                    }, checkpoint: { _ in }, limits: nil)
+            }
+        }
+        #expect(nonemptyReadCalls == 0)
+        #expect(destination.allSatisfy { $0 == 0xee })
+
+        let empty = try TinyTensorRangeFixture.make()
+        defer { empty.remove() }
+        let emptyToken = try empty.handle.admitTensor(
+            shardName: TinyTensorRangeFixture.shardName,
+            tensorName: TinyTensorRangeFixture.tensorName)
+        try replaceRegistrationMarker(empty)
+        var emptyDestination: [UInt8] = []
+        var emptyReadCalls = 0
+        expectReplaced {
+            try emptyDestination.withUnsafeMutableBytes { raw in
+                try empty.handle.preadTensorRange(
+                    emptyToken, byteOffset: 0, byteCount: 0,
+                    expectedByteCount: 0, into: raw,
+                    readAt: { fd, buffer, count, offset in
+                        emptyReadCalls += 1
+                        return darwinPread(fd, buffer, count, offset)
+                    }, checkpoint: { _ in }, limits: nil)
+            }
+        }
+        #expect(emptyReadCalls == 0)
     }
 }
 
@@ -1090,6 +1393,47 @@ private func darwinPread(
     if result >= 0 { return .bytes(result) }
     if errno == EINTR { return .interrupted }
     return .failure(errno)
+}
+
+private final class ConcurrentRangeReader: @unchecked Sendable {
+    let handle: OfficialSourceHandle
+    let token: OfficialSourceHandle.TensorRange
+
+    init(handle: OfficialSourceHandle, token: OfficialSourceHandle.TensorRange) {
+        self.handle = handle
+        self.token = token
+    }
+}
+
+private final class ConcurrentReadFailures: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+
+    var count: Int {
+        lock.lock(); defer { lock.unlock() }
+        return value
+    }
+
+    func record() {
+        lock.lock(); value += 1; lock.unlock()
+    }
+}
+
+private actor RangeReadGate {
+    private var continuation: CheckedContinuation<Void, Never>?
+    private var waiting = false
+
+    func wait() async {
+        waiting = true
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func currentlyWaiting() -> Bool { waiting }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 private struct SameInodeMutationEvidence {

@@ -51,6 +51,117 @@ import TurboFieldfareOfficialQwenSource
         #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
     }
 
+    @Test func sourceClientAssessesNonemptyCheckpointWithoutRebuildingState() async throws {
+        let stages = SourceCheckpointStageRecorder()
+        let harness = try await SourceCheckpointHarness.make(
+            hooks: QwenOfficialSourceTransactionHooks(
+                afterActualGPUSubmission: { stage in stages.append("submit:\(stage)") },
+                afterActualGPUCompletion: { stage in stages.append("complete:\(stage)") }))
+        defer { harness.fixture.remove() }
+        let call = try await harness.generateToolCall(query: "snow")
+        try await harness.synchronize(call: call)
+
+        let before = await harness.generation.status()
+        let beforeSnapshot = try await harness.generation.diagnosticSnapshot()
+        let maxContext = 1_024
+        let resultMessage = ModelChatMessage(
+            role: .tool, content: "synthetic result",
+            toolCallID: call.id, name: call.name)
+        let continuationTokenCount = try harness.codec.encodeContinuation(
+            messages: [resultMessage],
+            options: .init(enableThinking: false))
+            .count
+        let expectedExisting = await harness.client.conversationTokenCount
+            + continuationTokenCount
+        let expectedReplacement = try harness.codec.encodePrompt(
+            messages: [ModelChatMessage(role: .user, content: "short checkpoint")],
+            tools: [sourceLookupTool()],
+            options: .init(enableThinking: false, preserveThinking: true))
+            .count
+        let expectedGenerationReserve = min(128, max(1, maxContext / 8))
+        let expectedResultReserve = max(
+            min(1_024, max(1, maxContext / 64)), continuationTokenCount * 2)
+        let expectedFinalReserve = min(128, max(1, maxContext / 32))
+        let expectedReserve = expectedGenerationReserve
+            + expectedResultReserve + expectedFinalReserve
+
+        stages.reset()
+        let rejectedRequest = try sourceCheckpointRequest(
+            call: call, record: "short checkpoint", commit: false,
+            force: false, trigger: .sustainedSlowDecode)
+        let rejected = try await harness.client.contextCheckpoint(rejectedRequest)
+        #expect(!rejected.committed)
+        #expect(!rejected.needed)
+        #expect(rejected.existingPromptTokens == expectedExisting)
+        #expect(rejected.replacementPromptTokens == expectedReplacement)
+        #expect(rejected.reserveTokens == expectedReserve)
+        #expect(rejected.resultAllowanceTokens == expectedResultReserve)
+        #expect(rejected.performanceMinimumSavingsTokens == 4_096)
+        #expect(rejected.retainedImageCount == 0)
+        #expect(rejected.retainedImageRows == 0)
+        #expect(rejected.retainedFeatureBytes == 0)
+        #expect(rejected.reserveTokens > 0)
+        #expect(stages.snapshot.isEmpty,
+                "a rejected assessment must not rebuild or prefill the source state")
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+
+        stages.reset()
+        let stop = AppGenerationStop()
+        stop.requestStop()
+        let cancelledRequest = try sourceCheckpointRequest(
+            call: call, record: "short checkpoint", commit: false,
+            force: true, trigger: .sustainedSlowDecode)
+        await #expect(throws: CancellationError.self) {
+            try await harness.client.contextCheckpoint(cancelledRequest, stop: stop)
+        }
+        #expect(stages.snapshot.isEmpty)
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+
+        stages.reset()
+        let invalidRequest = try sourceCheckpointRequest(
+            call: call, record: MultimodalPromptRenderer.placeholder, commit: false,
+            force: false, trigger: .sustainedSlowDecode)
+        await #expect(throws: AppInferenceError.self) {
+            try await harness.client.contextCheckpoint(invalidRequest)
+        }
+        #expect(stages.snapshot.isEmpty)
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+
+        stages.reset()
+        let invalidCommitRequest = try sourceCheckpointRequest(
+            call: call, record: MultimodalPromptRenderer.placeholder, commit: true,
+            force: true, trigger: .explicitComparison)
+        await #expect(throws: AppInferenceError.self) {
+            try await harness.client.contextCheckpoint(invalidCommitRequest)
+        }
+        #expect(stages.snapshot.isEmpty)
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+
+        stages.reset()
+        let forcedRequest = try sourceCheckpointRequest(
+            call: call, record: "short checkpoint", commit: false,
+            force: true, trigger: .sustainedSlowDecode)
+        let forcedAssessment = try await harness.client.contextCheckpoint(forcedRequest)
+        #expect(!forcedAssessment.committed)
+        #expect(forcedAssessment.needed)
+        #expect(forcedAssessment.existingPromptTokens == expectedExisting)
+        #expect(forcedAssessment.replacementPromptTokens == expectedReplacement)
+        #expect(forcedAssessment.reserveTokens == expectedReserve)
+        #expect(forcedAssessment.resultAllowanceTokens == expectedResultReserve)
+        #expect(forcedAssessment.performanceMinimumSavingsTokens == 4_096)
+        #expect(forcedAssessment.retainedImageCount == 0)
+        #expect(forcedAssessment.retainedImageRows == 0)
+        #expect(forcedAssessment.retainedFeatureBytes == 0)
+        #expect(stages.snapshot.isEmpty,
+                "a forced assessment must not rebuild or prefill the source state")
+        #expect(await harness.generation.status() == before)
+        #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+    }
+
     @Test func sourceClientCheckpointCancellationLeavesSourceTurnUnchanged() async throws {
         let harness = try await SourceCheckpointHarness.make()
         defer { harness.fixture.remove() }
@@ -68,6 +179,52 @@ import TurboFieldfareOfficialQwenSource
 
         #expect(await harness.generation.status() == before)
         #expect(try await harness.generation.diagnosticSnapshot() == beforeSnapshot)
+    }
+
+    @Test func sourceAssessmentUsesExpandedRowsForOrderedImageFrames() throws {
+        let context = try MetalContext()
+        let tokenizer = try QwenTokenizer.loadOfficialSidecar(
+            from: sourceCheckpointTokenizerDirectory)
+        let codec = QwenChatCodec(tokenizer: tokenizer)
+        let architecture = sourceAssessmentQwenArchitecture()
+        let visionConfig = QwenVisionConfig(
+            outputHiddenSize: 32, allowsFixtureGeometry: true)
+        let first = try sourceAssessmentVisionFeatures(
+            context: context, rows: 1, marker: 1, digest: "a")
+        let second = try sourceAssessmentVisionFeatures(
+            context: context, rows: 4, marker: 2, digest: "b")
+        let messages = [ModelChatMessage(
+            role: .user,
+            content: .parts([
+                .text("before"), .image(.init(id: "first")),
+                .text("between"), .image(.init(id: "second")), .text("after"),
+            ]))]
+        let encoded = try codec.encodePrompt(
+            messages: messages, tools: [], options: .init(enableThinking: false))
+        let normalized = try normalizeQwenCodecImageFrames(
+            encoded, architecture: architecture)
+        let expanded = try MultimodalPromptRenderer.expandingQwenImageTokens(
+            normalized, features: [first, second], architecture: architecture,
+            config: visionConfig)
+        let imageRows = first.tokenCount + second.tokenCount
+        let estimate = RealInferenceSession.qwenExpandedTokenCount(
+            encodedCount: encoded.count, imageRows: imageRows, imageCount: 2)
+
+        #expect(normalized.count == encoded.count - 4)
+        #expect(estimate == expanded.embeddingTokenIDs.count)
+        #expect(expanded.effectiveTokenIDs.count == normalized.count + imageRows + 2)
+        #expect(expanded.imageSpans.map { $0.features.tokenCount } == [1, 4])
+        #expect(expanded.imageSpans.map { $0.features.owner.imageDigest } == [
+            String(repeating: "a", count: 64), String(repeating: "b", count: 64),
+        ])
+
+        let textOnly = try codec.encodePrompt(
+            messages: [ModelChatMessage(role: .user, content: "text only")],
+            tools: [], options: .init(enableThinking: false))
+        #expect(RealInferenceSession.qwenExpandedTokenCount(
+            encodedCount: textOnly.count, imageRows: 0, imageCount: 0) == textOnly.count)
+        #expect(RealInferenceSession.qwenExpandedTokenCount(
+            encodedCount: Int.max, imageRows: Int.max, imageCount: 1) == Int.max)
     }
 
     @Test func sourceAllocationIsVisibleThroughClientAndSurvivesReset() async throws {
@@ -218,6 +375,29 @@ private final class SourceToolCallRecorder: @unchecked Sendable {
     }
 }
 
+private final class SourceCheckpointStageRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stages: [String] = []
+
+    func append(_ stage: String) {
+        lock.lock()
+        stages.append(stage)
+        lock.unlock()
+    }
+
+    func reset() {
+        lock.lock()
+        stages.removeAll(keepingCapacity: true)
+        lock.unlock()
+    }
+
+    var snapshot: [String] {
+        lock.lock()
+        defer { lock.unlock() }
+        return stages
+    }
+}
+
 private struct SourceCheckpointHarness {
     let fixture: SourceCacheTelemetryFixture
     let generation: QwenOfficialSourceConversationGenerationSession
@@ -239,9 +419,15 @@ private struct SourceCheckpointHarness {
                 fixtureModel: model, context: context, maxContext: 32,
                 expertSlotCount: fixture.expertSlotCount, hooks: hooks)
             let session = RealInferenceSession()
+            // Keep the host checkpoint policy above the tiny runner's context so
+            // the assessment exercises metadata sizing rather than capacity.
+            let checkpointKey = SessionLoadKey(
+                directory: fixture.sessionKey.directory, maxContext: 1_024,
+                options: fixture.sessionKey.options,
+                forceLogitsHead: fixture.sessionKey.forceLogitsHead)
             try await session.installQwenOfficialSourceFixture(
                 model: model, generation: generation,
-                key: fixture.sessionKey, context: context)
+                key: checkpointKey, context: context)
             let tokenizer = try QwenTokenizer.loadOfficialSidecar(
                 from: sourceCheckpointTokenizerDirectory)
             let codec = QwenChatCodec(tokenizer: tokenizer)
@@ -315,7 +501,8 @@ private func sourceToolConfig(maxNewTokens: Int) -> GenerationConfig {
 }
 
 private func sourceCheckpointRequest(
-    call: ParsedToolCall, record: String, commit: Bool
+    call: ParsedToolCall, record: String, commit: Bool,
+    force: Bool = true, trigger: DecodeContextCheckpointTrigger? = nil
 ) throws -> DecodeContextCheckpointRequest {
     DecodeContextCheckpointRequest(
         checkpointID: UUID(), sourceEpoch: UUID(), sourceTurnIndex: 0,
@@ -325,9 +512,50 @@ private func sourceCheckpointRequest(
             argumentsJSON: try call.arguments.encoded()),
         result: DecodeToolResult(
             callID: call.id, name: call.name, content: "synthetic result"),
-        record: record, commit: commit, force: true,
+        record: record, commit: commit, force: force, trigger: trigger,
         generationAllowance: 128, finalAnswerAllowance: 128,
         permitsScreenshot: false)
+}
+
+private func sourceAssessmentQwenArchitecture() -> QwenArchConfig {
+    let layers: [GTurboQwenLayerTypeV2] = (0..<40).map {
+        ($0 + 1).isMultiple(of: 4) ? .fullAttention : .linearAttention
+    }
+    let wire = GTurboQwenArchitectureV2(
+        hiddenSize: 2_048, numLayers: 40, layerTypes: layers,
+        numAttentionHeads: 16, numKeyValueHeads: 2, headDimension: 256,
+        attentionOutputGate: true, linearConvolutionKernel: 4,
+        linearKeyHeads: 16, linearKeyHeadDimension: 128,
+        linearValueHeads: 32, linearValueHeadDimension: 128,
+        recurrentStateType: .fp32, partialRotaryFactor: 0.25,
+        ropeTheta: 10_000_000, mropeInterleaved: true,
+        mropeSections: [11, 11, 10], numberOfExperts: 256,
+        expertsPerToken: 8, routedExpertIntermediateSize: 512,
+        sharedExpertIntermediateSize: 512, vocabularySize: 248_320,
+        tiedWordEmbeddings: false, hiddenActivation: "silu",
+        bosTokenID: 248_044, eosTokenID: 248_044, imageTokenID: 248_056,
+        videoTokenID: 248_057, visionStartTokenID: 248_053,
+        visionEndTokenID: 248_054)
+    return QwenArchConfig(wire: wire)
+}
+
+private func sourceAssessmentVisionFeatures(
+    context: MetalContext, rows: Int, marker: Float, digest: String
+) throws -> QwenVisionFeatures {
+    let grid = try QwenVisionGrid(
+        temporal: 1, height: rows == 1 ? 2 : 4, width: rows == 1 ? 2 : 4)
+    let position = try QwenMRoPEPosition(temporal: 0, height: 0, width: 0)
+    let profile = GTurboQwenVisionProcessorProfileV2(
+        processorClass: "Qwen3VLProcessor",
+        imageProcessorType: "Qwen2VLImageProcessorFast",
+        patchSize: 16, temporalPatchSize: 2, spatialMergeSize: 2)
+    return try QwenVisionFeatures(
+        device: context.device,
+        features: [Float](repeating: marker, count: rows * 32),
+        positions: Array(repeating: position, count: rows),
+        imageDigest: String(repeating: digest, count: 64),
+        processorDigest: String(repeating: "c", count: 64),
+        profile: profile, grid: grid, hiddenSize: 32)
 }
 
 private let sourceCheckpointTokenizerDirectory = URL(

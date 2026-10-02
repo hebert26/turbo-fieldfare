@@ -40,6 +40,7 @@ struct QwenSourceGroupedPrefillDiagnostics: Sendable, Equatable {
     let mode: Mode
     let tokenCount: Int
     var completedLayers: Int = 0
+    var groupedLinearBatchSizes: [Int: [Int]] = [:]
     var mappedUniqueExperts: [Int: Int] = [:]
     var mappingHits: UInt64 = 0
     var mappingMisses: UInt64 = 0
@@ -60,14 +61,19 @@ actor QwenOfficialSourceRunner {
     private let moeConfiguration: QwenMoEConfiguration
     private let expertSlotCount: Int
     private let hooks: QwenOfficialSourceTransactionHooks
+    private let useGPULinearPreparation: Bool
+    private let useGroupedLinearPrefill: Bool
     /// Only this actor mutates the dictionary. A GPU lease can independently
     /// retain a coordinator, whose hooks retain the same quota reservation.
     private final class ExpertCacheStorage: @unchecked Sendable {
         let reservation: QwenOfficialSourceModel.ExpertCacheReservation
+        let residency: QwenBF16CacheResidency?
         var coordinators: [Int: QwenBF16ExpertMappingCoordinator] = [:]
 
-        init(reservation: QwenOfficialSourceModel.ExpertCacheReservation) {
+        init(reservation: QwenOfficialSourceModel.ExpertCacheReservation,
+             residency: QwenBF16CacheResidency?) {
             self.reservation = reservation
+            self.residency = residency
         }
 
         deinit { coordinators.removeAll() }
@@ -102,9 +108,12 @@ actor QwenOfficialSourceRunner {
 
     init(model: QwenOfficialSourceModel, maxContext: Int,
          expertSlotCount: Int,
-         hooks: QwenOfficialSourceTransactionHooks = .none) throws {
+         hooks: QwenOfficialSourceTransactionHooks = .none,
+         useExpertCacheResidency: Bool? = nil) throws {
         let architecture = model.architecture
         let context = model.context
+        let useGroupedLinearPrefill = ProcessInfo.processInfo.environment[
+            "TURBO_QWEN_GROUPED_LINEAR_PREFILL"] == "1"
         guard maxContext > 0, maxContext <= Int(UInt32.max),
               expertSlotCount >= architecture.expertsPerToken,
               expertSlotCount <= architecture.experts,
@@ -126,8 +135,12 @@ actor QwenOfficialSourceRunner {
             valueHeadDimension: architecture.linearValueDimension)
         // Reserve every possible layer cache before the runner's first GPU
         // allocation. Failed initialization returns the quota through ARC.
-        let expertCacheStorage = ExpertCacheStorage(
-            reservation: try model.reserveExpertCache())
+        let reservation = try model.reserveExpertCache()
+        let residencyEnabled = useExpertCacheResidency ?? (ProcessInfo.processInfo.environment[
+            "TURBO_QWEN_EXPERT_CACHE_RESIDENCY"] == "1")
+        let residency = residencyEnabled ? try QwenBF16CacheResidency(
+            queue: context.queue, layerCount: architecture.layers, slotCount: expertSlotCount) : nil
+        let expertCacheStorage = ExpertCacheStorage(reservation: reservation, residency: residency)
         let linearState = try QwenLinearAttentionState(
             device: context.device,
             linearAttentionLayerMask: architecture.fullAttentionLayerMask.map { 1 - $0 },
@@ -203,7 +216,7 @@ actor QwenOfficialSourceRunner {
                     context: context, weights: weights.weights, names: names,
                     configuration: linearConfiguration, vectors: vectors,
                     layer: layer, state: linearState,
-                    hooks: stepHooks)
+                    hooks: stepHooks, useGroupedCachedRecurrence: useGroupedLinearPrefill)
             } else {
                 throw QwenTextRunnerError.stateArchitectureMismatch
             }
@@ -217,12 +230,20 @@ actor QwenOfficialSourceRunner {
         self.model = model
         self.context = context
         self.hooks = hooks
+        // Internal trial only, fixed for this runner's lifetime. Legacy
+        // diagnostic hooks still select the linear step's separated fallback.
+        useGPULinearPreparation = ProcessInfo.processInfo.environment[
+            "TURBO_QWEN_GPU_LINEAR_PREPARATION"] == "1"
+        let useExpertProjectionBatch = ProcessInfo.processInfo.environment[
+            "TURBO_QWEN_EXPERT_PROJECTION_BATCH"] == "1"
+        self.useGroupedLinearPrefill = useGroupedLinearPrefill
         self.linearState = linearState
         self.fullKV = fullKV
         self.linearSteps = linearSteps
         self.fullSteps = fullSteps
         self.moeConfiguration = moeConfiguration
-        moe = try QwenMoE(context: context, configuration: moeConfiguration)
+        moe = try QwenMoE(context: context, configuration: moeConfiguration,
+                          bf16ProjectionBatch: useExpertProjectionBatch)
         self.expertSlotCount = expertSlotCount
         self.expertCacheStorage = expertCacheStorage
         cacheSummarySnapshot.withLock {
@@ -259,8 +280,17 @@ actor QwenOfficialSourceRunner {
     func produce(token: Int32, position: Int,
                  featureRow: [Float]? = nil,
                  mropePosition: QwenMRoPEPosition? = nil) async throws -> [Float] {
-        try await produceToken(token: token, position: position, featureRow: featureRow,
-                               mropePosition: mropePosition, withinPrefill: false)
+        if let location = QwenCacheMapMeasurement.capture?.qwenProductionLocation(
+            position: position, tokenCount: 1, forward: true) {
+            return try await QwenProductionTimingMeasurement.$location.withValue(location) {
+                let span = QwenProductionTimingMeasurement.span(.forward)
+                defer { span?.finish() }
+                return try await produceToken(token: token, position: position, featureRow: featureRow,
+                    mropePosition: mropePosition, withinPrefill: false)
+            }
+        }
+        return try await produceToken(token: token, position: position, featureRow: featureRow,
+                                      mropePosition: mropePosition, withinPrefill: false)
     }
 
     private func produceToken(token: Int32, position: Int,
@@ -309,7 +339,8 @@ actor QwenOfficialSourceRunner {
                         hidden: normalized, mropePosition: mropePosition,
                         mropeSections: model.architecture.mropeSections)
                 } else if let linear = linearSteps[layer] {
-                    mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1)
+                    mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1,
+                        useGPUPreparation: useGPULinearPreparation)
                 } else { throw QwenTextRunnerError.stateArchitectureMismatch }
                 guard mixer.count == width else { throw QwenTextRunnerError.stateArchitectureMismatch }
                 hooks.observeActivation?(position, layer, "mixer", mixer)
@@ -330,7 +361,7 @@ actor QwenOfficialSourceRunner {
             hooks.observeActivation?(position, -1, "final-norm", final)
             let logits = try await projection(
                 model.entryWeights, model.headName, input: final,
-                outputCount: model.architecture.vocabularySize)
+                outputCount: model.architecture.vocabularySize, timingStage: .head)
             try Task.checkCancellation()
             try model.revalidateSource()
             guard logits.count == model.architecture.vocabularySize,
@@ -508,19 +539,65 @@ actor QwenOfficialSourceRunner {
                 let row = model.layers[layer]
                 var routingExpertIDs = [Int](repeating: 0, count: routeElements)
                 var workByExpert: [Int: [QwenBF16GroupedExpertWork]] = [:]
+                // These rows all belong to the same previous-layer output.
+                // Bound extra host/GPU scratch independently of prompt length.
+                var linearBatchOutput: [Float] = []
+                var linearBatchStart = 0
+                var linearBatchEnd = 0
                 for index in tokenIDs.indices {
                     try Task.checkCancellation()
                     let hidden = Array(UnsafeBufferPointer(
                         start: residual.advanced(by: index * width), count: width))
-                    let normalized = try qwenOfficialSourceRMSNorm(hidden, row.inputNorm)
                     let mixer: [Float]
-                    if let full = fullSteps[layer] {
-                        mixer = try await full.append(hidden: normalized,
-                            mropePosition: mropePositions?[index],
-                            mropeSections: model.architecture.mropeSections)
-                    } else if let linear = linearSteps[layer] {
-                        mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1)
-                    } else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                    if useGroupedLinearPrefill, !hooks.requiresOrderedPrefillStages,
+                       let linear = linearSteps[layer] {
+                        if index >= linearBatchEnd {
+                            linearBatchStart = index
+                            linearBatchEnd = min(index + 16, tokenIDs.count)
+                            var normalizedRows: [Float] = []
+                            normalizedRows.reserveCapacity((linearBatchEnd - index) * width)
+                            for tokenIndex in index..<linearBatchEnd {
+                                try Task.checkCancellation()
+                                let inputRow = Array(UnsafeBufferPointer(
+                                    start: residual.advanced(by: tokenIndex * width), count: width))
+                                normalizedRows += try qwenOfficialSourceRMSNorm(inputRow, row.inputNorm)
+                            }
+                            linearBatchOutput = []
+                            var consumed = 0
+                            // Preserve the exact initial-token source formulation.
+                            // The existing outer prefill checkpoint owns rollback
+                            // if this prefix succeeds but any later operation fails.
+                            if position + index == 0 {
+                                linearBatchOutput += try await linear.append(
+                                    normalizedHidden: Array(normalizedRows.prefix(width)), tokenCount: 1,
+                                    useGPUPreparation: useGPULinearPreparation)
+                                consumed = 1
+                                lastPrefillDiagnostics?.groupedLinearBatchSizes[layer, default: []].append(1)
+                            }
+                            let remaining = linearBatchEnd - index - consumed
+                            if remaining > 0 {
+                                linearBatchOutput += try await linear.append(
+                                    normalizedHidden: Array(normalizedRows.dropFirst(consumed * width)),
+                                    tokenCount: remaining, useGPUPreparation: useGPULinearPreparation)
+                                lastPrefillDiagnostics?.groupedLinearBatchSizes[layer, default: []].append(remaining)
+                            }
+                            guard linearBatchOutput.count == (linearBatchEnd - index) * width else {
+                                throw QwenTextRunnerError.stateArchitectureMismatch
+                            }
+                        }
+                        let offset = (index - linearBatchStart) * width
+                        mixer = Array(linearBatchOutput[offset..<(offset + width)])
+                    } else {
+                        let normalized = try qwenOfficialSourceRMSNorm(hidden, row.inputNorm)
+                        if let full = fullSteps[layer] {
+                            mixer = try await full.append(hidden: normalized,
+                                mropePosition: mropePositions?[index],
+                                mropeSections: model.architecture.mropeSections)
+                        } else if let linear = linearSteps[layer] {
+                            mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1,
+                                useGPUPreparation: useGPULinearPreparation)
+                        } else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                    }
                     guard mixer.count == width else {
                         throw QwenTextRunnerError.stateArchitectureMismatch
                     }
@@ -592,7 +669,11 @@ actor QwenOfficialSourceRunner {
                         // their current subset as hits without evicting this group.
                         let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
                         try model.revalidateSource()
-                        let lease = try await coordinator.map(expertIDs: requested)
+                        let measurement = QwenCacheMapMeasurement.capture.map {
+                            QwenCacheMapContext(capture: $0, layer: layer,
+                                                position: position, tokenCount: tokenIDs.count)
+                        }
+                        let lease = try await coordinator.map(expertIDs: requested, measurement: measurement)
                         successfulCacheHits += UInt64(lease.diagnostics.hits)
                         successfulCacheMisses += UInt64(lease.diagnostics.misses)
                         publishCacheSummary()
@@ -842,7 +923,8 @@ actor QwenOfficialSourceRunner {
     }
 
     private func projection(_ weights: QwenBF16Weights, _ name: String,
-                            input: [Float], outputCount: Int) async throws -> [Float] {
+                            input: [Float], outputCount: Int,
+                            timingStage: QwenProductionStage = .router) async throws -> [Float] {
         let inputBuffer = try floats(input, label: "source projection input")
         let outputBuffer = try buffer(elements: outputCount,
                                       stride: MemoryLayout<Float>.stride,
@@ -851,11 +933,16 @@ actor QwenOfficialSourceRunner {
         try weights.encodeProjection(commandBuffer: command, tensorName: name,
                                      input: inputBuffer, tokenCount: 1,
                                      output: outputBuffer)
-        try await settle(command, stage: "source.projection")
+        try await settle(command, stage: "source.projection", timingStage: timingStage)
         return read(outputBuffer, count: outputCount)
     }
 
     private func moeStep(input: [Float], layer: Int) async throws -> [Float] {
+        if let location = QwenProductionTimingMeasurement.location, location.layer != layer {
+            return try await QwenProductionTimingMeasurement.$location.withValue(location.atLayer(layer)) {
+                try await moeStep(input: input, layer: layer)
+            }
+        }
         let row = model.layers[layer]
         let routeLogits = try await projection(row.weights, row.routerName,
             input: input, outputCount: model.architecture.experts)
@@ -881,7 +968,14 @@ actor QwenOfficialSourceRunner {
         try model.revalidateSource()
         let coordinator = try expertCoordinator(layer: layer)
         lastRoutedExpertCount = experts.count
-        let lease = try await coordinator.map(expertIDs: experts)
+        let measurement = QwenCacheMapMeasurement.capture.map {
+            QwenCacheMapContext(capture: $0, layer: layer, position: committedPosition, tokenCount: 1)
+        }
+        let mapSpan = QwenProductionTimingMeasurement.span(.expertMap)
+        let lease: QwenBF16ExpertLease
+        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement) }
+        catch { mapSpan?.finish(); throw error }
+        mapSpan?.finish()
         // Mapping has succeeded. Later GPU failure/cancellation cannot undo
         // these completed cache reads, even when the token is rolled back.
         successfulCacheHits += UInt64(lease.diagnostics.hits)
@@ -899,11 +993,12 @@ actor QwenOfficialSourceRunner {
                                     stride: MemoryLayout<Float>.stride,
                                     label: "source MoE output")
             let scratch = try moe.makeScratch()
+            let timing = QwenProductionTimingMeasurement.command(.moe)
             let command = try moe.submitExpertsBF16(
                 hidden: hiddenBuffer, lease: lease, routingWeights: routingBuffer,
                 sharedWeights: row.weights, sharedNames: row.sharedNames,
-                scratch: scratch, output: output)
-            try await settleSubmitted(command, stage: "source.moe")
+                scratch: scratch, output: output, timing: timing)
+            try await settleSubmitted(command, stage: "source.moe", timing: timing)
             return read(output, count: model.architecture.hiddenSize)
         } catch {
             try? lease.cancel()
@@ -935,7 +1030,7 @@ actor QwenOfficialSourceRunner {
                     guard case let .beforeProtectedRead(expert, stream) = checkpoint else { return }
                     try hooks.beforeProtectedExpertRead(layer, expert, stream)
                 }
-            })
+            }, cacheResidency: expertCacheStorage.residency)
         guard coordinator.allocatedCacheBytes == bytes else {
             throw QwenBF16ExpertCacheError.invalidGeometry
         }
@@ -976,22 +1071,28 @@ actor QwenOfficialSourceRunner {
         return command
     }
 
-    private func settle(_ command: MTLCommandBuffer, stage: String) async throws {
+    private func settle(_ command: MTLCommandBuffer, stage: String,
+                        timingStage: QwenProductionStage = .embedding) async throws {
         try Task.checkCancellation()
+        let timing = QwenProductionTimingMeasurement.command(timingStage)
+        timing?.willCommit(command)
         command.commit()
-        try await settleSubmitted(command, stage: stage)
+        timing?.didCommit()
+        try await settleSubmitted(command, stage: stage, timing: timing)
     }
 
     private func settleSubmitted(_ command: MTLCommandBuffer,
-                                 stage: String) async throws {
+                                 stage: String, timing: QwenProductionCommand? = nil) async throws {
         var hookError: Error?
         do { try await hooks.afterActualGPUSubmission(stage) }
         catch { hookError = error }
+        timing?.willWait()
         await withTaskCancellationHandler {
             await command.completed()
         } onCancel: {
             // GPU work cannot be cancelled. Keep all buffers alive until done.
         }
+        timing?.resumed(command)
         // This observer reports terminal GPU settlement, not successful GPU
         // execution. Run it even if the earlier submission gate failed; its
         // own failure must not hide that original error or the Metal status.

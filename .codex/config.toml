@@ -6,9 +6,5 @@ default_subagent_reasoning_effort = "medium"
 interrupt_message = true
 job_max_runtime_seconds = 1800
 
-[agents.luna-max-investigator]
-description = "Max-reasoning Luna investigator for deep, read-only VisionCapture code, history, document, and evidence audits."
-config_file = "/Users/dev-machine/Dev/VisionOS/.codex/agents/luna-max-investigator.toml"
-
 [mcp_servers.vision-capture]
 url = "http://127.0.0.1:8766/mcp"

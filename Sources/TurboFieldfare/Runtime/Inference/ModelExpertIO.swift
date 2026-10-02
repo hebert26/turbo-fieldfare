@@ -662,6 +662,106 @@ struct QwenBF16MappedExpert: @unchecked Sendable {
     let downLength: Int
 }
 
+enum QwenBF16CacheResidencyError: Error, Equatable {
+    case invalidGeometry
+    case invalidLayer(Int)
+    case duplicateLayer(Int)
+    case invalidAllocations
+}
+
+struct QwenBF16CacheResidencySnapshot: Equatable, Sendable {
+    let registeredLayerCount: Int
+    let expectedLayerCount: Int
+    let allocationCount: Int
+    let expectedAllocationCount: Int
+    let allocatedSize: UInt64
+    /// A request was issued, not a guarantee that all pages are resident.
+    let requested: Bool
+}
+
+/// One set for the runner's entire lazy BF16 cache, on the actual shared queue.
+/// No set mutation after attachment, and no coordinator references/cycles.
+/// Leases retain their coordinators, which retain this owner through settlement.
+final class QwenBF16CacheResidency: @unchecked Sendable {
+    private let queue: MTLCommandQueue
+    private let set: MTLResidencySet
+    private let layerCount: Int
+    private let allocationsPerLayer: Int
+    private let expectedAllocationCount: Int
+    private let lock = NSLock()
+    private var layers = Set<Int>()
+    private var allocationIDs = Set<ObjectIdentifier>()
+    private var retainedAllocations: [MTLBuffer] = []
+    private var requested = false
+
+    init(queue: MTLCommandQueue, layerCount: Int, slotCount: Int) throws {
+        let (perLayer, perLayerOverflow) = slotCount.multipliedReportingOverflow(by: 2)
+        let (count, countOverflow) = layerCount.multipliedReportingOverflow(by: perLayer)
+        guard layerCount > 0, slotCount > 0, !perLayerOverflow, !countOverflow,
+              count > 0 else { throw QwenBF16CacheResidencyError.invalidGeometry }
+        let descriptor = MTLResidencySetDescriptor()
+        descriptor.label = "qwen.source.bf16.expert-cache"
+        descriptor.initialCapacity = count
+        // Explicit opt-in must report unsupported-device/API errors, not silently
+        // produce an ordinary run labeled as a residency trial.
+        set = try queue.device.makeResidencySet(descriptor: descriptor)
+        self.queue = queue
+        self.layerCount = layerCount
+        allocationsPerLayer = perLayer
+        expectedAllocationCount = count
+    }
+
+    func register(layer: Int, allocations: [MTLBuffer]) throws {
+        lock.lock(); defer { lock.unlock() }
+        guard layer >= 0, layer < layerCount else {
+            throw QwenBF16CacheResidencyError.invalidLayer(layer)
+        }
+        guard !layers.contains(layer) else {
+            throw QwenBF16CacheResidencyError.duplicateLayer(layer)
+        }
+        let ids = Set(allocations.map { ObjectIdentifier($0) })
+        guard allocations.count == allocationsPerLayer,
+              ids.count == allocations.count, ids.isDisjoint(with: allocationIDs),
+              allocations.allSatisfy({ $0.device === queue.device && $0.storageMode == .shared }) else {
+            throw QwenBF16CacheResidencyError.invalidAllocations
+        }
+        // All validation precedes the first set mutation. The unattached set is
+        // invisible to queue submissions throughout lazy registration.
+        for allocation in allocations { set.addAllocation(allocation) }
+        retainedAllocations.append(contentsOf: allocations)
+        allocationIDs.formUnion(ids)
+        layers.insert(layer)
+        if layers.count == layerCount {
+            set.commit()
+            set.requestResidency()
+            queue.addResidencySet(set)
+            requested = true
+        }
+    }
+
+    func snapshot() -> QwenBF16CacheResidencySnapshot {
+        lock.lock(); defer { lock.unlock() }
+        return QwenBF16CacheResidencySnapshot(
+            registeredLayerCount: layers.count, expectedLayerCount: layerCount,
+            allocationCount: set.allocationCount, expectedAllocationCount: expectedAllocationCount,
+            allocatedSize: set.allocatedSize, requested: requested)
+    }
+
+    deinit {
+        // The last lease/coordinator releases this owner only after its submitted
+        // GPU use completes. Detach first; existing encoder hazard calls remain.
+        // All set methods (including inspections) share this synchronization.
+        lock.lock()
+        if requested {
+            queue.removeResidencySet(set)
+            set.endResidency()
+        }
+        set.removeAllAllocations()
+        set.commit()
+        lock.unlock()
+    }
+}
+
 /// The only production owner of this layer's paired cache. Its I/O worker
 /// serializes one plan+fetch at a time; the state lock protects active GPU
 /// slots without holding a lock across reads, hooks or suspension.
@@ -679,6 +779,7 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
         let identifier: UInt64
         let plan: ExpertCachePlan
         let buffers: [QwenBF16PairedExpertCache.Buffers]
+        let measurementMapID: UInt64?
     }
     private final class CancellationFlag: @unchecked Sendable {
         private let lock = NSLock()
@@ -692,6 +793,8 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
     let allocatedCacheBytes: UInt64
     private let device: MTLDevice
     private let cache: QwenBF16PairedExpertCache
+    // Keep the single runner-wide residency set alive for every pending lease.
+    private let cacheResidency: QwenBF16CacheResidency?
     private let hooks: QwenBF16ExpertReadHooks
     private let stateLock = NSLock()
     private let ioLock = NSLock()
@@ -703,7 +806,8 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
          layer: Int, configuration: QwenMoEConfiguration,
          device: MTLDevice, slotCount: Int, residencyBudget: UInt64,
          cachePolicy: ExpertCachePolicy = .lru,
-         readHooks: QwenBF16ExpertReadHooks = .none) throws {
+         readHooks: QwenBF16ExpertReadHooks = .none,
+         cacheResidency: QwenBF16CacheResidency? = nil) throws {
         guard layer >= 0, UInt32(exactly: layer) != nil else {
             throw QwenExpertMappingError.invalidLayer(layer)
         }
@@ -714,6 +818,8 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
             intermediateSize: configuration.routedIntermediateSize,
             device: device, slotCount: slotCount, residencyBudget: residencyBudget,
             cachePolicy: cachePolicy)
+        try cacheResidency?.register(layer: layer, allocations: cache.residencyAllocations)
+        self.cacheResidency = cacheResidency
         self.cache = cache
         self.slotCount = slotCount
         expertCount = configuration.expertCount
@@ -722,31 +828,47 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
         hooks = readHooks
     }
 
-    func map(expertIDs: [Int]) async throws -> QwenBF16ExpertLease {
-        guard expertIDs.count <= slotCount else {
-            throw QwenExpertMappingError.insufficientUnpinnedSlots
-        }
-        var seen = Set<Int>()
-        for expert in expertIDs {
-            guard expert >= 0, expert < expertCount else {
-                throw QwenExpertMappingError.invalidExpert(expert)
+    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil) async throws -> QwenBF16ExpertLease {
+        do {
+            guard expertIDs.count <= slotCount else {
+                throw QwenExpertMappingError.insufficientUnpinnedSlots
             }
-            guard seen.insert(expert).inserted else {
-                throw QwenExpertMappingError.duplicateExpertWithinToken(expert)
+            var seen = Set<Int>()
+            for expert in expertIDs {
+                guard expert >= 0, expert < expertCount else {
+                    throw QwenExpertMappingError.invalidExpert(expert)
+                }
+                guard seen.insert(expert).inserted else {
+                    throw QwenExpertMappingError.duplicateExpertWithinToken(expert)
+                }
             }
+        } catch {
+            if let measurement {
+                let identifier = measurement.capture.beginQwenCacheMap(measurement)
+                measurement.capture.recordQwenCacheUnplanned(identifier, experts: expertIDs)
+                measurement.capture.recordQwenCacheOutcome(identifier, status: 1, stage: 0)
+            }
+            throw error
         }
         let canceled = CancellationFlag()
+        let handoff = QwenProductionTimingMeasurement.workerHandoff()
         return try await withTaskCancellationHandler {
             let outcome: Result<FetchResult, Error> = await withCheckedContinuation { continuation in
                 DispatchQueue.global(qos: .userInitiated).async { [self] in
-                    continuation.resume(returning: Result {
-                        try performFetch(expertIDs: expertIDs, canceled: canceled)
-                    })
+                    let outcome = Result {
+                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement)
+                    }
+                    handoff?.completed()
+                    continuation.resume(returning: outcome)
                 }
             }
+            handoff?.resumed()
             let result = try outcome.get()
             if canceled.isCanceled() || Task.isCancelled {
                 releaseUnsubmitted(identifier: result.identifier)
+                if let measurement, let identifier = result.measurementMapID {
+                    measurement.capture.recordQwenCacheOutcome(identifier, status: 2, stage: 3)
+                }
                 throw CancellationError()
             }
             let mapped = zip(result.plan.experts.indices, result.buffers).map { index, pair in
@@ -756,6 +878,9 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
                     gateUp: pair.gateUp, down: pair.down,
                     gateUpLength: cache.gateUpBytes,
                     downLength: cache.downBytes)
+            }
+            if let measurement, let identifier = result.measurementMapID {
+                measurement.capture.recordQwenCacheOutcome(identifier, status: 0, stage: 3)
             }
             return QwenBF16ExpertLease(
                 coordinator: self, identifier: result.identifier,
@@ -769,42 +894,72 @@ final class QwenBF16ExpertMappingCoordinator: @unchecked Sendable {
         }
     }
 
-    private func performFetch(expertIDs: [Int], canceled: CancellationFlag) throws -> FetchResult {
+    private func performFetch(expertIDs: [Int], canceled: CancellationFlag,
+                              measurement: QwenCacheMapContext?) throws -> FetchResult {
         ioLock.lock()
         defer { ioLock.unlock() }
-        if canceled.isCanceled() { throw CancellationError() }
-        let reserved: (UInt64, ExpertCachePlan) = try withStateLock {
-            guard let plan = cache.plan(
-                expertIDs: expertIDs, avoidingSlots: Set(activeSlots.keys)) else {
-                throw QwenExpertMappingError.insufficientUnpinnedSlots
+        if canceled.isCanceled() {
+            if let measurement {
+                let identifier = measurement.capture.beginQwenCacheMap(measurement)
+                measurement.capture.recordQwenCacheUnplanned(identifier, experts: expertIDs)
+                measurement.capture.recordQwenCacheOutcome(identifier, status: 2, stage: 1)
             }
-            for index in plan.experts.indices {
-                let slot = plan.assignedSlots[index]
-                if let active = activeSlots[slot], active.expertID != plan.experts[index] {
+            throw CancellationError()
+        }
+        if let measurement {
+            measurement.capture.recordQwenCacheInitial(layer: measurement.layer, expertCount: expertCount,
+                                                       snapshot: cache.measurementSnapshot)
+        }
+        let mapID = measurement.map { $0.capture.beginQwenCacheMap($0) }
+        let reserved: (UInt64, ExpertCachePlan)
+        do {
+            reserved = try withStateLock {
+                let avoiding = Set(activeSlots.keys)
+                guard let plan = cache.plan(expertIDs: expertIDs, avoidingSlots: avoiding) else {
                     throw QwenExpertMappingError.insufficientUnpinnedSlots
                 }
-            }
-            let identifier = allocateIdentifierLocked()
-            for index in plan.experts.indices {
-                let slot = plan.assignedSlots[index]
-                if var active = activeSlots[slot] {
-                    active.referenceCount += 1
-                    activeSlots[slot] = active
-                } else {
-                    activeSlots[slot] = ActiveSlot(
-                        expertID: plan.experts[index], referenceCount: 1)
+                for index in plan.experts.indices {
+                    let slot = plan.assignedSlots[index]
+                    if let active = activeSlots[slot], active.expertID != plan.experts[index] {
+                        throw QwenExpertMappingError.insufficientUnpinnedSlots
+                    }
                 }
+                if let measurement, let mapID {
+                    measurement.capture.recordQwenCachePlan(mapID, plan: plan,
+                                                           clock: cache.measurementClock, avoidingSlots: avoiding)
+                }
+                let identifier = allocateIdentifierLocked()
+                for index in plan.experts.indices {
+                    let slot = plan.assignedSlots[index]
+                    if var active = activeSlots[slot] {
+                        active.referenceCount += 1
+                        activeSlots[slot] = active
+                    } else {
+                        activeSlots[slot] = ActiveSlot(
+                            expertID: plan.experts[index], referenceCount: 1)
+                    }
+                }
+                reservations[identifier] = Reservation(
+                    slots: plan.assignedSlots, submitted: false, canceled: false)
+                return (identifier, plan)
             }
-            reservations[identifier] = Reservation(
-                slots: plan.assignedSlots, submitted: false, canceled: false)
-            return (identifier, plan)
+        } catch {
+            if let measurement, let mapID {
+                measurement.capture.recordQwenCacheUnplanned(mapID, experts: expertIDs)
+                measurement.capture.recordQwenCacheOutcome(mapID, status: error is CancellationError ? 2 : 1, stage: 1)
+            }
+            throw error
         }
         do {
             let buffers = try cache.load(reserved.1, hooks: hooks,
                                          canceled: { canceled.isCanceled() })
-            return FetchResult(identifier: reserved.0, plan: reserved.1, buffers: buffers)
+            return FetchResult(identifier: reserved.0, plan: reserved.1, buffers: buffers,
+                               measurementMapID: mapID)
         } catch {
             releaseUnsubmitted(identifier: reserved.0)
+            if let measurement, let mapID {
+                measurement.capture.recordQwenCacheOutcome(mapID, status: error is CancellationError ? 2 : 1, stage: 2)
+            }
             throw error
         }
     }
@@ -915,6 +1070,7 @@ final class QwenBF16ExpertLease: @unchecked Sendable {
 
     @discardableResult
     func submit(on queue: MTLCommandQueue,
+                timing: QwenProductionCommand? = nil,
                 encode: (MTLCommandBuffer) throws -> Void) throws -> MTLCommandBuffer {
         guard let command = queue.makeCommandBuffer() else {
             throw QwenExpertMappingError.commandBufferUnavailable
@@ -932,12 +1088,19 @@ final class QwenBF16ExpertLease: @unchecked Sendable {
         }
         do {
             try encode(command)
+            timing?.willCommit(command)
             command.commit()
+            timing?.didCommit()
             return command
         } catch {
             try? cancel()
             // Even partially encoded work owns both pins until completion.
-            if command.status == .notEnqueued { command.commit() }
+            if command.status == .notEnqueued {
+                timing?.willCommit(command)
+                command.commit()
+                timing?.didCommit()
+            }
+            timing?.submittedWithoutSettlement()
             throw error
         }
     }

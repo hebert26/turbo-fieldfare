@@ -754,6 +754,173 @@ private func maxLinearDifference(_ lhs: [Float], _ rhs: [Float]) -> Float {
     }
 }
 
+extension QwenBF16LinearAttentionTests {
+    @Test func gpuPreparationReplacesTwoSettledCommandsWithOne() async throws {
+        let f = QwenBF16LinearFixture.self
+        let source = try QwenBF16SyntheticSource.make(tensors: f.literalTensors())
+        defer { source.remove() }
+        let context = try MetalContext()
+        let weights = try makeLinearWeights(context: context, source: source)
+        for prepared in [false, true] {
+            let step = try makeLinearStep(context: context, weights: weights,
+                                          state: makeLinearState(context: context))
+            let capture = RuntimeMeasurementCapture(qwenCacheCaptureMode: .prefillAndDecode)
+            #expect(capture.beginQwenCacheMaps(layerCount: 1, expertCount: 9, slotCount: 8, pairBytes: 96))
+            #expect(capture.beginQwenProductionTiming())
+            capture.setQwenCacheMapPhase(.decode)
+            let location = try #require(capture.qwenProductionLocation(position: 7, tokenCount: 1, forward: true))
+            _ = try await QwenProductionTimingMeasurement.$location.withValue(location) {
+                try await step.append(normalizedHidden: Array(f.tokens.prefix(f.hiddenSize)),
+                                      tokenCount: 1, useGPUPreparation: prepared)
+            }
+            capture.endQwenProductionTiming()
+            capture.finish(status: 0)
+            struct Batch: Decodable { let records: [[UInt64]] }
+            var rows: [[UInt64]] = []
+            while let batch = capture.drainJSONBatch(maximumBytes: RuntimeMeasurementCapture.maximumJSONBatchBytes) {
+                rows += try JSONDecoder().decode(Batch.self, from: batch.data).records
+            }
+            let commands = rows.filter { $0.count == 6 && $0[0] == 161 }
+            let waits = rows.filter { $0.count == 6 && $0[0] == 162 }
+            #expect(commands.count == (prepared ? 1 : 2))
+            #expect(waits.count == commands.count)
+            #expect(commands.map { $0[2] } == (prepared
+                ? [QwenProductionStage.linearPreparedStep.rawValue]
+                : [QwenProductionStage.linearProjectionsConvolution.rawValue,
+                   QwenProductionStage.linearRecurrenceOutput.rawValue]))
+        }
+    }
+
+    @Test func gpuPreparationCombinedPathMatchesCPUAcrossCommittedStepsExactly() async throws {
+        let f = QwenBF16LinearFixture.self
+        let source = try QwenBF16SyntheticSource.make(tensors: f.literalTensors())
+        defer { source.remove() }
+        let context = try MetalContext()
+        let weights = try makeLinearWeights(context: context, source: source)
+        for initialPosition in [0, 7] {
+            let cpu = try makeLinearStep(context: context, weights: weights,
+                state: makeLinearState(context: context, position: initialPosition))
+            let gpu = try makeLinearStep(context: context, weights: weights,
+                state: makeLinearState(context: context, position: initialPosition))
+            for count in [1, 3, 1, 3] {
+                let input = Array(f.tokens.prefix(count * f.hiddenSize))
+                let expected = try await cpu.append(normalizedHidden: input, tokenCount: count)
+                let actual = try await gpu.append(normalizedHidden: input, tokenCount: count,
+                                                  useGPUPreparation: true)
+                #expect(actual.map(\.bitPattern) == expected.map(\.bitPattern))
+                let a = try await gpu.snapshot(), e = try await cpu.snapshot()
+                #expect(a.position == e.position)
+                #expect(a.state.convolutionHistory.map(\.bitPattern) == e.state.convolutionHistory.map(\.bitPattern))
+                #expect(a.state.recurrentMatrix.map(\.bitPattern) == e.state.recurrentMatrix.map(\.bitPattern))
+            }
+        }
+    }
+
+    @Test func gpuPreparationCombinedFailuresAndCancellationPreserveStateAndPermitRetry() async throws {
+        let f = QwenBF16LinearFixture.self
+        let source = try QwenBF16SyntheticSource.make(tensors: f.literalTensors())
+        defer { source.remove() }
+        let context = try MetalContext()
+        let weights = try makeLinearWeights(context: context, source: source)
+        let stage = "projections-convolution-preparation-recurrence-output"
+        let targets: [LinearCheckpointTarget] = [.beforeSubmission(stage), .afterSubmission(stage), .beforeCommit]
+        for target in targets {
+            for cancellation in [false, true] {
+                let step = try makeLinearStep(context: context, weights: weights,
+                                              state: makeLinearState(context: context))
+                let before = try await step.snapshot()
+                let failure = OneShotLinearFailure(target: target)
+                let gate = AsyncLinearCheckpointGate()
+                let hooks = QwenBF16LinearPreparationHooks(checkpoint: { checkpoint in
+                    if cancellation {
+                        if target.matches(checkpoint) { await gate.suspendUntilReleased() }
+                    } else { try await failure.checkpoint(checkpoint) }
+                })
+                let operation = Task {
+                    try await step.append(normalizedHidden: f.tokens, tokenCount: f.tokenCount,
+                                          useGPUPreparation: true, preparationHooks: hooks)
+                }
+                if cancellation {
+                    await gate.waitUntilEntered()
+                    operation.cancel()
+                    await gate.release()
+                }
+                var rejected = false
+                do { _ = try await operation.value }
+                catch is CancellationError { rejected = cancellation }
+                catch is InjectedLinearFailure { rejected = !cancellation }
+                catch { Issue.record("Unexpected fused failure: \(error)") }
+                #expect(rejected)
+                #expect(try await step.snapshot() == before)
+                let control = try makeLinearStep(context: context, weights: weights,
+                                                 state: makeLinearState(context: context))
+                let expected = try await control.append(normalizedHidden: f.tokens, tokenCount: f.tokenCount)
+                let retry = try await step.append(normalizedHidden: f.tokens, tokenCount: f.tokenCount,
+                                                 useGPUPreparation: true)
+                #expect(retry.map(\.bitPattern) == expected.map(\.bitPattern))
+                let actualState = try await step.snapshot()
+                let expectedState = try await control.snapshot()
+                #expect(actualState == expectedState)
+            }
+        }
+    }
+
+    @Test func gpuPreparationRejectsActualNonfiniteProjectionsAndDecayBeforePublication() async throws {
+        let f = QwenBF16LinearFixture.self
+        let source = try QwenBF16SyntheticSource.make(tensors: f.literalTensors())
+        defer { source.remove() }
+        let context = try MetalContext()
+        let weights = try makeLinearWeights(context: context, source: source)
+        for decayOverflow in [false, true] {
+            let original = QwenBF16LinearTestSupport.vectors
+            let vectors = decayOverflow ? QwenBF16LinearVectors(
+                convolution: original.convolution, normalization: original.normalization,
+                aLog: Array(repeating: 88, count: f.valueHeadCount),
+                timeStepBias: Array(repeating: 0, count: f.valueHeadCount)) : original
+            let step = try makeLinearStep(context: context, weights: weights,
+                state: makeLinearState(context: context), vectors: vectors)
+            let before = try await step.snapshot()
+            let invalid = decayOverflow ? Array(f.tokens.prefix(f.hiddenSize)).map { $0 * 1000 }
+                : Array(repeating: Float.greatestFiniteMagnitude, count: f.hiddenSize)
+            var rejected = false
+            do { _ = try await step.append(normalizedHidden: invalid, tokenCount: 1, useGPUPreparation: true) }
+            catch QwenTextRunnerError.invalidState(let detail) {
+                rejected = true
+                #expect(detail.contains(decayOverflow ? "recurrence inputs" : "projections"))
+            }
+            #expect(rejected)
+            #expect(try await step.snapshot() == before)
+            let control = try makeLinearStep(context: context, weights: weights,
+                state: makeLinearState(context: context), vectors: vectors)
+            let safe = Array(repeating: Float.zero, count: f.hiddenSize)
+            let expected = try await control.append(normalizedHidden: safe, tokenCount: 1)
+            let actual = try await step.append(normalizedHidden: safe, tokenCount: 1, useGPUPreparation: true)
+            #expect(actual.map(\.bitPattern) == expected.map(\.bitPattern))
+            let actualState = try await step.snapshot()
+                let expectedState = try await control.snapshot()
+                #expect(actualState == expectedState)
+        }
+    }
+
+    @Test func gpuPreparationOptInPreservesObservedFallbackStages() async throws {
+        let f = QwenBF16LinearFixture.self
+        let source = try QwenBF16SyntheticSource.make(tensors: f.literalTensors())
+        defer { source.remove() }
+        let context = try MetalContext()
+        let weights = try makeLinearWeights(context: context, source: source)
+        let trace = LinearActivationTraceRecorder()
+        let step = try makeLinearStep(context: context, weights: weights,
+            state: makeLinearState(context: context), hooks: QwenBF16LinearHooks(
+                observeActivation: { _, stage, values in trace.record(stage: stage, count: values.count) }))
+        _ = try await step.append(normalizedHidden: f.tokens, tokenCount: f.tokenCount,
+            useGPUPreparation: true, preparationHooks: QwenBF16LinearPreparationHooks(checkpoint: { _ in
+                Issue.record("Fused checkpoint must not execute in observed fallback")
+            }))
+        #expect(trace.snapshot().map(\.stage) == ["input", "qkv", "z", "b", "a", "convolved",
+            "query-raw", "key-raw", "value", "beta", "log-decay", "core", "gated", "output"])
+    }
+}
+
 private enum QwenBF16LinearTestSupport {
     static let layer = 2
     static let initialPosition = 7

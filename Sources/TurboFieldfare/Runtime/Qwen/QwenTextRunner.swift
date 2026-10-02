@@ -1923,10 +1923,16 @@ actor QwenBF16FullAttentionStep {
                 headCount: attention.configuration.keyValueHeadCount, startPosition: position)
             try await submitAndSettle(normCommand, stage: "normRoPE")
         }
-        let preGate = try attention.attentionStep(
-            rotatedQuery: Self.readFloats(rotatedQuery, count: queryWidth),
-            rotatedKey: Self.readFloats(rotatedKey, count: keyValueWidth),
-            value: Self.readFloats(value, count: keyValueWidth), cache: cache)
+        let attentionSpan = QwenProductionTimingMeasurement.span(
+            .cpuAttention, layer: layer, synchronousCPU: true)
+        let preGate: [Float]
+        do {
+            preGate = try attention.attentionStep(
+                rotatedQuery: Self.readFloats(rotatedQuery, count: queryWidth),
+                rotatedKey: Self.readFloats(rotatedKey, count: keyValueWidth),
+                value: Self.readFloats(value, count: keyValueWidth), cache: cache)
+        } catch { attentionSpan?.finish(); throw error }
+        attentionSpan?.finish()
         let attentionInput = try Self.floatBuffer(preGate, device: context.device,
                                                   label: "qwen.bf16.attention.values")
         let gateInput = try Self.floatBuffer(gateValues, device: context.device,
@@ -1963,7 +1969,10 @@ actor QwenBF16FullAttentionStep {
                                  stage: String) async throws {
         try await hooks.checkpoint(.beforeSubmission(stage: stage))
         try Task.checkCancellation()
+        let timing = QwenProductionTimingMeasurement.command(.full(stage), layer: layer)
+        timing?.willCommit(command)
         command.commit()
+        timing?.didCommit()
         // A hook may suspend, throw or observe cancellation after submission.
         // Regardless, settle this command before any caller releases scratch.
         var hookError: Error?
@@ -1971,11 +1980,13 @@ actor QwenBF16FullAttentionStep {
         catch { hookError = error }
         // Match the existing hybrid runner's cancellation-safe completion
         // boundary: cancellation never releases submitted GPU scratch early.
+        timing?.willWait()
         await withTaskCancellationHandler {
             await command.completed()
         } onCancel: {
             // GPU work cannot be cancelled; always await its actual completion.
         }
+        timing?.resumed(command)
         if let hookError { throw hookError }
         guard command.status == .completed, command.error == nil else {
             throw QwenTextRunnerError.gpuExecution(
@@ -2076,6 +2087,16 @@ struct QwenBF16LinearHooks: Sendable {
     static let none = Self()
 }
 
+/// Internal opt-in fused-path failure gates. These never force separated
+/// stages and cannot supply inputs, outputs, weights or a state reservation.
+struct QwenBF16LinearPreparationHooks: Sendable {
+    let checkpoint: @Sendable (QwenBF16LinearHooks.Checkpoint) async throws -> Void
+    init(checkpoint: (@Sendable (QwenBF16LinearHooks.Checkpoint) async throws -> Void)? = nil) {
+        self.checkpoint = checkpoint ?? { _ in }
+    }
+    static let none = Self()
+}
+
 /// A separate BF16 linear step. The packed runner's two early state submissions
 /// are deliberately untouched. One reservation spans convolution, recurrence
 /// and output; none of its GPU writes alias committed history or matrix storage.
@@ -2093,13 +2114,16 @@ actor QwenBF16LinearStep {
     private let aLog: [Float]
     private let timeStepBias: [Float]
     private var inFlight = false
+    private var cachedGPUPreparation: (runtime: QwenSourceLinearPreparation,
+                                       aLog: MTLBuffer, timeStepBias: MTLBuffer)?
 
     init(context: MetalContext, weights: QwenBF16Weights,
          names: QwenBF16LinearNames,
          configuration: QwenGatedDeltaNetConfiguration,
          vectors: QwenBF16LinearVectors, layer: Int,
          state: QwenLinearAttentionState,
-         hooks: QwenBF16LinearHooks = .none) throws {
+         hooks: QwenBF16LinearHooks = .none,
+         useGroupedCachedRecurrence: Bool = false) throws {
         let channels = configuration.convolutionChannelCount
         let valueWidth = configuration.valueDimension
         let recurrent = try Self.product(
@@ -2149,7 +2173,8 @@ actor QwenBF16LinearStep {
         self.names = names
         self.configuration = configuration
         runtime = try QwenGatedDeltaNet(context: context, configuration: configuration,
-                                      useOfficialSourceMath: true)
+                                      useOfficialSourceMath: true,
+                                      useGroupedCachedRecurrence: useGroupedCachedRecurrence)
         self.state = state
         self.layer = layer
         self.hooks = hooks
@@ -2164,6 +2189,14 @@ actor QwenBF16LinearStep {
     }
 
     func append(normalizedHidden: [Float], tokenCount: Int) async throws -> [Float] {
+        try await append(normalizedHidden: normalizedHidden, tokenCount: tokenCount,
+                         useGPUPreparation: false)
+    }
+
+    /// Internal trial only. Explicit legacy observations/fault gates keep the
+    /// original CPU preparation and separate-stage path even when requested.
+    func append(normalizedHidden: [Float], tokenCount: Int, useGPUPreparation: Bool,
+                preparationHooks: QwenBF16LinearPreparationHooks = .none) async throws -> [Float] {
         guard !inFlight else { throw QwenTextRunnerError.operationInProgress }
         // Bound per-call scratch and all UInt32 arithmetic used inside Metal.
         guard (1...256).contains(tokenCount) else {
@@ -2199,6 +2232,8 @@ actor QwenBF16LinearStep {
         inFlight = true
         defer { inFlight = false }
         try Task.checkCancellation()
+        let prepareOnGPU = useGPUPreparation && !hooks.requiresSeparateGPUStages
+        let preparation = prepareOnGPU ? try requireGPUPreparation() : nil
         let update = try state.reserveUpdate(layer: layer)
         var published = false
         defer { if !published { try? state.cancel(update) } }
@@ -2232,7 +2267,8 @@ actor QwenBF16LinearStep {
         let channelMajor = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.channelMajor")
         let convolvedMajor = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.convolvedMajor")
         let convolved = try emptyBuffer(qkvCount, label: "qwen.bf16.linear.convolved")
-        // One deferred state reservation still owns both combined commands.
+        // One deferred reservation owns every encoder. The opt-in path
+        // joins the two unobserved commands without intermediate publication.
         let convolution = hooks.requiresSeparateGPUStages
             ? try commandBuffer(stage: "convolution") : projection
         try runtime.encodeLayout(commandBuffer: convolution, input: qkv,
@@ -2245,72 +2281,101 @@ actor QwenBF16LinearStep {
         try runtime.encodeLayout(commandBuffer: convolution, input: convolvedMajor,
                                  output: convolved, tokenCount: tokenCount,
                                  channelCount: channels, tokenToChannel: false)
-        try await submitAndSettle(convolution,
-            stage: hooks.requiresSeparateGPUStages ? "convolution" : "projections-convolution",
-            update: update)
-
-        let projected = Self.readFloats(convolved, count: qkvCount)
-        let betaRaw = Self.readFloats(rawBeta, count: scalarCount)
-        let aRaw = Self.readFloats(rawA, count: scalarCount)
-        guard projected.allSatisfy(\.isFinite), betaRaw.allSatisfy(\.isFinite),
-              aRaw.allSatisfy(\.isFinite) else {
-            throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite projections")
+        if !prepareOnGPU {
+            try await submitAndSettle(convolution,
+                stage: hooks.requiresSeparateGPUStages ? "convolution" : "projections-convolution",
+                update: update)
         }
-        hooks.observeActivation?(position, "convolved", projected)
-        var query = [Float](repeating: 0, count: queryCount)
-        var key = [Float](repeating: 0, count: queryCount)
-        var value = [Float](repeating: 0, count: valueCount)
-        var beta = [Float](repeating: 0, count: scalarCount)
-        var decay = [Float](repeating: 0, count: scalarCount)
-        for token in 0..<tokenCount {
-            for head in 0..<heads {
-                let sourceHead = head / configuration.headsPerKeyHead
-                let sourceBase = token * channels + sourceHead * configuration.keyHeadDimension
-                let targetBase = (token * heads + head) * configuration.keyHeadDimension
-                for dimension in 0..<configuration.keyHeadDimension {
-                    query[targetBase + dimension] = projected[sourceBase + dimension]
-                    key[targetBase + dimension] = projected[sourceBase + keyWidth + dimension]
+
+        let queryBuffer: MTLBuffer
+        let keyBuffer: MTLBuffer
+        let valueBuffer: MTLBuffer
+        let betaBuffer: MTLBuffer
+        let decayBuffer: MTLBuffer
+        let preparationStatus: MTLBuffer?
+        if let preparation {
+            queryBuffer = try emptyBuffer(queryCount, label: "qwen.bf16.linear.query")
+            keyBuffer = try emptyBuffer(queryCount, label: "qwen.bf16.linear.key")
+            valueBuffer = try emptyBuffer(valueCount, label: "qwen.bf16.linear.value")
+            betaBuffer = try emptyBuffer(scalarCount, label: "qwen.bf16.linear.beta")
+            decayBuffer = try emptyBuffer(scalarCount, label: "qwen.bf16.linear.decay")
+            guard let status = context.device.makeBuffer(length: MemoryLayout<UInt32>.stride,
+                                                         options: .storageModeShared) else {
+                throw QwenTextRunnerError.execution(detail: "BF16 linear preparation status allocation")
+            }
+            status.label = "qwen.bf16.linear.preparationStatus"
+            status.contents().storeBytes(of: UInt32.zero, as: UInt32.self)
+            preparationStatus = status
+            try preparation.runtime.encode(commandBuffer: convolution, tokenCount: tokenCount,
+                convolved: convolved, rawBeta: rawBeta, rawA: rawA,
+                aLog: preparation.aLog, timeStepBias: preparation.timeStepBias,
+                query: queryBuffer, key: keyBuffer, value: valueBuffer,
+                beta: betaBuffer, logDecay: decayBuffer, status: status)
+        } else {
+            preparationStatus = nil
+            let projected = Self.readFloats(convolved, count: qkvCount)
+            let betaRaw = Self.readFloats(rawBeta, count: scalarCount)
+            let aRaw = Self.readFloats(rawA, count: scalarCount)
+            guard projected.allSatisfy(\.isFinite), betaRaw.allSatisfy(\.isFinite),
+                  aRaw.allSatisfy(\.isFinite) else {
+                throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite projections")
+            }
+            hooks.observeActivation?(position, "convolved", projected)
+            var query = [Float](repeating: 0, count: queryCount)
+            var key = [Float](repeating: 0, count: queryCount)
+            var value = [Float](repeating: 0, count: valueCount)
+            var beta = [Float](repeating: 0, count: scalarCount)
+            var decay = [Float](repeating: 0, count: scalarCount)
+            for token in 0..<tokenCount {
+                for head in 0..<heads {
+                    let sourceHead = head / configuration.headsPerKeyHead
+                    let sourceBase = token * channels + sourceHead * configuration.keyHeadDimension
+                    let targetBase = (token * heads + head) * configuration.keyHeadDimension
+                    for dimension in 0..<configuration.keyHeadDimension {
+                        query[targetBase + dimension] = projected[sourceBase + dimension]
+                        key[targetBase + dimension] = projected[sourceBase + keyWidth + dimension]
+                    }
+                }
+                let sourceBase = token * channels + 2 * keyWidth
+                let valueBase = token * valueWidth
+                for index in 0..<valueWidth {
+                    value[valueBase + index] = projected[sourceBase + index]
+                }
+                for head in 0..<heads {
+                    let index = token * heads + head
+                    beta[index] = 1 / (1 + QwenOfficialSourceRouterArithmetic.exponential(-betaRaw[index]))
+                    let x = aRaw[index] + timeStepBias[head]
+                    let softplus = x > 20 ? x
+                        : QwenOfficialSourcePositiveLog1p.evaluate(QwenOfficialSourceRouterArithmetic.exponential(x))
+                    decay[index] = -QwenOfficialSourceRouterArithmetic.exponential(aLog[head]) * softplus
                 }
             }
-            let sourceBase = token * channels + 2 * keyWidth
-            let valueBase = token * valueWidth
-            for index in 0..<valueWidth {
-                value[valueBase + index] = projected[sourceBase + index]
+            guard beta.allSatisfy(\.isFinite), decay.allSatisfy(\.isFinite),
+                  query.allSatisfy(\.isFinite), key.allSatisfy(\.isFinite),
+                  value.allSatisfy(\.isFinite) else {
+                throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite recurrence inputs")
             }
-            for head in 0..<heads {
-                let index = token * heads + head
-                beta[index] = 1 / (1 + QwenOfficialSourceRouterArithmetic.exponential(-betaRaw[index]))
-                let x = aRaw[index] + timeStepBias[head]
-                let softplus = x > 20 ? x
-                    : QwenOfficialSourcePositiveLog1p.evaluate(QwenOfficialSourceRouterArithmetic.exponential(x))
-                decay[index] = -QwenOfficialSourceRouterArithmetic.exponential(aLog[head]) * softplus
+            if let observe = hooks.observeActivation {
+                observe(position, "query-raw", query)
+                observe(position, "key-raw", key)
+                observe(position, "value", value)
+                observe(position, "beta", beta)
+                observe(position, "log-decay", decay)
             }
+            queryBuffer = try Self.floatBuffer(query, device: context.device,
+                                                    label: "qwen.bf16.linear.query")
+            keyBuffer = try Self.floatBuffer(key, device: context.device,
+                                                  label: "qwen.bf16.linear.key")
+            valueBuffer = try Self.floatBuffer(value, device: context.device,
+                                                    label: "qwen.bf16.linear.value")
+            betaBuffer = try Self.floatBuffer(beta, device: context.device,
+                                                   label: "qwen.bf16.linear.beta")
+            decayBuffer = try Self.floatBuffer(decay, device: context.device,
+                                                    label: "qwen.bf16.linear.decay")
         }
-        guard beta.allSatisfy(\.isFinite), decay.allSatisfy(\.isFinite),
-              query.allSatisfy(\.isFinite), key.allSatisfy(\.isFinite),
-              value.allSatisfy(\.isFinite) else {
-            throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite recurrence inputs")
-        }
-        if let observe = hooks.observeActivation {
-            observe(position, "query-raw", query)
-            observe(position, "key-raw", key)
-            observe(position, "value", value)
-            observe(position, "beta", beta)
-            observe(position, "log-decay", decay)
-        }
-        let queryBuffer = try Self.floatBuffer(query, device: context.device,
-                                                label: "qwen.bf16.linear.query")
-        let keyBuffer = try Self.floatBuffer(key, device: context.device,
-                                              label: "qwen.bf16.linear.key")
-        let valueBuffer = try Self.floatBuffer(value, device: context.device,
-                                                label: "qwen.bf16.linear.value")
-        let betaBuffer = try Self.floatBuffer(beta, device: context.device,
-                                               label: "qwen.bf16.linear.beta")
-        let decayBuffer = try Self.floatBuffer(decay, device: context.device,
-                                                label: "qwen.bf16.linear.decay")
         let recurrenceOutput = try emptyBuffer(valueCount, label: "qwen.bf16.linear.recurrence")
         let gated = try emptyBuffer(valueCount, label: "qwen.bf16.linear.gated")
-        let recurrence = try commandBuffer(stage: "recurrence")
+        let recurrence = prepareOnGPU ? convolution : try commandBuffer(stage: "recurrence")
         try runtime.encodeRecurrence(
             commandBuffer: recurrence, query: queryBuffer, key: keyBuffer,
             value: valueBuffer, logDecay: decayBuffer, beta: betaBuffer,
@@ -2333,15 +2398,33 @@ actor QwenBF16LinearStep {
         try weights.encodeProjection(commandBuffer: outputCommand,
                                      tensorName: names.output, input: gated,
                                      tokenCount: tokenCount, output: output)
-        try await submitAndSettle(outputCommand,
-            stage: hooks.requiresSeparateGPUStages ? "output" : "recurrence-output",
-            update: hooks.requiresSeparateGPUStages ? nil : update)
+        let outputStage = prepareOnGPU
+            ? "projections-convolution-preparation-recurrence-output"
+            : hooks.requiresSeparateGPUStages ? "output" : "recurrence-output"
+        try await submitAndSettle(outputCommand, stage: outputStage,
+            update: hooks.requiresSeparateGPUStages ? nil : update,
+            preparationHooks: prepareOnGPU ? preparationHooks : nil)
+        // Downstream kernels may calculate only speculative reserved state on
+        // flagged preparation. Reject before any readback/observer/publication.
+        if let preparationStatus {
+            let flags = preparationStatus.contents().load(as: UInt32.self)
+            if flags & 1 != 0 {
+                throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite projections")
+            }
+            if flags & 2 != 0 {
+                throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite recurrence inputs")
+            }
+            guard flags == 0 else {
+                throw QwenTextRunnerError.invalidState(detail: "BF16 linear unknown preparation status")
+            }
+        }
         let result = Self.readFloats(output, count: inputCount)
         guard result.allSatisfy(\.isFinite) else {
             throw QwenTextRunnerError.invalidState(detail: "BF16 linear nonfinite output")
         }
         hooks.observeActivation?(position, "output", result)
         try await hooks.checkpoint(.beforeCommit)
+        if prepareOnGPU { try await preparationHooks.checkpoint(.beforeCommit) }
         try Task.checkCancellation()
         try state.commitDeferred(update, tokenCount: tokenCount)
         published = true
@@ -2349,20 +2432,29 @@ actor QwenBF16LinearStep {
     }
 
     private func submitAndSettle(_ command: MTLCommandBuffer, stage: String,
-                                 update: QwenLinearAttentionUpdate? = nil) async throws {
+                                 update: QwenLinearAttentionUpdate? = nil,
+                                 preparationHooks: QwenBF16LinearPreparationHooks? = nil) async throws {
         try await hooks.checkpoint(.beforeSubmission(stage: stage))
+        if let preparationHooks { try await preparationHooks.checkpoint(.beforeSubmission(stage: stage)) }
         try Task.checkCancellation()
+        let timing = QwenProductionTimingMeasurement.command(.linear(stage), layer: layer)
+        timing?.willCommit(command)
         if let update { try state.submitDeferred(update, on: command) }
         else { command.commit() }
+        timing?.didCommit()
         var hookError: Error?
-        do { try await hooks.checkpoint(.afterSubmission(stage: stage)) }
-        catch { hookError = error }
+        do {
+            try await hooks.checkpoint(.afterSubmission(stage: stage))
+            if let preparationHooks { try await preparationHooks.checkpoint(.afterSubmission(stage: stage)) }
+        } catch { hookError = error }
         // Cancellation or a throwing hook must not free any submitted buffer.
+        timing?.willWait()
         await withTaskCancellationHandler {
             await command.completed()
         } onCancel: {
             // Metal work must settle; never release the reserved pair early.
         }
+        timing?.resumed(command)
         if let update { await state.waitForDeferredStage(update) }
         if let hookError { throw hookError }
         guard command.status == .completed, command.error == nil else {
@@ -2371,6 +2463,18 @@ actor QwenBF16LinearStep {
                     ?? "status \(command.status.rawValue)")
         }
         try Task.checkCancellation()
+    }
+
+    private func requireGPUPreparation() throws
+        -> (runtime: QwenSourceLinearPreparation, aLog: MTLBuffer, timeStepBias: MTLBuffer) {
+        if let cachedGPUPreparation { return cachedGPUPreparation }
+        let prepared = (
+            runtime: try QwenSourceLinearPreparation(context: context, configuration: configuration),
+            aLog: try Self.floatBuffer(aLog, device: context.device, label: "qwen.bf16.linear.aLog"),
+            timeStepBias: try Self.floatBuffer(timeStepBias, device: context.device,
+                                             label: "qwen.bf16.linear.timeStepBias"))
+        cachedGPUPreparation = prepared
+        return prepared
     }
 
     private func commandBuffer(stage: String) throws -> MTLCommandBuffer {

@@ -500,6 +500,7 @@ actor RealInferenceSession {
 
         func generate(
             _ request: QwenConversationGenerationRequest,
+            measurementCapture: RuntimeMeasurementCapture? = nil,
             shouldStop: @escaping @Sendable () -> Bool,
             onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void
         ) async throws -> QwenConversationGenerationResult {
@@ -509,7 +510,8 @@ actor RealInferenceSession {
                     request, shouldStop: shouldStop, onEvent: onEvent)
             case .source(let session):
                 return try await session.generate(
-                    request, shouldStop: shouldStop, onEvent: onEvent)
+                    request, measurementCapture: measurementCapture,
+                    shouldStop: shouldStop, onEvent: onEvent)
             }
         }
     }
@@ -1053,6 +1055,38 @@ actor RealInferenceSession {
         }
         try check()
 
+        if !request.commit, case .qwenSource(let sourceModel) = loadedFamily {
+            // Assess metadata only. A successful estimate does not establish
+            // that vision extraction or the replacement model prefill ran.
+            do {
+                if let loadedSourceIdentity {
+                    try sourceModel.revalidateLoadedSource(
+                        contentDigest: loadedSourceIdentity.contentDigest)
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                throw Self.mapQwenGenerationError(error)
+            }
+            try check()
+            let duration = started.duration(to: .now).components
+            return DecodeContextCheckpointReceipt(
+                checkpointID: request.checkpointID,
+                replacementEpoch: request.replacementEpoch,
+                committed: false,
+                needed: needed,
+                existingPromptTokens: existingCount,
+                replacementPromptTokens: replacementEstimate,
+                reserveTokens: reserve,
+                resultAllowanceTokens: resultReserve,
+                retainedImageCount: imagePreflight.retainedImageCount,
+                retainedImageRows: imagePreflight.retainedImageRows,
+                retainedFeatureBytes: imagePreflight.retainedFeatureBytes,
+                performanceMinimumSavingsTokens: performanceMinimumSavings,
+                preparationSeconds: Double(duration.seconds)
+                    + Double(duration.attoseconds) / 1e18)
+        }
+
         let runtimeResult: QwenConversationCheckpointResult
         do {
             runtimeResult = try await generation.rebuildCheckpoint(
@@ -1102,7 +1136,7 @@ actor RealInferenceSession {
                 + Double(duration.attoseconds) / 1e18)
     }
 
-    private static func qwenExpandedTokenCount(
+    static func qwenExpandedTokenCount(
         encodedCount: Int,
         imageRows: Int,
         imageCount: Int
@@ -2216,6 +2250,7 @@ actor RealInferenceSession {
 
     private func runQwenTurn(
         request: AppGenerationRequest,
+        measurementCapture: RuntimeMeasurementCapture? = nil,
         loadedKey: SessionLoadKey,
         progress: ProgressState,
         memorySampler: AppMemorySampler,
@@ -2312,6 +2347,7 @@ actor RealInferenceSession {
                     thinking: Self.qwenThinkingMode(for: request),
                     visionResidency: request.runtimeOptions.visionResidencyPolicy,
                     config: config),
+                measurementCapture: measurementCapture,
                 shouldStop: stopFlagReader(),
                 onEvent: { event in
                     switch event {
@@ -2409,8 +2445,17 @@ actor RealInferenceSession {
                     throw AppInferenceError.invalidRequest(
                         "Qwen string, tool, and image generation requires the Phase 14 chat codec; use the prepared-token boundary.")
                 }
+                if let measurementCapture, case .qwenSource = loadedFamily {
+                    // This is the current generation producer task, after session
+                    // admission. It does not report OS thread or GPU queue QoS.
+                    measurementCapture.record(.qwenProducerPriority, 1,
+                        UInt64(Task.currentPriority.rawValue),
+                        UInt64(TaskPriority.userInitiated.rawValue),
+                        UInt64(TaskPriority.medium.rawValue),
+                        UInt64(TaskPriority.utility.rawValue))
+                }
                 let outcome = try await runQwenTurn(
-                    request: request, loadedKey: loadedKey,
+                    request: request, measurementCapture: measurementCapture, loadedKey: loadedKey,
                     progress: progress, memorySampler: memorySampler,
                     continuation: continuation)
                 for call in outcome.toolCalls {

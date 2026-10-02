@@ -431,6 +431,104 @@ kernel void qwen_moe_routed_down_add_bf16_cooperative(
         output[row] = output[row] + contribution;
     }
 }
+
+// Each bound pointer is a retained, admitted lease rank. No packed-weight path.
+static inline device const ushort* qwenMoeBF16BatchWeights(uint rank, device const ushort* w0, device const ushort* w1, device const ushort* w2, device const ushort* w3, device const ushort* w4, device const ushort* w5, device const ushort* w6, device const ushort* w7) {
+    switch (rank) {
+        case 0u: return w0;
+        case 1u: return w1;
+        case 2u: return w2;
+        case 3u: return w3;
+        case 4u: return w4;
+        case 5u: return w5;
+        case 6u: return w6;
+        default: return w7;
+    }
+}
+
+kernel void qwen_moe_routed_gate_up_bf16_batch8(
+    constant QwenMoEBF16RoutedParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
+    device const float* hidden [[buffer(QwenMetalBufferIndexInput)]],
+    device float* activation [[buffer(QwenMetalBufferIndexScratch)]],
+    device const ushort* w0 [[buffer(8)]],
+    device const ushort* w1 [[buffer(9)]],
+    device const ushort* w2 [[buffer(10)]],
+    device const ushort* w3 [[buffer(11)]],
+    device const ushort* w4 [[buffer(12)]],
+    device const ushort* w5 [[buffer(13)]],
+    device const ushort* w6 [[buffer(14)]],
+    device const ushort* w7 [[buffer(15)]],
+    uint3 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+#pragma clang fp contract(off)
+    const uint row = group.x, rank = group.y;
+    if (row >= p.intermediateSize || rank >= 8u) return;
+    device const ushort* gateUp = qwenMoeBF16BatchWeights(rank, w0, w1, w2, w3, w4, w5, w6, w7);
+    const uint gateBase = row * p.hiddenSize;
+    const uint upBase = (p.intermediateSize + row) * p.hiddenSize;
+    float gateLow = 0.0f, gateHigh = 0.0f, upLow = 0.0f, upHigh = 0.0f;
+    for (uint base = 0; base < p.hiddenSize; base += 64u) {
+        const uint lowColumn = base + lane, highColumn = lowColumn + 32u;
+        const float lowInput = hidden[lowColumn], highInput = hidden[highColumn];
+        gateLow = fma(qwenMoeBF16(gateUp[gateBase + lowColumn]), lowInput, gateLow);
+        gateHigh = fma(qwenMoeBF16(gateUp[gateBase + highColumn]), highInput, gateHigh);
+        upLow = fma(qwenMoeBF16(gateUp[upBase + lowColumn]), lowInput, upLow);
+        upHigh = fma(qwenMoeBF16(gateUp[upBase + highColumn]), highInput, upHigh);
+    }
+    const float gate = qwenMoeBF16SourceCooperativeReduce(gateLow, gateHigh, lane);
+    const float up = qwenMoeBF16SourceCooperativeReduce(upLow, upHigh, lane);
+    if (lane == 0u) {
+        activation[rank * p.intermediateSize + row] = gate / (1.0f + qwenMoeBF16ActivationExp(-gate)) * up;
+    }
+}
+
+kernel void qwen_moe_routed_down_contribution_bf16_batch8(
+    constant QwenMoEBF16RoutedParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
+    device const float* activation [[buffer(QwenMetalBufferIndexInput)]],
+    device float* contributions [[buffer(QwenMetalBufferIndexOutput)]],
+    device const float* routingWeights [[buffer(QwenMetalBufferIndexState)]],
+    device const ushort* w0 [[buffer(8)]],
+    device const ushort* w1 [[buffer(9)]],
+    device const ushort* w2 [[buffer(10)]],
+    device const ushort* w3 [[buffer(11)]],
+    device const ushort* w4 [[buffer(12)]],
+    device const ushort* w5 [[buffer(13)]],
+    device const ushort* w6 [[buffer(14)]],
+    device const ushort* w7 [[buffer(15)]],
+    uint3 group [[threadgroup_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+#pragma clang fp contract(off)
+    const uint row = group.x, rank = group.y;
+    if (row >= p.hiddenSize || rank >= 8u) return;
+    device const ushort* down = qwenMoeBF16BatchWeights(rank, w0, w1, w2, w3, w4, w5, w6, w7);
+    const uint rowBase = row * p.intermediateSize;
+    const device float* vector = activation + rank * p.intermediateSize;
+    float low = 0.0f, high = 0.0f;
+    for (uint base = 0; base < p.intermediateSize; base += 64u) {
+        const uint lowColumn = base + lane, highColumn = lowColumn + 32u;
+        low = fma(qwenMoeBF16(down[rowBase + lowColumn]), vector[lowColumn], low);
+        high = fma(qwenMoeBF16(down[rowBase + highColumn]), vector[highColumn], high);
+    }
+    const float projected = qwenMoeBF16SourceCooperativeReduce(low, high, lane);
+    if (lane == 0u) {
+        volatile float contribution = projected * routingWeights[rank];
+        contributions[rank * p.hiddenSize + row] = contribution;
+    }
+}
+
+kernel void qwen_moe_routed_accumulate_bf16_batch8(
+    constant QwenMoEBF16RoutedParameters& p [[buffer(QwenMetalBufferIndexParameters)]],
+    device const float* contributions [[buffer(QwenMetalBufferIndexInput)]],
+    constant uint* orderedRanks [[buffer(QwenMetalBufferIndexWeights)]],
+    device float* output [[buffer(QwenMetalBufferIndexOutput)]],
+    uint row [[thread_position_in_grid]]) {
+#pragma clang fp contract(off)
+    if (row >= p.hiddenSize) return;
+    // Match eight original FP32 stores/additions. No reduction tree or FMA.
+    volatile float accumulated = output[row];
+    for (uint index = 0u; index < 8u; ++index) {
+        accumulated = accumulated + contributions[orderedRanks[index] * p.hiddenSize + row];
+    }
+    output[row] = accumulated;
+}
 #endif // QWEN_PINNED_SOURCE_EXP
 
 struct QwenMoEBF16ElementParameters {

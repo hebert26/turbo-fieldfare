@@ -112,6 +112,9 @@ public final class AppModel {
     public private(set) var phase: AppGenerationPhase = .idle
     public private(set) var liveTokenCount: Int = 0
     public private(set) var liveElapsedDecodeSeconds: Double = 0
+    /// UI-only time since submission, including waits before the first token.
+    public private(set) var liveRequestElapsedSeconds: Double = 0
+    private var requestProgressTask: Task<Void, Never>?
     private var liveStructuredProgress: DecodeStructuredProgress?
     /// Display only. Never appended to the answer, conversation, or tool results.
     public private(set) var thinkingPreview: DecodeThinkingPreview?
@@ -122,6 +125,11 @@ public final class AppModel {
 
     public var generationStatusText: String? {
         guard isRunning else { return nil }
+        let seconds = max(0, Int(liveRequestElapsedSeconds))
+        return "\(generationPhaseStatusText) · \(seconds / 60):\(String(format: "%02d", seconds % 60)) elapsed"
+    }
+
+    private var generationPhaseStatusText: String {
         if isCancellationPending { return "Stopping generation" }
         if let compaction = activeAgentCompaction {
             guard compaction.replacementPromptTokens != nil else { return "Compacting history…" }
@@ -131,9 +139,12 @@ public final class AppModel {
         }
         if agentWaitingForMCP { return "Waiting for VisionCapture" }
         if phase == .prefill {
+            if livePrefillTotal > 0, livePrefillDone >= livePrefillTotal {
+                return "Waiting for first response · \(livePrefillDone) / \(livePrefillTotal) tokens"
+            }
             return livePrefillTotal > 0
-                ? "Reading prompt · \(livePrefillDone) / \(livePrefillTotal) tokens"
-                : "Processing your prompt"
+                ? "Processing prompt · \(livePrefillDone) / \(livePrefillTotal) tokens"
+                : "Preparing request"
         }
         guard phase == .decode else { return "Preparing next step" }
         let stage: String
@@ -142,10 +153,9 @@ public final class AppModel {
         case "tool_call": stage = "Preparing tool call"
         case "visible_response": stage = "Writing response"
         case "channel_label": stage = "Reading channel label"
-        default: stage = agentModeEnabled ? "Unknown output stage" : "Writing response"
+        default: stage = "Generating response"
         }
-        let seconds = max(0, Int(liveElapsedDecodeSeconds))
-        return "\(stage) · \(seconds / 60):\(String(format: "%02d", seconds % 60)) elapsed · \(liveTokenCount) tokens"
+        return "\(stage) · \(liveTokenCount) tokens"
     }
     public private(set) var livePrefillDone: Int = 0
     public private(set) var livePrefillTotal: Int = 0
@@ -329,7 +339,7 @@ public final class AppModel {
             rdadvisePolicy: settings.rdadvisePolicy,
             visionResidencyPolicy: .onDemand,
             toolThinkingEnabled: settings.toolThinkingEnabled(for: selectedModelID))
-        self.maxContextTokens = settings.contextTokens
+        self.maxContextTokens = settings.contextTokens(for: selectedModelID)
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
         self.topK = settings.topK
@@ -2362,7 +2372,7 @@ public final class AppModel {
             // tower on a machine with no control that shows or clears it.
             visionResidencyPolicy: .onDemand,
             toolThinkingEnabled: settings.toolThinkingEnabled(for: modelID))
-        maxContextTokens = settings.contextTokens
+        maxContextTokens = settings.contextTokens(for: modelID)
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
         topK = settings.topK
@@ -2380,7 +2390,7 @@ public final class AppModel {
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
         var settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
-        settings.contextTokens = maxContextTokens
+        settings.setContextTokens(maxContextTokens, for: selectedModelID)
         settings.expertCacheSlots = runtimeOptions.expertCacheSlots
         settings.temperature = temperature
         settings.topKEnabled = topKEnabled
@@ -2716,6 +2726,7 @@ public final class AppModel {
                 && !hasStaleLoadedRuntime && conversation.canSend
                 && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     || !attachments.isEmpty) else { return false }
+        let submittedAt = ContinuousClock.now
         let agentConfiguration = agentModeEnabled ? makeAgentConfiguration() : nil
         // Reserved before the request is built, so the position the service
         // will check is the position the transcript shows.
@@ -2803,6 +2814,7 @@ public final class AppModel {
         sampleLiveMemory()
         phase = .prefill
         runState = .running
+        startRequestProgress(generation: generation, submittedAt: submittedAt)
         // A chat composer always clears. Keeping the sent turn in the box means
         // the next message starts as a copy of the last one, and the images
         // silently re-attach to a different message. Dropping them is safe
@@ -2890,6 +2902,21 @@ public final class AppModel {
             }
         }
         return true
+    }
+
+    private func startRequestProgress(generation: Int, submittedAt: ContinuousClock.Instant) {
+        requestProgressTask?.cancel()
+        liveRequestElapsedSeconds = 0
+        requestProgressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
+                guard let self, generation == self.runIdentity, self.isRunning else { return }
+                let elapsed = submittedAt.duration(to: .now).components
+                self.liveRequestElapsedSeconds = max(0,
+                    Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18)
+            }
+        }
     }
 
     /// Sends the composer text normally when idle, or queues it as a live
@@ -3822,6 +3849,9 @@ public final class AppModel {
     }
 
     private func finishTerminalRun() {
+        requestProgressTask?.cancel()
+        requestProgressTask = nil
+        liveRequestElapsedSeconds = 0
         liveStructuredProgress = nil
         agentWaitingForMCP = false
         agentModelStepActive = false

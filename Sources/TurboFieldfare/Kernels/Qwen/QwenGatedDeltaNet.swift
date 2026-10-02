@@ -137,6 +137,11 @@ struct QwenGatedDeltaNetResult: Sendable {
     let finalState: QwenLinearAttentionLayerState
 }
 
+enum QwenSourceGatedNormMode: Sendable, Equatable {
+    case serial
+    case lanes128
+}
+
 /// Qwen Gated DeltaNet reference order plus concrete correctness Metal kernels.
 final class QwenGatedDeltaNet {
     private struct LayoutParameters {
@@ -191,11 +196,15 @@ final class QwenGatedDeltaNet {
     private let convolutionPipeline: MTLComputePipelineState
     private let recurrencePipeline: MTLComputePipelineState
     private let cachedRecurrencePipeline: MTLComputePipelineState?
+    private let groupedCachedRecurrencePipeline: MTLComputePipelineState?
     private let gatedNormPipeline: MTLComputePipelineState
+    private let gatedNorm128Pipeline: MTLComputePipelineState?
     private let useOfficialSourceMath: Bool
 
     init(context: MetalContext, configuration: QwenGatedDeltaNetConfiguration,
-         useOfficialSourceMath: Bool = false) throws {
+         useOfficialSourceMath: Bool = false,
+         sourceGatedNormMode: QwenSourceGatedNormMode = .serial,
+         useGroupedCachedRecurrence: Bool = false) throws {
         self.configuration = configuration
         self.useOfficialSourceMath = useOfficialSourceMath
         if useOfficialSourceMath {
@@ -212,13 +221,20 @@ final class QwenGatedDeltaNet {
             convolutionPipeline = try pipeline("qwen_linear_causal_conv")
             recurrencePipeline = try pipeline("qwen_source_linear_recurrence_fp32")
             cachedRecurrencePipeline = try pipeline("qwen_source_linear_recurrence_cached_128")
+            groupedCachedRecurrencePipeline = useGroupedCachedRecurrence
+                ? try pipeline("qwen_source_linear_recurrence_cached_128_grouped") : nil
             gatedNormPipeline = try pipeline("qwen_source_linear_gated_rmsnorm")
+            gatedNorm128Pipeline = sourceGatedNormMode == .lanes128
+                && configuration.valueHeadDimension == 128
+                ? try pipeline("qwen_source_linear_gated_rmsnorm_128_lanes") : nil
         } else {
             layoutPipeline = try context.pipeline("qwen_linear_layout")
             convolutionPipeline = try context.pipeline("qwen_linear_causal_conv")
             recurrencePipeline = try context.pipeline("qwen_linear_recurrence_fp32")
             cachedRecurrencePipeline = nil
+            groupedCachedRecurrencePipeline = nil
             gatedNormPipeline = try context.pipeline("qwen_linear_gated_rmsnorm")
+            gatedNorm128Pipeline = nil
         }
     }
 
@@ -584,7 +600,14 @@ final class QwenGatedDeltaNet {
                 queryDivisor: Float(sqrt(dimension)))
             // Cached columns have disjoint state. Preserve ordered key sums in
             // each column while distributing the 128 columns across one group.
-            if tokenCount == 1, !initialToken,
+            if tokenCount > 1, !initialToken,
+               configuration.keyHeadDimension == 128,
+               configuration.valueHeadDimension == 128,
+               let pipeline = groupedCachedRecurrencePipeline,
+               pipeline.maxTotalThreadsPerThreadgroup >= 128 {
+                try encode(commandBuffer: commandBuffer, pipeline: pipeline, count: heads * 128,
+                           parameters: &parameters, buffers: buffers, groupWidth: 128)
+            } else if tokenCount == 1, !initialToken,
                configuration.keyHeadDimension == 128,
                configuration.valueHeadDimension == 128,
                let pipeline = cachedRecurrencePipeline,
@@ -629,13 +652,20 @@ final class QwenGatedDeltaNet {
             headCount: try uint32(configuration.valueHeadCount, field: "headCount"),
             valueDimension: try uint32(configuration.valueHeadDimension, field: "valueHeadDimension"),
             epsilon: configuration.epsilon)
-        try encode(
-            commandBuffer: commandBuffer, pipeline: gatedNormPipeline, count: itemCount,
-            parameters: &parameters,
-            buffers: [(input, QwenMetalBufferIndex.input.rawValue),
-                      (weights, QwenMetalBufferIndex.weights.rawValue),
-                      (output, QwenMetalBufferIndex.output.rawValue),
-                      (gate, QwenMetalBufferIndex.scratch.rawValue)])
+        let buffers = [(input, QwenMetalBufferIndex.input.rawValue),
+                       (weights, QwenMetalBufferIndex.weights.rawValue),
+                       (output, QwenMetalBufferIndex.output.rawValue),
+                       (gate, QwenMetalBufferIndex.scratch.rawValue)]
+        if useOfficialSourceMath, configuration.valueHeadDimension == 128,
+           let pipeline = gatedNorm128Pipeline,
+           pipeline.maxTotalThreadsPerThreadgroup >= 128 {
+            // Exactly one full group per token/head, including every barrier lane.
+            try encode(commandBuffer: commandBuffer, pipeline: pipeline, count: elements,
+                       parameters: &parameters, buffers: buffers, groupWidth: 128)
+        } else {
+            try encode(commandBuffer: commandBuffer, pipeline: gatedNormPipeline, count: itemCount,
+                       parameters: &parameters, buffers: buffers)
+        }
     }
 
     private func encode<T>(

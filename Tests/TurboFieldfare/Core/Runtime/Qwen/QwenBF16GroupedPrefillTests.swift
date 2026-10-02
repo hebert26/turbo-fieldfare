@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Metal
 import Testing
@@ -251,6 +252,154 @@ import TurboFieldfareFormat
         #expect(error != nil, "a nonzero start offset must be rejected at position zero")
         #expect(try await runner.diagnosticSnapshot() == before)
     }
+    @Test func groupedLinearTrialPreservesRoutesStateAndRemaindersAtBothOffsets() async throws {
+        let harness = try makeRunnerHarness()
+        defer { harness.source.remove() }
+        let tail = (0..<17).map { Int32($0.isMultiple(of: 2) ? 1 : 2) }
+        for start in [0, 3] {
+            for groupedEnabled in [false, true] {
+                for gpuPreparationEnabled in [false, true] {
+                    let baseRoutes = GroupedLinearRouteRecorder()
+                    let trialRoutes = GroupedLinearRouteRecorder()
+                    let baseline = try makeGroupedLinearTrialRunner(harness, enabled: false,
+                        gpuPreparationEnabled: false,
+                        hooks: QwenOfficialSourceTransactionHooks(observeRoute: baseRoutes.record))
+                    let trial = try makeGroupedLinearTrialRunner(harness,
+                        enabled: groupedEnabled,
+                        gpuPreparationEnabled: gpuPreparationEnabled,
+                        hooks: QwenOfficialSourceTransactionHooks(observeRoute: trialRoutes.record))
+                    if start > 0 {
+                        let prefix = Array(tail.prefix(start))
+                        _ = try await legacyRun(baseline, tokens: prefix)
+                        _ = try await legacyRun(trial, tokens: prefix)
+                    }
+                    let expected = try await baseline.prefill(
+                        tokenIDs: tail, position: start, onProgress: { _, _ in })
+                    let actual = try await trial.prefill(
+                        tokenIDs: tail, position: start, onProgress: { _, _ in })
+                    #expect(actual.map(\.bitPattern) == expected.map(\.bitPattern))
+                    let trialState = try await trial.diagnosticSnapshot()
+                    let baselineState = try await baseline.diagnosticSnapshot()
+                    #expect(trialState == baselineState)
+                    #expect(trialRoutes.snapshot() == baseRoutes.snapshot())
+                    let diagnostics = try #require(await trial.groupedPrefillDiagnostics())
+                    if groupedEnabled {
+                        #expect(diagnostics.mode == .grouped)
+                        #expect(diagnostics.groupedLinearBatchSizes[1]
+                            == (start == 0 ? [1, 15, 1] : [16, 1]))
+                        #expect(diagnostics.groupedLinearBatchSizes[0] == nil,
+                                "Full attention stays per-token")
+                    } else {
+                        #expect(diagnostics.mode == .grouped)
+                        #expect(diagnostics.groupedLinearBatchSizes.isEmpty)
+                    }
+                    let nextExpected = try await baseline.produce(
+                        token: 1, position: start + tail.count)
+                    let nextActual = try await trial.produce(
+                        token: 1, position: start + tail.count)
+                    #expect(nextActual.map(\.bitPattern) == nextExpected.map(\.bitPattern),
+                            "Single-token decode must continue from identical cached state")
+                }
+            }
+        }
+    }
+
+    @Test func groupedLinearTrialProtectedReadFailureRestoresAndRetryMatchesBaseline() async throws {
+        let failure = QwenBF16TransactionTestSwitch()
+        let harness = try makeRunnerHarness(hooks: QwenOfficialSourceTransactionHooks(
+            beforeProtectedExpertRead: { layer, _, _ in
+                if layer == 1, failure.consume() { throw GroupedPrefillInjectedFailure.protectedRead }
+            }))
+        defer { harness.source.remove() }
+        let trial = try makeGroupedLinearTrialRunner(harness, enabled: true, hooks: harness.hooks)
+        let baseline = try makeGroupedLinearTrialRunner(harness, enabled: false)
+        let before = try await trial.diagnosticSnapshot()
+        let tail = (0..<17).map { Int32($0.isMultiple(of: 2) ? 1 : 2) }
+        failure.arm()
+        let error = await captureGroupedError {
+            _ = try await trial.prefill(tokenIDs: tail, position: 0, onProgress: { _, _ in })
+        }
+        #expect(error != nil)
+        #expect(try await trial.diagnosticSnapshot() == before)
+        let failed = try #require(await trial.groupedPrefillDiagnostics())
+        #expect(failed.groupedLinearBatchSizes[1] == [1, 15, 1],
+                "Failure must occur after the layer-1 linear mixer batches committed")
+        #expect(failed.groupedLinearBatchSizes[0] == nil,
+                "Layer 0 is full attention in the two-layer fixture")
+        let retried = try await trial.prefill(tokenIDs: tail, position: 0, onProgress: { _, _ in })
+        let expected = try await baseline.prefill(tokenIDs: tail, position: 0, onProgress: { _, _ in })
+        #expect(retried.map(\.bitPattern) == expected.map(\.bitPattern))
+        let trialState = try await trial.diagnosticSnapshot()
+        let baselineState = try await baseline.diagnosticSnapshot()
+        #expect(trialState == baselineState)
+        let oracle = try #require(sourceOracle(harness.source, tokens: tail).last)
+        assertWithinTolerance(retried, oracle.logits, label: "grouped linear retry oracle")
+    }
+
+    @Test func groupedLinearCheckpointRebuildMatchesTokenMajorState() async throws {
+        let keys = ["TURBO_QWEN_GROUPED_LINEAR_PREFILL", "TURBO_QWEN_GPU_LINEAR_PREPARATION"]
+        let previous = keys.map { ProcessInfo.processInfo.environment[$0] }
+        for key in keys { setenv(key, "1", 1) }
+        defer {
+            for (key, value) in zip(keys, previous) {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+        }
+        let harness = try makeRunnerHarness()
+        defer { harness.source.remove() }
+        let grouped = try await makeConversationState(
+            model: harness.model, context: harness.context,
+            groupedPrefillEnabled: true, hooks: .none)
+        let tokenMajor = try await makeConversationState(
+            model: harness.model, context: harness.context,
+            groupedPrefillEnabled: false, hooks: .none)
+        let groupedTransaction = try await grouped.begin()
+        let tokenMajorTransaction = try await tokenMajor.begin()
+        let replacement = (0..<17).map { Int32($0.isMultiple(of: 2) ? 1 : 2) }
+        try await grouped.rebuildCheckpoint(
+            retaining: replacement, transaction: groupedTransaction) { _, _ in }
+        try await tokenMajor.rebuildCheckpoint(
+            retaining: replacement, transaction: tokenMajorTransaction) { _, _ in }
+
+        let groupedDiagnostics = try #require(await grouped.groupedPrefillDiagnostics())
+        #expect(groupedDiagnostics.mode == .grouped)
+        #expect(groupedDiagnostics.groupedLinearBatchSizes[1] == [1, 15, 1])
+        let tokenMajorDiagnostics = try #require(await tokenMajor.groupedPrefillDiagnostics())
+        #expect(tokenMajorDiagnostics.mode == .tokenMajor)
+        #expect(tokenMajorDiagnostics.groupedLinearBatchSizes.isEmpty)
+
+        let groupedWorking = try await grouped.diagnosticSnapshot()
+        let tokenMajorWorking = try await tokenMajor.diagnosticSnapshot()
+        #expect(groupedWorking.runner == tokenMajorWorking.runner,
+                "grouped checkpoint rebuild must preserve linear and full-attention state")
+        #expect(groupedWorking.currentLogits?.map(\.bitPattern)
+            == tokenMajorWorking.currentLogits?.map(\.bitPattern),
+                "grouped checkpoint rebuild logits must be bit-identical")
+
+        _ = try await grouped.commit(transaction: groupedTransaction)
+        _ = try await tokenMajor.commit(transaction: tokenMajorTransaction)
+        let groupedCommitted = try await grouped.diagnosticSnapshot()
+        let tokenMajorCommitted = try await tokenMajor.diagnosticSnapshot()
+        #expect(groupedCommitted.runner == tokenMajorCommitted.runner,
+                "committed grouped checkpoint state must match token-major state")
+        #expect(groupedCommitted.currentLogits?.map(\.bitPattern)
+            == tokenMajorCommitted.currentLogits?.map(\.bitPattern))
+    }
+
+    @Test func groupedLinearTrialActivationObserverRetainsTokenMajorFallback() async throws {
+        let harness = try makeRunnerHarness()
+        defer { harness.source.remove() }
+        let trial = try makeGroupedLinearTrialRunner(harness, enabled: true,
+            hooks: QwenOfficialSourceTransactionHooks(observeActivation: { _, _, _, _ in }))
+        let baseline = try makeGroupedLinearTrialRunner(harness, enabled: false)
+        let actual = try await trial.prefill(tokenIDs: prompt, position: 0, onProgress: { _, _ in })
+        let expected = try await baseline.prefill(tokenIDs: prompt, position: 0, onProgress: { _, _ in })
+        #expect(actual.map(\.bitPattern) == expected.map(\.bitPattern))
+        let diagnostics = try #require(await trial.groupedPrefillDiagnostics())
+        #expect(diagnostics.mode == .tokenMajor)
+        #expect(diagnostics.groupedLinearBatchSizes.isEmpty)
+    }
+
 }
 
 private struct GroupedRunnerHarness {
@@ -386,4 +535,38 @@ private func makePreparedImage(context: MetalContext) throws -> QwenPreparedPref
             position,
             try QwenMRoPEPosition(temporal: 2, height: 2, width: 2),
         ], textRoPEDelta: 0)
+}
+
+// Changes environment only around synchronous runner construction. Scripts/test.sh
+// and this serialized suite must remain nonparallel. Runner captures the flag once.
+private func makeGroupedLinearTrialRunner(_ harness: GroupedRunnerHarness, enabled: Bool,
+    gpuPreparationEnabled: Bool = false,
+    hooks: QwenOfficialSourceTransactionHooks = .none) throws -> QwenOfficialSourceRunner {
+    let groupedKey = "TURBO_QWEN_GROUPED_LINEAR_PREFILL"
+    let gpuKey = "TURBO_QWEN_GPU_LINEAR_PREPARATION"
+    let previousGrouped = ProcessInfo.processInfo.environment[groupedKey]
+    let previousGPU = ProcessInfo.processInfo.environment[gpuKey]
+    setenv(groupedKey, enabled ? "1" : "0", 1)
+    setenv(gpuKey, gpuPreparationEnabled ? "1" : "0", 1)
+    defer {
+        if let previousGrouped { setenv(groupedKey, previousGrouped, 1) }
+        else { unsetenv(groupedKey) }
+        if let previousGPU { setenv(gpuKey, previousGPU, 1) }
+        else { unsetenv(gpuKey) }
+    }
+    return try QwenOfficialSourceRunner(model: harness.model, maxContext: 32,
+        expertSlotCount: QwenBF16TextRunnerFixture.topK, hooks: hooks)
+}
+
+private final class GroupedLinearRouteRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var rows: [[UInt32]] = []
+    func record(_ position: Int, _ layer: Int, _ logits: [Float], _ ids: [Int],
+                _ weights: [Float], _ cutoff: Float) {
+        let row = [UInt32(position), UInt32(layer)] + logits.map(\.bitPattern)
+            + ids.map { UInt32($0) } + weights.map(\.bitPattern) + [cutoff.bitPattern]
+        lock.lock(); defer { lock.unlock() }
+        rows.append(row)
+    }
+    func snapshot() -> [[UInt32]] { lock.lock(); defer { lock.unlock() }; return rows }
 }

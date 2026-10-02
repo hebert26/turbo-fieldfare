@@ -160,6 +160,7 @@ public final class MetalContext: @unchecked Sendable {
         "prefill": "Metal/Prefill",
         "qwen_common": "Metal/Qwen",
         "qwen_bf16": "Metal/Qwen",
+        "qwen_bf16_small32_lanes": "Metal/Qwen",
         "qwen_source_math": "Metal/Qwen",
         "qwen_source_scalar_math": "Metal/Qwen",
         "qwen_full_attention": "Metal/Qwen",

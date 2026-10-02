@@ -158,7 +158,7 @@ private struct PhaseLabel: View {
     }
 
     private var statusText: String {
-        if model.agentModeEnabled, let status = model.generationStatusText { return status }
+        if let status = model.generationStatusText { return status }
         return model.presentation.label
     }
 }

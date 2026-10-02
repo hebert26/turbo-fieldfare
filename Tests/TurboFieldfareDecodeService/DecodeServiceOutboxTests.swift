@@ -271,6 +271,7 @@ import TurboFieldfareDecodeProtocol
         var sawSnapshot = false
         var sawToolCall = false
         var sawMeasurement = false
+        var sawSourceIOMeasurement = false
         var sawFinished = false
         func account(_ event: DecodeServiceEvent) {
             switch event.kind {
@@ -282,6 +283,13 @@ import TurboFieldfareDecodeProtocol
             case .finished: sawFinished = true
             default: break
             }
+            if event.kind == .measurement, let json = event.measurementBatchJSON {
+                // These rows use the same bounded numeric transport as all
+                // other source telemetry and must retain the request stamps.
+                if json.contains("[135,1,1") && json.contains("[134,2,1,1,0,0") {
+                    sawSourceIOMeasurement = true
+                }
+            }
             expectBindingStamps(
                 event, generationID: generationID,
                 conversationEpoch: conversationEpoch,
@@ -290,6 +298,8 @@ import TurboFieldfareDecodeProtocol
         account(try DecodeFrameCodec.read(
             DecodeServiceEvent.self, from: pipe.fileHandleForReading))
         capture.record(.memory, 1, 2, 3, 4, 5)
+        capture.record(.sourceIOConfiguration, 1, 1)
+        capture.record(.sourceIOReads, 2, 1, 1, 0, 0)
         outbox.publish(.prefillProgress(done: 1, total: 2))
         outbox.publish(.token(AppTokenEvent(
             index: 0, textDelta: "hello", elapsedDecodeSeconds: 0.1)))
@@ -308,6 +318,8 @@ import TurboFieldfareDecodeProtocol
         #expect(sawSnapshot)
         #expect(sawToolCall)
         #expect(sawMeasurement)
+        #expect(sawSourceIOMeasurement,
+                "source I/O rows must be transported in the stamped measurement batch")
         #expect(sawFinished)
         #expect(writerFinished.wait(timeout: .now() + 5) == .success)
     }
@@ -348,6 +360,68 @@ import TurboFieldfareDecodeProtocol
         #expect(finalCount == 1)
         #expect(terminal?.kind == .failed)
         #expect(writerFinished.wait(timeout: .now() + 2) == .success)
+    }
+
+    @Test func measurementStorageCeilingAndFooterSurviveAllocatorPressure() throws {
+        struct Batch: Decodable { let records: [[UInt64]] }
+        for attempt in 0..<3 {
+            do {
+                var pressure = Data(repeating: UInt8(attempt + 1), count: 5 * 1_024 * 1_024)
+                #expect(pressure[pressure.count - 1] == UInt8(attempt + 1))
+                pressure.removeAll(keepingCapacity: false)
+            }
+            let capture = RuntimeMeasurementCapture()
+            #expect(capture.allocatedStorageBytes < 4 * 1_024 * 1_024)
+            let firstMarker = UInt64(0xfeed_0000 + attempt)
+            let droppedMarker = firstMarker + 100
+            capture.record(.memory, firstMarker)
+            for ordinal in 0..<(RuntimeMeasurementCapture.recordCapacity + 512) {
+                capture.record(.memory, UInt64(ordinal), UInt64(attempt))
+            }
+            capture.record(.memory, droppedMarker)
+            capture.finish(status: 7)
+
+            var configuration: [UInt64]?
+            var summary: [UInt64]?
+            var lastMemoryRow: [UInt64]?
+            var memoryCount = 0
+            var sawDroppedMarker = false
+            var sawDroppedRange = false
+            var sawSerialization = false
+            var footerBatches = 0
+            while let batch = capture.drainJSONBatch(
+                maximumBytes: RuntimeMeasurementCapture.maximumJSONBatchBytes) {
+                #expect(batch.data.count <= RuntimeMeasurementCapture.maximumJSONBatchBytes)
+                if batch.containsFooter { footerBatches += 1 }
+                for row in try JSONDecoder().decode(Batch.self, from: batch.data).records {
+                    #expect(row.count == 6)
+                    guard row.count == 6 else { continue }
+                    switch row[0] {
+                    case 1: configuration = row
+                    case 16:
+                        memoryCount += 1
+                        lastMemoryRow = row
+                        sawDroppedMarker = sawDroppedMarker || row[1] == droppedMarker
+                    case 200: summary = row
+                    case 207: sawDroppedRange = row[1] == 515
+                    case 205: sawSerialization = true
+                    default: break
+                    }
+                }
+            }
+            let config = try #require(configuration)
+            #expect(config[2] == UInt64(capture.allocatedStorageBytes))
+            #expect(config[3] == UInt64(RuntimeMeasurementCapture.recordCapacity))
+            #expect(memoryCount == RuntimeMeasurementCapture.recordCapacity - 1)
+            #expect(lastMemoryRow?[1] == UInt64(RuntimeMeasurementCapture.recordCapacity - 3))
+            #expect(!sawDroppedMarker)
+            let totals = try #require(summary)
+            #expect(totals[1] == 7)
+            #expect(totals[2] == UInt64(RuntimeMeasurementCapture.recordCapacity))
+            #expect(totals[3] == 515)
+            #expect(totals[4] == UInt64(capture.allocatedStorageBytes))
+            #expect(sawDroppedRange && sawSerialization && footerBatches > 0)
+        }
     }
 
     private func firstTerminal(

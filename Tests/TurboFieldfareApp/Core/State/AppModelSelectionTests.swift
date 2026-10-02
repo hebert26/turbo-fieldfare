@@ -11,6 +11,49 @@ import TurboFieldfareOfficialQwenSource
 @Suite(.serialized)
 struct AppModelSelectionTests {
     @MainActor
+    @Test func switchingModelsRestoresEachPersistedContextChoice() async throws {
+        let root = try makeOwnedCatalogDirectory("context-selection-root")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = try makeQwenInstall("context-selection", parentDirectory: root)
+        try writeQwenSelectionSettings(for: directory)
+        var settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
+        settings.setContextTokens(AppContextLengthOption.sixtyFourK.tokens, for: .qwen3_6)
+        try MacAppSettingsFileStore.save(settings, forModelDirectory: directory)
+
+        let client = SelectionLifecycleClient(
+            readiness: .qwen(identity: pinnedQwenIdentity()))
+        let model = AppModel(
+            modelDirectory: directory,
+            client: client,
+            settingsPersistenceEnabled: true,
+            installationStatusProvider: { _, entry in
+                entry.id == .qwen3_6 ? .complete : .missing
+            },
+            catalogEntryProvider: testCatalogEntryProvider(qwenDirectory: directory))
+
+        model.loadModel()
+        await waitUntil { model.loadState.isReady }
+        #expect(model.maxContextTokens == AppContextLengthOption.sixtyFourK.tokens)
+        #expect(client.ensureLoadedContextTokens == [AppContextLengthOption.sixtyFourK.tokens])
+
+        model.selectModel(.gemma4)
+        await waitUntil { !model.isModelSelectionInProgress }
+        #expect(model.selectedModelID == .gemma4)
+        #expect(model.maxContextTokens == AppContextLengthOption.eightK.tokens)
+        settings = MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
+        #expect(settings.contextTokens(for: .qwen3_6) == AppContextLengthOption.sixtyFourK.tokens)
+        #expect(settings.contextTokens(for: .gemma4) == AppContextLengthOption.eightK.tokens)
+
+        model.selectModel(.qwen3_6)
+        await waitUntil { model.loadState.isReady }
+        #expect(model.maxContextTokens == AppContextLengthOption.sixtyFourK.tokens)
+        #expect(client.ensureLoadedContextTokens == [
+            AppContextLengthOption.sixtyFourK.tokens,
+            AppContextLengthOption.sixtyFourK.tokens,
+        ])
+    }
+
+    @MainActor
     @Test func modelSelectionUnloadsBeforeRetiringTheQwenSession() async throws {
         let directory = try makeQwenInstall("selection-order")
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -467,6 +510,7 @@ private final class SelectionLifecycleClient: AppModelLifecycleClient, @unchecke
     private var generationRequests: [AppGenerationRequest] = []
     private var ensureCount = 0
     private var unloadCount = 0
+    private var ensureLoadedContextTokensStorage: [Int] = []
     private var resetEpochs: [UUID] = []
     private var nextFailure: AppInferenceError?
     private var readinessValue: AppLoadedModelReadiness?
@@ -489,6 +533,10 @@ private final class SelectionLifecycleClient: AppModelLifecycleClient, @unchecke
         return unloadCount
     }
 
+    var ensureLoadedContextTokens: [Int] {
+        lock.withLock { ensureLoadedContextTokensStorage }
+    }
+
     var requests: [AppGenerationRequest] {
         lock.withLock { generationRequests }
     }
@@ -506,6 +554,7 @@ private final class SelectionLifecycleClient: AppModelLifecycleClient, @unchecke
     ) async throws {
         let failure = lock.withLock {
             ensureCount += 1
+            ensureLoadedContextTokensStorage.append(maxContextTokens)
             handlers.append(onState)
             let failure = nextFailure
             nextFailure = nil
@@ -720,8 +769,8 @@ private func pinnedQwenIdentity(
         vision: .unavailable)
 }
 
-private func makeQwenInstall(_ tag: String) throws -> URL {
-    let directory = FileManager.default.temporaryDirectory
+private func makeQwenInstall(_ tag: String, parentDirectory: URL? = nil) throws -> URL {
+    let directory = (parentDirectory ?? FileManager.default.temporaryDirectory)
         .appendingPathComponent(
             "app-model-selection-\(tag)-\(UUID().uuidString).gturbo", isDirectory: true)
     let experts = directory.appendingPathComponent("packed_experts", isDirectory: true)

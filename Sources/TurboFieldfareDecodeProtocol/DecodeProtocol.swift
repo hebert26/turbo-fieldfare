@@ -212,7 +212,9 @@ public enum DecodeRuntimeMeasurementLimits {
     /// Numeric JSON before the enclosing IPC frame. Far below the 4 MiB limit.
     public static let maximumBatchBytes = 48 * 1_024
     public static let maximumQueuedBytes = 128 * 1_024
-    public static let maximumQueuedBatches = 8
+    // Small numeric batches can arrive in bursts while the receiver is busy.
+    // The unchanged byte ceiling also applies to this fixed batch-count bound.
+    public static let maximumQueuedBatches = 32
     public static let maximumArtifactBytes = 32 * 1_024 * 1_024
     /// Four equal byte reservations, with 4 KiB kept for truncation notices.
     public static let maximumContextBucketBytes = (maximumArtifactBytes - 4_096) / 4

@@ -93,10 +93,44 @@ package final class OfficialSourceHandle {
     private let allowedNames: Set<String>
     private let shardNames: Set<String>
     private let checkpoint: (Checkpoint) throws -> Void
+    // Constructed only from this initializer's proven paths and pinned marker.
+    // No filesystem observation or caller-supplied receipt value is cached.
+    private struct ValidatedDirectoryPath {
+        let path: String
+    }
+    private struct FastValidation {
+        let registration: ValidatedDirectoryPath
+        let source: ValidatedDirectoryPath
+        let markerSHA256: String
+        let descriptorContentSHA256: String
+        let expectedInventory: Set<String>
+    }
+    private let fastValidation: FastValidation?
+    private let useMembershipScan: Bool
     // Calls can race on a retained handle. Only short value comparisons and
     // first-acceptance inserts occur under this lock; no filesystem I/O does.
     private let identityLock = NSLock()
     private var acceptedFiles: [String: FileIdentity] = [:]
+    private let ioMeasurementLock = NSLock()
+    private var ioMeasurement: OfficialSourceIOMeasurement?
+
+    /// A second request cannot replace another request's numeric collector.
+    package func installIOMeasurement(_ measurement: OfficialSourceIOMeasurement) -> Bool {
+        ioMeasurementLock.lock(); defer { ioMeasurementLock.unlock() }
+        guard ioMeasurement == nil else { return false }
+        ioMeasurement = measurement
+        return true
+    }
+
+    package func removeIOMeasurement(_ measurement: OfficialSourceIOMeasurement) {
+        ioMeasurementLock.lock(); defer { ioMeasurementLock.unlock() }
+        if ioMeasurement === measurement { ioMeasurement = nil }
+    }
+
+    private func currentIOMeasurement() -> OfficialSourceIOMeasurement? {
+        ioMeasurementLock.lock(); defer { ioMeasurementLock.unlock() }
+        return ioMeasurement
+    }
 
     package convenience init(registrationURL: URL) throws {
         try self.init(registrationURL: registrationURL, checkpoint: { _ in })
@@ -159,6 +193,23 @@ package final class OfficialSourceHandle {
                 self.allowedNames = allowed
                 self.shardNames = Set(descriptor.shards.map(\.filename))
                 self.checkpoint = checkpoint
+                self.useMembershipScan = ProcessInfo.processInfo.environment[
+                    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN"] == "1"
+                if ProcessInfo.processInfo.environment["TURBO_QWEN_SOURCE_VALIDATION_FAST"] == "1" {
+                    let extra: Set<String> = ["LICENSE", "README.md", "chat_template.jinja",
+                                              "merges.txt", "vocab.json",
+                                              OfficialQwenPayloadVerifier.checksumManifestFile]
+                    self.fastValidation = FastValidation(
+                        registration: ValidatedDirectoryPath(path: registrationPath),
+                        source: ValidatedDirectoryPath(path: sourcePath),
+                        markerSHA256: SHA256.hash(data: marker.bytes).map {
+                            String(format: "%02x", $0)
+                        }.joined(),
+                        descriptorContentSHA256: descriptor.contentSHA256,
+                        expectedInventory: allowed.union(extra))
+                } else {
+                    self.fastValidation = nil
+                }
             } catch {
                 close(source)
                 throw error
@@ -186,8 +237,13 @@ package final class OfficialSourceHandle {
 
     package func validateBinding() throws {
         try Task.checkCancellation()
-        try Self.requireNamedDirectory(registrationPath, retained: registrationIdentity)
-        try Self.requireNamedDirectory(sourcePath, retained: sourceIdentity)
+        if let fastValidation {
+            try Self.requireNamedDirectory(fastValidation.registration, retained: registrationIdentity)
+            try Self.requireNamedDirectory(fastValidation.source, retained: sourceIdentity)
+        } else {
+            try Self.requireNamedDirectory(registrationPath, retained: registrationIdentity)
+            try Self.requireNamedDirectory(sourcePath, retained: sourceIdentity)
+        }
         try Self.checkLayout(registrationFD, path: registrationPath)
         let marker = try Self.readMarker(registrationFD, path: registrationPath)
         guard marker.identity == markerIdentity, marker.bytes == markerBytes else {
@@ -219,23 +275,36 @@ package final class OfficialSourceHandle {
     /// handle's own marker inode is rechecked by validateBinding on both sides.
     package func validateTrustedReceipt(_ receipt: OfficialSourceTrustReceipt) throws {
         try validateBinding()
-        let markerDigest = SHA256.hash(data: markerBytes).map {
-            String(format: "%02x", $0)
-        }.joined()
-        let descriptor = try OfficialSourceDescriptor.decodeStrict(data: markerBytes)
+        let markerDigest: String
+        let descriptorContentSHA256: String
+        if let fastValidation {
+            markerDigest = fastValidation.markerSHA256
+            descriptorContentSHA256 = fastValidation.descriptorContentSHA256
+        } else {
+            markerDigest = SHA256.hash(data: markerBytes).map {
+                String(format: "%02x", $0)
+            }.joined()
+            let descriptor = try OfficialSourceDescriptor.decodeStrict(data: markerBytes)
+            descriptorContentSHA256 = descriptor.contentSHA256
+        }
         guard receipt.logicalModelPath == registrationPath,
               receipt.sourceRoot == sourcePath,
               receipt.markerSHA256 == markerDigest,
-              receipt.descriptorContentSHA256 == descriptor.contentSHA256 else {
+              receipt.descriptorContentSHA256 == descriptorContentSHA256 else {
             throw OfficialSourceHandleError.replaced("trusted source marker or path changed")
         }
         // The handle's 26 shards and 7 pinned sidecars are already restricted
         // by the descriptor. The verifier also fingerprints six inert sidecars
         // which this helper may inspect but never makes openFile-allowlisted.
-        let extra: Set<String> = ["LICENSE", "README.md", "chat_template.jinja",
-                                  "merges.txt", "vocab.json",
-                                  OfficialQwenPayloadVerifier.checksumManifestFile]
-        let expected = allowedNames.union(extra)
+        let expected: Set<String>
+        if let fastValidation {
+            expected = fastValidation.expectedInventory
+        } else {
+            let extra: Set<String> = ["LICENSE", "README.md", "chat_template.jinja",
+                                      "merges.txt", "vocab.json",
+                                      OfficialQwenPayloadVerifier.checksumManifestFile]
+            expected = allowedNames.union(extra)
+        }
         let names = receipt.files.map(\.filename)
         guard names.count == expected.count, Set(names) == expected,
               names == names.sorted() else {
@@ -247,7 +316,12 @@ package final class OfficialSourceHandle {
                   Self.matchesFingerprint(held, receipt.rootFingerprint) else {
                 throw OfficialSourceHandleError.replaced("trusted source root changed")
             }
-            let named = try Self.openDirectory(sourcePath)
+            let named: Int32
+            if let fastValidation {
+                named = try Self.openDirectory(fastValidation.source)
+            } else {
+                named = try Self.openDirectory(sourcePath)
+            }
             defer { close(named) }
             var current = stat()
             guard fstat(named, &current) == 0,
@@ -282,7 +356,7 @@ package final class OfficialSourceHandle {
                         "trusted source file changed: \(entry.filename)")
                 }
                 if allowedNames.contains(entry.filename) {
-                    try remember([entry.filename: FileIdentity(held)])
+                    try remember(name: entry.filename, identity: FileIdentity(held))
                 }
             }
             try requireRoot()
@@ -399,7 +473,7 @@ package final class OfficialSourceHandle {
                   FileIdentity(final) == held else {
                 throw OfficialSourceHandleError.replaced("source file replaced: \(name)")
             }
-            try remember([name: held])
+            try remember(name: name, identity: held)
             return fd
         } catch {
             close(fd)
@@ -593,26 +667,33 @@ package final class OfficialSourceHandle {
                                      readAt: TensorPread,
                                      checkpoint: (TensorReadCheckpoint) throws -> Void,
                                      limits: TensorReadLimits?) throws {
+        let measurement = currentIOMeasurement()
+        var measuredRead = measurement?.beginRead(byteCount: byteCount)
+        defer { if let measuredRead { measurement?.merge(measuredRead) } }
         guard UInt64(destination.count) == byteCount else {
             throw OfficialSourceHandleError.range("destination capacity must equal requested bytes")
         }
         let plan = try readPlan(token, byteOffset: byteOffset, byteCount: byteCount,
                                 expectedByteCount: expectedByteCount,
                                 allocationBudget: allocationBudget, limits: limits)
-        try validateRetainedFile(token.fd, shardName: token.shardName,
-                                 identity: token.identity)
+        // Payload reads validate before/after each syscall; empty reads still
+        // validate before return. Reject entry cancellation without a duplicate check.
+        try Task.checkCancellation()
         var total = 0
         while total < destination.count {
             try Task.checkCancellation()
             try checkpoint(.beforePayloadRead)
-            try validateRetainedFile(token.fd, shardName: token.shardName,
-                                     identity: token.identity)
+            try OfficialSourceIOMeasurement.validate(&measuredRead, site: .beforeRead) {
+                try validateRetainedFile(token.fd, shardName: token.shardName, identity: token.identity)
+            }
             let requested = min(destination.count - total, plan.tile)
             let fileOffset = plan.absolute + UInt64(total) // bounded by readPlan
             guard let base = destination.baseAddress else {
                 throw OfficialSourceHandleError.range("missing destination storage")
             }
-            let outcome = readAt(token.fd, base.advanced(by: total), requested, off_t(fileOffset))
+            let outcome = OfficialSourceIOMeasurement.pread(&measuredRead, requested: requested) {
+                readAt(token.fd, base.advanced(by: total), requested, off_t(fileOffset))
+            }
             switch outcome {
             case .interrupted: continue
             case .failure(let code) where code == EINTR: continue
@@ -629,19 +710,28 @@ package final class OfficialSourceHandle {
                 total += got
             }
             try checkpoint(.afterPayloadRead)
-            try validateRetainedFile(token.fd, shardName: token.shardName,
-                                     identity: token.identity)
+            try OfficialSourceIOMeasurement.validate(&measuredRead, site: .afterRead) {
+                try validateRetainedFile(token.fd, shardName: token.shardName, identity: token.identity)
+            }
         }
         try checkpoint(.beforeReturn)
-        try validateRetainedFile(token.fd, shardName: token.shardName,
-                                 identity: token.identity)
+        try OfficialSourceIOMeasurement.validate(&measuredRead, site: .beforeReturn) {
+            try validateRetainedFile(token.fd, shardName: token.shardName, identity: token.identity)
+        }
         try Task.checkCancellation()
+        measuredRead?.failed = false
     }
 
     private func validateRetainedFile(_ fd: Int32, shardName: String,
                                       identity: FileIdentity) throws {
         try validateBinding()
-        guard try Self.entryNames(sourceFD, path: sourcePath).contains(shardName) else {
+        let containsShard: Bool
+        if useMembershipScan {
+            containsShard = try Self.entryContains(sourceFD, path: sourcePath, name: shardName)
+        } else {
+            containsShard = try Self.entryNames(sourceFD, path: sourcePath).contains(shardName)
+        }
+        guard containsShard else {
             throw OfficialSourceHandleError.replaced("source shard name changed: \(shardName)")
         }
         let held = try Self.fileIdentity(fd, path: shardName)
@@ -651,7 +741,7 @@ package final class OfficialSourceHandle {
               (held.mode & S_IFMT) == S_IFREG, held.links == 1 else {
             throw OfficialSourceHandleError.replaced("admitted shard changed: \(shardName)")
         }
-        try remember([shardName: identity])
+        try remember(name: shardName, identity: identity)
     }
 
     private func inventory() throws -> [String: FileIdentity] {
@@ -670,6 +760,19 @@ package final class OfficialSourceHandle {
             result[name] = identity
         }
         return result
+    }
+
+    private func remember(name: String, identity: FileIdentity) throws {
+        guard fastValidation != nil else {
+            try remember([name: identity])
+            return
+        }
+        identityLock.lock()
+        defer { identityLock.unlock() }
+        if let accepted = acceptedFiles[name], accepted != identity {
+            throw OfficialSourceHandleError.replaced("previously accepted source file changed: \(name)")
+        }
+        acceptedFiles[name] = identity
     }
 
     private func remember(_ identities: [String: FileIdentity]) throws {
@@ -719,6 +822,27 @@ package final class OfficialSourceHandle {
         let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_NONBLOCK | O_CLOEXEC)
         guard fd >= 0 else { throw openError(path) }
         return fd
+    }
+
+    // Only FastValidation's init-proven immutable paths use this overload.
+    // Still resolves the name freshly with the identical flags and errors.
+    private static func openDirectory(_ validated: ValidatedDirectoryPath) throws -> Int32 {
+        let path = validated.path
+        let fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_NONBLOCK | O_CLOEXEC)
+        guard fd >= 0 else { throw openError(path) }
+        return fd
+    }
+
+    private static func requireNamedDirectory(_ validated: ValidatedDirectoryPath,
+                                              retained: DirectoryIdentity) throws {
+        let path = validated.path
+        let fd: Int32
+        do { fd = try openDirectory(validated) }
+        catch { throw OfficialSourceHandleError.replaced("directory path changed: \(path)") }
+        defer { close(fd) }
+        guard try directoryIdentity(fd, path: path) == retained else {
+            throw OfficialSourceHandleError.replaced("directory replaced: \(path)")
+        }
     }
 
     private static func requireNamedDirectory(_ path: String, retained: DirectoryIdentity) throws {
@@ -832,6 +956,44 @@ package final class OfficialSourceHandle {
             throw OfficialSourceHandleError.replaced("directory stream changed: \(path)")
         }
         return names
+    }
+
+    // Only retained shard-name membership uses this opt-in full scan.
+    // Decode every entry identically and continue through EOF after a match.
+    private static func entryContains(_ fd: Int32, path: String, name wanted: String) throws -> Bool {
+        // A duplicate shares the retained directory's cursor with concurrent readers.
+        // Opening "." relative to the retained descriptor gives this scan its own cursor
+        // without resolving a caller-controlled path or following a replacement symlink.
+        let scanFD = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard scanFD >= 0 else { throw OfficialSourceHandleError.io(path: path, errno: errno) }
+        do {
+            guard try directoryIdentity(fd, path: path) == directoryIdentity(scanFD, path: path) else {
+                throw OfficialSourceHandleError.replaced("directory stream changed: \(path)")
+            }
+        } catch {
+            close(scanFD)
+            throw error
+        }
+        guard let stream = fdopendir(scanFD) else {
+            let error = OfficialSourceHandleError.io(path: path, errno: errno)
+            close(scanFD)
+            throw error
+        }
+        defer { closedir(stream) }
+        var found = false
+        errno = 0
+        while let entry = readdir(stream) {
+            let name = withUnsafeBytes(of: entry.pointee.d_name) { raw -> String in
+                String(decoding: raw.prefix { $0 != 0 }, as: UTF8.self)
+            }
+            if name != "." && name != "..", name == wanted { found = true }
+            errno = 0
+        }
+        guard errno == 0 else { throw OfficialSourceHandleError.io(path: path, errno: errno) }
+        guard try directoryIdentity(fd, path: path) == directoryIdentity(scanFD, path: path) else {
+            throw OfficialSourceHandleError.replaced("directory stream changed: \(path)")
+        }
+        return found
     }
 
     private static func openError(_ path: String) -> OfficialSourceHandleError {

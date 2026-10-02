@@ -4,10 +4,13 @@ import TurboFieldfare
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 6
+    static let currentVersion = 7
 
     var version: Int = currentVersion
+    /// The legacy context key remains Gemma's choice. Older files also use it
+    /// for Qwen until a separate Qwen value is saved.
     var contextTokens: Int = AppContextLengthOption.eightK.tokens
+    var qwenContextTokens: Int? = nil
     var expertCacheSlots: Int = 16
     var temperature: Double = 0.2
     var topKEnabled: Bool = true
@@ -37,6 +40,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case version
         case contextTokens
+        case qwenContextTokens
         case expertCacheSlots
         case temperature
         case topKEnabled
@@ -59,6 +63,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     init(version: Int = currentVersion,
          contextTokens: Int = AppContextLengthOption.eightK.tokens,
+         qwenContextTokens: Int? = nil,
          expertCacheSlots: Int = 16,
          temperature: Double = 0.2,
          topKEnabled: Bool = true,
@@ -79,6 +84,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          qwenRegistrationPath: String? = nil) {
         self.version = version
         self.contextTokens = contextTokens
+        self.qwenContextTokens = qwenContextTokens
         self.expertCacheSlots = expertCacheSlots
         self.temperature = temperature
         self.topKEnabled = topKEnabled
@@ -103,6 +109,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decode(Int.self, forKey: .version)
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
+        qwenContextTokens = try container.decodeIfPresent(Int.self, forKey: .qwenContextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
         temperature = try container.decode(Double.self, forKey: .temperature)
         topKEnabled = try container.decode(Bool.self, forKey: .topKEnabled)
@@ -143,6 +150,26 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         qwenRegistrationPath = try container.decodeIfPresent(String.self, forKey: .qwenRegistrationPath)
     }
 
+    func contextTokens(for modelID: AppModelID) -> Int {
+        switch modelID {
+        case .gemma4: contextTokens
+        case .qwen3_6: qwenContextTokens ?? contextTokens
+        }
+    }
+
+    mutating func setContextTokens(_ tokens: Int, for modelID: AppModelID) {
+        switch modelID {
+        case .gemma4:
+            // Preserve Qwen's inherited choice before changing the legacy key.
+            if qwenContextTokens == nil, tokens != contextTokens {
+                qwenContextTokens = contextTokens
+            }
+            contextTokens = tokens
+        case .qwen3_6:
+            qwenContextTokens = tokens
+        }
+    }
+
     func toolThinkingEnabled(for modelID: AppModelID) -> Bool {
         switch modelID {
         case .gemma4: toolThinkingEnabled
@@ -159,6 +186,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
 
     func isValid() -> Bool {
         AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
+            && (qwenContextTokens.map { tokens in
+                AppContextLengthOption.allCases.contains { $0.tokens == tokens }
+            } ?? true)
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)

@@ -508,6 +508,13 @@ enum QwenBF16ExpertCacheError: Error, Equatable, Sendable {
 /// caller of plan/fetch; it serializes them against GPU slot reservations.
 /// No slot is valid unless BOTH independently admitted slices were read.
 final class QwenBF16PairedExpertCache: @unchecked Sendable {
+    struct MeasurementSnapshot: Sendable {
+        let expertIDs: [Int]
+        let useCounts: [UInt64]
+        let lastUse: [UInt64]
+        let clock: UInt64
+        let policy: ExpertCachePolicy
+    }
     struct Buffers: @unchecked Sendable {
         let gateUp: MTLBuffer
         let down: MTLBuffer
@@ -546,6 +553,21 @@ final class QwenBF16PairedExpertCache: @unchecked Sendable {
     private var useCount: [UInt64]
     private let cachePolicy: ExpertCachePolicy
     private var clock: UInt64 = 0
+
+    /// Caller must hold the owning coordinator's I/O lock. Array values are
+    /// consumed synchronously before planning can mutate their backing storage.
+    func measurementSnapshot() -> MeasurementSnapshot {
+        MeasurementSnapshot(expertIDs: slotExpert, useCounts: useCount,
+                            lastUse: lastUse, clock: clock, policy: cachePolicy)
+    }
+
+    var measurementClock: UInt64 { clock }
+
+    /// Immutable slot allocations only. Payload/validity and replacement policy
+    /// remain private; residency registration never reads source or buffer data.
+    var residencyAllocations: [MTLBuffer] {
+        buffers.flatMap { [$0.gateUp, $0.down] }
+    }
 
     init(source: OfficialSourceHandle, names: QwenBF16RoutedSourceNames,
          expertCount: Int, hiddenSize: Int, intermediateSize: Int,

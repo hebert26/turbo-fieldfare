@@ -39,7 +39,7 @@ struct OutputPaneView: View {
     }
 
     private var transcript: some View {
-        // Live counters stay in the HUD so status updates do not edit text storage.
+        // The existing placeholder accepts status without adding it to the answer.
         IncrementalTranscriptView(
             history: model.transcriptHistory,
             historyActivities: model.transcriptAgentActivityHistory,
@@ -56,7 +56,8 @@ struct OutputPaneView: View {
             isTerminal: !model.isRunning,
             showsPrefillPlaceholder: model.isRunning
                 && model.outputResponsePlainText.isEmpty,
-            runIdentity: model.runIdentity)
+            runIdentity: model.runIdentity,
+            generationStatusText: model.generationStatusText)
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) {
                 if !model.isRunning && !model.outputResponsePlainText.isEmpty {

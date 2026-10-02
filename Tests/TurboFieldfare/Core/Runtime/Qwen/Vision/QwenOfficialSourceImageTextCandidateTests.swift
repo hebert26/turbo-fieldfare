@@ -475,6 +475,18 @@ import Testing
                 let diagnostics = try #require(await session.groupedPrefillDiagnostics())
                 #expect(diagnostics.mode == .grouped)
                 #expect(diagnostics.tokenCount == visionCase.tokenIds.count)
+                if ProcessInfo.processInfo.environment["TURBO_QWEN_GROUPED_LINEAR_PREFILL"] == "1" {
+                    // The pinned official architecture has 30 linear layers.
+                    // Prove the real trial selected batching, rather than only
+                    // accepting equal outputs from an unnoticed fallback.
+                    #expect(diagnostics.groupedLinearBatchSizes.count == 30)
+                    for (layer, sizes) in diagnostics.groupedLinearBatchSizes {
+                        #expect(sizes.reduce(0, +) == visionCase.tokenIds.count)
+                        #expect(sizes.allSatisfy { $0 > 0 && $0 <= 16 })
+                        #expect(sizes.contains { $0 > 1 })
+                        print("P23 grouped linear case=\(requestCase.id) layer=\(layer) batches=\(sizes)")
+                    }
+                }
             }
             let consumedContinuationCount = max(0, result.acceptedGeneratedTokenIDs.count - 1)
             guard result.promptTokens == visionCase.tokenIds.count,

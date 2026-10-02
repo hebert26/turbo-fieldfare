@@ -1,5 +1,6 @@
 import Foundation
 import Metal
+import TurboFieldfareOfficialQwenSource
 
 /// One rendered source prompt, its exact UTF-8 bytes and token IDs, bound to
 /// the retained source identity. This value does not admit a codec or source;
@@ -155,6 +156,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
 
     public func generate(
         _ request: QwenConversationGenerationRequest,
+        measurementCapture: RuntimeMeasurementCapture? = nil,
         shouldStop: @escaping @Sendable () -> Bool = { false },
         onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void = { _ in }
     ) async throws -> QwenConversationGenerationResult {
@@ -284,12 +286,14 @@ public actor QwenOfficialSourceConversationGenerationSession {
             firstSourceTurn: firstTurn, sourceSystemPrompt: request.systemPrompt,
             producedVisionFeatureRows: producedVisionFeatureRows,
             resumesCheckpoint: resumesCheckpoint,
+            measurementCapture: measurementCapture,
             shouldStop: shouldStop, onEvent: onEvent)
         return result
     }
 
     func generatePreparedTurn(
         promptTokenIDs: [Int32], config: GenerationConfig,
+        measurementCapture: RuntimeMeasurementCapture? = nil,
         shouldStop: @escaping @Sendable () -> Bool = { false },
         onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void = { _ in }
     ) async throws -> QwenConversationGenerationResult {
@@ -302,6 +306,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
         return try await generateCore(
             promptTokenIDs: promptTokenIDs, config: config,
             codec: nil, binding: nil, thinking: false,
+            measurementCapture: measurementCapture,
             shouldStop: shouldStop, onEvent: onEvent)
     }
 
@@ -636,9 +641,40 @@ public actor QwenOfficialSourceConversationGenerationSession {
         sourceSystemPrompt: String? = nil,
         producedVisionFeatureRows: Int? = nil,
         resumesCheckpoint: Bool = false,
+        measurementCapture: RuntimeMeasurementCapture? = nil,
         shouldStop: @escaping @Sendable () -> Bool,
         onEvent: @escaping @Sendable (QwenConversationGenerationEvent) -> Void
     ) async throws -> QwenConversationGenerationResult {
+        let cacheCaptureInstalled = measurementCapture?.beginQwenCacheMaps(
+            layerCount: model.architecture.layers, expertCount: model.architecture.experts,
+            slotCount: model.expertCacheSlots,
+            pairBytes: model.expertCacheBytesPerLayer / UInt64(model.expertCacheSlots)) ?? false
+        let productionTimingInstalled = cacheCaptureInstalled
+            && (measurementCapture?.beginQwenProductionTiming() ?? false)
+        defer {
+            if productionTimingInstalled {
+                measurementCapture?.record(.qwenProductionPhase, 3, QwenProductionTimingMeasurement.uptime())
+                measurementCapture?.endQwenProductionTiming()
+            }
+        }
+        var cacheTurnCompleted = false
+        defer {
+            if cacheCaptureInstalled { measurementCapture?.endQwenCacheMaps(completed: cacheTurnCompleted) }
+        }
+        return try await QwenCacheMapMeasurement.$capture.withValue(
+            cacheCaptureInstalled ? measurementCapture : nil) {
+        let ioMeasurement = measurementCapture.map { _ in OfficialSourceIOMeasurement() }
+        let installed = ioMeasurement.map { model.source.installIOMeasurement($0) } ?? false
+        if let measurementCapture {
+            // Source-I/O configuration is separate from Qwen cache-map records.
+            measurementCapture.record(.sourceIOConfiguration, 1, installed ? 1 : 0)
+        }
+        defer {
+            if installed, let ioMeasurement {
+                model.source.removeIOMeasurement(ioMeasurement)
+                measurementCapture?.recordSourceIO(ioMeasurement.snapshot())
+            }
+        }
         try requested.validate()
         guard resumesCheckpoint || (codec == nil) == (binding == nil),
               fixtureSteps == nil || (codec == nil && model.sourceIdentity == nil),
@@ -657,6 +693,9 @@ public actor QwenOfficialSourceConversationGenerationSession {
                 "prepared token turns cannot decode stop strings without a codec")
         }
         let transaction = try await state.begin()
+        if productionTimingInstalled {
+            measurementCapture?.record(.qwenProductionPhase, 2, QwenProductionTimingMeasurement.uptime())
+        }
         let started = Date()
         var accepted: [Int32] = []
         var terminalToolCalls: [ParsedToolCall] = []
@@ -679,7 +718,12 @@ public actor QwenOfficialSourceConversationGenerationSession {
                         onEvent(.prefill(done: done, total: total))
                     })
             }
+            if productionTimingInstalled {
+                measurementCapture?.record(.qwenProductionPhase, 1, QwenProductionTimingMeasurement.uptime())
+            }
             let decodeStarted = Date()
+            if installed { ioMeasurement?.setPhase(.decode) }
+            if cacheCaptureInstalled { measurementCapture?.setQwenCacheMapPhase(.decode) }
             let afterPrompt = await state.status()
             guard let working = afterPrompt.working else {
                 throw ConversationStateTransactionError.staleTransaction
@@ -851,6 +895,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
                     ? .endedWithEndToken : .openAssistant
             }
             for call in terminalToolCalls { onEvent(.toolCall(call)) }
+            cacheTurnCompleted = true
             return QwenConversationGenerationResult(
                 reason: reason, promptTokens: promptTokenIDs.count,
                 newTokens: sampledCount,
@@ -886,6 +931,7 @@ public actor QwenOfficialSourceConversationGenerationSession {
             }
             throw operationError
         }
+        }
     }
 
     private func sample(input: QwenOfficialSourceSamplingInput,
@@ -903,15 +949,22 @@ public actor QwenOfficialSourceConversationGenerationSession {
             history: input.retainedTokenIDs, config: config,
             position: samplePosition, outToken: scratch.outToken)
         try Task.checkCancellation()
+        let timingLocation = QwenCacheMapMeasurement.capture?.qwenProductionLocation(
+            position: input.retainedTokenIDs.count, tokenCount: 0, forward: false)
+        let timing = timingLocation.map { QwenProductionCommand(location: $0, stage: .sampler) }
+        timing?.willCommit(command)
         command.commit()
+        timing?.didCommit()
         var hookError: Error?
         do { try await hooks.afterActualGPUSubmission("source.sampler") }
         catch { hookError = error }
+        timing?.willWait()
         await withTaskCancellationHandler {
             await command.completed()
         } onCancel: {
             // The actor holds all scratch until actual Metal completion.
         }
+        timing?.resumed(command)
         if let hookError { throw hookError }
         guard command.status == .completed, command.error == nil else {
             throw QwenTextRunnerError.gpuExecution(

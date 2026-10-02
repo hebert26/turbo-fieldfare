@@ -3018,9 +3018,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             "ProcessType": "Interactive",
             // Preserve the launch default for callers without explicit load
             // settings. The app sends its saved thinking choice with each load.
-            "EnvironmentVariables": [
-                "TURBOFIELDFARE_AGENT_THINKING": GFTokenizer.toolThinkingEnabled ? "1" : "0",
-            ],
+            "EnvironmentVariables": Self.launchEnvironment(
+                environment: ProcessInfo.processInfo.environment,
+                thinking: GFTokenizer.toolThinkingEnabled),
         ]
         let propertyListData = try PropertyListSerialization.data(
             fromPropertyList: propertyList, format: .xml, options: 0)
@@ -3211,6 +3211,30 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     /// `kickstart` demands the job; it deliberately omits `-k`, which would
     /// restart a job that a RunAtLoad bootstrap already won. The socket is what
     /// decides readiness, so restarting a healthy service would only lose it.
+    /// Per-job trial opt-in only. No process-wide or launchd environment writes.
+    static func launchEnvironment(environment: [String: String], thinking: Bool) -> [String: String] {
+        var result = ["TURBOFIELDFARE_AGENT_THINKING": thinking ? "1" : "0"]
+        if environment["TURBO_QWEN_GPU_LINEAR_PREPARATION"] == "1" {
+            result["TURBO_QWEN_GPU_LINEAR_PREPARATION"] = "1"
+        }
+        if environment["TURBO_QWEN_EXPERT_CACHE_RESIDENCY"] == "1" {
+            result["TURBO_QWEN_EXPERT_CACHE_RESIDENCY"] = "1"
+        }
+        if environment["TURBO_QWEN_GROUPED_LINEAR_PREFILL"] == "1" {
+            result["TURBO_QWEN_GROUPED_LINEAR_PREFILL"] = "1"
+        }
+        if environment["TURBO_QWEN_EXPERT_PROJECTION_BATCH"] == "1" {
+            result["TURBO_QWEN_EXPERT_PROJECTION_BATCH"] = "1"
+        }
+        if environment["TURBO_QWEN_SOURCE_VALIDATION_FAST"] == "1" {
+            result["TURBO_QWEN_SOURCE_VALIDATION_FAST"] = "1"
+        }
+        if environment["TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN"] == "1" {
+            result["TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN"] = "1"
+        }
+        return result
+    }
+
     static func kickstartArguments(uid: uid_t, label: String) -> [String] {
         ["kickstart", "gui/\(uid)/\(label)"]
     }
