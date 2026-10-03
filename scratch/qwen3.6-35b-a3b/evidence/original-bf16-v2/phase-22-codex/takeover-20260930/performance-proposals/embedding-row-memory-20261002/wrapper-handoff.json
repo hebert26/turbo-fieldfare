@@ -1,0 +1,54 @@
+{
+  "schema": 1,
+  "head": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "product": "TurboFieldfareBaselineMemoryProbe",
+  "mode": "serial",
+  "command": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run.py",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+  ],
+  "analysisCommand": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/analyze.py",
+    "RUN_PATH_FROM_RUN_STDOUT"
+  ],
+  "baselineRun": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967",
+  "baselineResultSHA256": "b433d22aa6f254794a1fd7e4b05adec8227ea0fdaf4252c34aca8efa6d73b737",
+  "mainOnly": true,
+  "oneCandidateChild": true,
+  "changedVariable": {
+    "TURBO_QWEN_PROTECTED_EMBEDDING_ROWS": "1"
+  },
+  "unchangedResidencyFlag": "0",
+  "admissionMinimumFreePercent": 50,
+  "liveGuardMinimumFreePercent": 30,
+  "wholeRunTimeoutSeconds": 420,
+  "sampleSeconds": 2,
+  "exactMatchFields": [
+    "outputIDs",
+    "acceptedRouteCount",
+    "acceptedRawRowCount",
+    "acceptedRouteSHA256",
+    "acceptedRawRowSHA256",
+    "finalState"
+  ],
+  "candidateFields": {
+    "protectedEmbeddingRows": true,
+    "protectedEmbeddingRowBytes": 4096,
+    "removedResidentEmbeddingBytes": 1017118720
+  },
+  "baselineResidentWeightBytes": "Missing in the old report. Do not infer an old report value.",
+  "partialEvidence": "Preserve raw child, phase, process/system and guard records after abort. No complete comparison on abort.",
+  "limits": "One candidate against a saved serial baseline. Memory and timing differences are observations. No speed claim. Request timing excludes load.",
+  "staticChecks": "Python AST, JSON and explicit flag comparison only. No model, preflight, test or build run.",
+  "sourceRequirement": "Main must use the new source owner frozen stage and stable build receipts. This handoff is not build evidence.",
+  "files": {
+    "run.py": "d4057690d9018cf3e641ce581e5984803283913e6d11594fdf8f4755284eca85",
+    "preflight.py": "d6493789473a2c117f62e5c7b0d4bdd6272a3a8cd19e1ec6cb24857a8c4d1303",
+    "preflight-plan.json": "1b22816dd689b1c7e6e462547214a22677e562de2257003ca9b5058a11def39f",
+    "analyze.py": "33b8431cd6d30a8cccc8bc7e95ade36c22693f9285fd51965fabcedeeec53272",
+    "request.json": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285"
+  },
+  "memoryEvidence": "Compare actual afterModelLoad Metal markers. Baseline4894752768 bytes. Static table geometry1017118720 bytes. Old residentWeightBytes is missing; do not invent it."
+}

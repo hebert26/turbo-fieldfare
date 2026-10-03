@@ -1,0 +1,175 @@
+{
+  "schema": 1,
+  "requestedMode": "serial",
+  "runPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5",
+  "commands": [
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/commit.stdout",
+      "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/commit.stderr",
+      "exit": 0
+    },
+    {
+      "argv": [
+        "python3",
+        "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/preflight.py"
+      ],
+      "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/preflight.stdout",
+      "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/preflight.stderr",
+      "exit": 0
+    },
+    {
+      "argv": [
+        "system_profiler",
+        "SPHardwareDataType"
+      ],
+      "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/hardware.stdout",
+      "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/hardware.stderr",
+      "exit": 0
+    },
+    {
+      "argv": [
+        "/usr/bin/memory_pressure",
+        "-Q"
+      ],
+      "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/launch-memory.stdout",
+      "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/launch-memory.stderr",
+      "exit": 0
+    },
+    {
+      "argv": [
+        "pgrep",
+        "-fl",
+        "TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm|TurboFieldfareExactMetadataCost|TurboFieldfareExactMetadataParallel|TurboFieldfareExactBlockProbe|TurboFieldfareExpertPredictRecall|TurboFieldfareExpertPredictCPU|TurboFieldfareExpertPrefetchOverlap|TurboFieldfareExactMetadataDecode|TurboFieldfareExactReadIntervals|TurboFieldfareCausalLookupDecode|TurboFieldfareRecurrentPrefixRecovery|TurboFieldfareBaselineMemoryProbe|resident-kernel-timing|source64-token4|qwen.*harness"
+      ],
+      "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/extra-process-guard.stdout",
+      "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/extra-process-guard.stderr",
+      "exit": 1
+    },
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/commit-after.stdout",
+      "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/commit-after.stderr",
+      "exit": 0
+    }
+  ],
+  "environment": {
+    "TURBO_QWEN_SOURCE_VALIDATION_FAST": "1",
+    "TURBO_QWEN_EXPERT_CACHE_RESIDENCY": "0",
+    "TURBO_QWEN_PROTECTED_EMBEDDING_ROWS": "1",
+    "TURBO_QWEN_GPU_LINEAR_PREPARATION": "1",
+    "TURBO_QWEN_GROUPED_LINEAR_PREFILL": "1",
+    "TURBO_QWEN_EXPERT_PROJECTION_BATCH": "0",
+    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN": "0",
+    "TURBO_QWEN_EXPERT_READ_KNOWN_NONE_4": "0",
+    "TURBO_QWEN_EXACT_TOKEN_CAPTURE": "0"
+  },
+  "memorySamplingSeconds": 2,
+  "wholeRunTimeoutSeconds": 420,
+  "minimumFreePercent": 29,
+  "admissionMinimumFreePercent": 50,
+  "liveGuardMinimumFreePercent": 30,
+  "observedMinimumFreePercent": 29,
+  "wrapperSHA256": "d4057690d9018cf3e641ce581e5984803283913e6d11594fdf8f4755284eca85",
+  "exit": 2,
+  "purpose": "One serial protected embedding comparison. No speed claim.",
+  "clock": "SDK CLOCK_UPTIME_RAW",
+  "clockError": null,
+  "commit": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "reusedEvidence": {
+    "sampler.py": "ca130227ba43a9430c777efc4b7b2ffb07c8bf71e7120024e92a6ef34a14a918",
+    "analyze.py": "9021280fa0d63c51e9d7d3ee91be657bfd3a6a3694708a85480c44b105028f51",
+    "run.py": "0bbacb401dc3544ba8f053948d2c1e8434c48fc8379153487d104b57e2496974",
+    "evidence_helpers.py": "edb42e483d4255df6800aa2208807e45a380436cd86750fb598d24b62b2288f4",
+    "frozen-hashes.json": "cca94dc3e8d3efbfd0b692928c3ac4cb06ffecaa7ae4964b7dfdd38abe9a917d",
+    "residency-off-001/run.py": "61ea5b65c58a3496c36f3de219fb884d86ae24c21d4a4a4965552b0e90cf5447",
+    "residency-off-001/control-manifest.json": "56f493e118202c8e90aa4bcdf1f16f98d1e70254b51a50be12e7fc559c2d865b",
+    "residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/result.json": "b433d22aa6f254794a1fd7e4b05adec8227ea0fdaf4252c34aca8efa6d73b737",
+    "residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/receipt.json": "578014746469e29b48f151b86c79673fef6f18fed1146ee1649075f189bb6f44",
+    "residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/probe.stdout": "96761de18910358c2c350ddc1ef61afdc80cb113f14f402f1ebb0f5f261c4232",
+    "residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/probe.stderr": "616391dc68891adff6131e8c69a7584813cbe527cdcb5b2706f30184d445df85",
+    "residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/memory.jsonl": "be1c060f82678a38882c9611c0eb3b6d4fb60ac93ef14f323bdcfef4495e7130",
+    "residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/process-system.jsonl": "d254346977c2d654b4be119a9f6cae0a50446ab033578c346eef29b63c58f24a"
+  },
+  "controlSHA256": "7047d1ae30be0d04e9d1681f8bb92f830544c10a8440897a3f4d03ed9a20d201",
+  "controlHashes": {
+    "run.py": "d4057690d9018cf3e641ce581e5984803283913e6d11594fdf8f4755284eca85",
+    "preflight.py": "d6493789473a2c117f62e5c7b0d4bdd6272a3a8cd19e1ec6cb24857a8c4d1303",
+    "preflight-plan.json": "1b22816dd689b1c7e6e462547214a22677e562de2257003ca9b5058a11def39f",
+    "analyze.py": "33b8431cd6d30a8cccc8bc7e95ade36c22693f9285fd51965fabcedeeec53272",
+    "request.json": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+    "wrapper-handoff.json": "11d0af2de63803753670df5cc1b74149ad6b09502f89277910de6f30d4fbbad5"
+  },
+  "buildCommit": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "binarySHA256": "bfe33519fa27cd7d7c513cbedf8d37db37526c4b74590a3a50897c064822234b",
+  "sourceInventoryPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/overlay-after-build-hashes.json",
+  "sourceInventoryCount": 5296,
+  "sourceInventoryMatchedBefore": true,
+  "stageInventoryPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/frozen-hashes.json",
+  "stageHashesSHA256": "9a7f268c3188f9abf15d4e6deb5f88f6137e153bb2fab9d6b95c4fd4bcb8c6d4",
+  "sourceHashesSHA256": "caaa2d8341e203c07dab30f055ee45fee800ed7f44ad0e3f53480b14eddd87f8",
+  "buildReceiptSHA256": "4f6f4884d53202fe019b4589ca0d6b88668bf5d7fef312be3d9594e71b3c93d4",
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "preflightReceipt": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/preflight-20261002T195801.899959Z-b126b896-3b80-4462-a886-852782c41d55.json",
+  "preflightReceiptSHA256": "87127c9ead6c6f9cc6eb9a6f193be94a7803462000ebf21cf88b2ac3dc27f523",
+  "launchMemoryFreePercent": 73,
+  "probeCommand": [
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/build/release/TurboFieldfareBaselineMemoryProbe",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/request.json",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/result.json"
+  ],
+  "registrationPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo",
+  "stdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/probe.stdout",
+  "stderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/probe.stderr",
+  "resultPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/result.json",
+  "memoryPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/memory.jsonl",
+  "samplerPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/process-system.jsonl",
+  "samplerStdoutPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/sampler.stdout",
+  "samplerStderrPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/sampler.stderr",
+  "childLaunchBeforeUptimeNanoseconds": 2122420431198041,
+  "ownedPID": 86009,
+  "childStartUptimeNanoseconds": 2122420433823541,
+  "samplerCommand": [
+    "python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/sampler.py",
+    "86009",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5/process-system.jsonl",
+    "--seconds",
+    "420"
+  ],
+  "samplerPID": 86010,
+  "watchdogAbort": "memory below 30% or unavailable",
+  "stopRequestedUptimeNanoseconds": 2122602439962083,
+  "childExit": -15,
+  "childEndUptimeNanoseconds": 2122602480212166,
+  "wallSeconds": 182.04904562514275,
+  "binaryAfterSHA256": "bfe33519fa27cd7d7c513cbedf8d37db37526c4b74590a3a50897c064822234b",
+  "sourceInventoryMatchedAfter": true,
+  "stageInventoryMatchedAfter": true,
+  "commitAfter": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "integrityVerified": true,
+  "stdoutSHA256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "stderrSHA256": "8ce8e986003b86e5f6247f30c4a5b91231516f0db57ad6d9f314a5643e88f8eb",
+  "memorySHA256": "1c5dcc20ef95c05e1a49f5bd444381e624158d864ae1e0e4a3e84eb7df0ab8a6",
+  "samplerExit": 0,
+  "rawSHA256": {
+    "probe.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "probe.stderr": "8ce8e986003b86e5f6247f30c4a5b91231516f0db57ad6d9f314a5643e88f8eb",
+    "memory.jsonl": "1c5dcc20ef95c05e1a49f5bd444381e624158d864ae1e0e4a3e84eb7df0ab8a6",
+    "process-system.jsonl": "3df7c884c5118a8ac964b8f1b28641249fc1b58bb0f3ae5f355ef68b27126d76",
+    "sampler.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "sampler.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "resultPresent": false,
+  "completeCorrectnessResult": false,
+  "speedClaim": false
+}

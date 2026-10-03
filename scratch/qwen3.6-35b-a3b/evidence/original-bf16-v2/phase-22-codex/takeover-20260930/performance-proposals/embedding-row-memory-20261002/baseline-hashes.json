@@ -1,0 +1,13 @@
+{
+  "commit": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "files": {
+    "Package.swift": "c36fc9a06e7bc5c22102c5954739fab2122b7d1d74b8450bbb39287f8e570eaa",
+    "Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift": "fc829b6b298b6876e01f1214868e505ca14d18a0a88e2be4f9b1c902233595c6",
+    "Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift": "ce8a73df2ae6a81470417143f08825b522c5afc919647b98ee0b50f3ec0e57df",
+    "Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift": "015f17197087f8547adbd09fce0170cc7c920bd27afa9285070e06b6e234ea72",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift": "4a4afde90a9a116de52cd988334eeca74f75b54d3b2f9e2f2d544468dd479529",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": "be3bf0bbda07bc55f0f473e7a5510b4f1c3573e003af6f2efd2ae114b998095b",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift": "6c986da9923a8dded99c7cfb2c97d9070ed4295629ca970dee031cc35aedb0d4",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift": "9742683d07598f9960f3a064e49b7b21f0429d805771b48026f34e8646807e68"
+  }
+}

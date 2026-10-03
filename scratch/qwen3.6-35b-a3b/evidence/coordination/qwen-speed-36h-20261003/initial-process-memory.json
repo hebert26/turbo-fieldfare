@@ -1,0 +1,105 @@
+{
+  "time": "2026-10-03T06:48:41.667498+00:00",
+  "topProcesses": [
+    {
+      "pid": 56422,
+      "rssKiB": 728528,
+      "executable": "/Applications/Xcode.app/Contents/SharedFrameworks/SwiftBuild.framework/Versions/A/PlugIns/SWBBuildService.bundle/Contents/MacOS/SWBBuildService"
+    },
+    {
+      "pid": 80338,
+      "rssKiB": 644976,
+      "executable": "/Applications/ChatGPT.app/Contents/Frameworks/Codex Framework.framework/Versions/154.0.8037.98/Helpers/Codex (Renderer).app/Contents/MacOS/Codex (Renderer)"
+    },
+    {
+      "pid": 957,
+      "rssKiB": 371344,
+      "executable": "/System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer"
+    },
+    {
+      "pid": 69504,
+      "rssKiB": 367568,
+      "executable": "claude"
+    },
+    {
+      "pid": 3409,
+      "rssKiB": 342192,
+      "executable": "/Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer)"
+    },
+    {
+      "pid": 79446,
+      "rssKiB": 307536,
+      "executable": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+    },
+    {
+      "pid": 49207,
+      "rssKiB": 299648,
+      "executable": "/Users/dev-machine/Library/Developer/CoreSimulator/Devices/F804E8DC-00CA-4F3D-8174-0A37E2487682/data/Containers/Bundle/Application/12CD3191-7EDC-422F-84E9-EB1FE7247768/NestMind.app/NestMind"
+    },
+    {
+      "pid": 19486,
+      "rssKiB": 273520,
+      "executable": "claude"
+    },
+    {
+      "pid": 3350,
+      "rssKiB": 264192,
+      "executable": "/Applications/Claude.app/Contents/MacOS/Claude"
+    },
+    {
+      "pid": 38066,
+      "rssKiB": 250320,
+      "executable": "pi"
+    },
+    {
+      "pid": 97171,
+      "rssKiB": 247568,
+      "executable": "/Library/Developer/CoreSimulator/Volumes/iOS_23F73/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/DocumentManagerUICore.framework/PlugIns/com.apple.DocumentManager.Service.appex/com.apple.DocumentManager.Service"
+    },
+    {
+      "pid": 96769,
+      "rssKiB": 246576,
+      "executable": "/Library/Developer/CoreSimulator/Volumes/iOS_23F73/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/Applications/Preview.app/Preview"
+    },
+    {
+      "pid": 4448,
+      "rssKiB": 242272,
+      "executable": "/Users/dev-machine/Library/Application Support/Claude/claude-code/2.1.286/f2326db61802/claude.app/Contents/MacOS/claude"
+    },
+    {
+      "pid": 72191,
+      "rssKiB": 241536,
+      "executable": "/Library/Developer/CoreSimulator/Volumes/iOS_23F73/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/System/Library/CoreServices/SpringBoard.app/SpringBoard"
+    },
+    {
+      "pid": 24083,
+      "rssKiB": 236640,
+      "executable": "pi"
+    },
+    {
+      "pid": 90140,
+      "rssKiB": 213424,
+      "executable": "pi"
+    },
+    {
+      "pid": 95824,
+      "rssKiB": 208480,
+      "executable": "/Library/Developer/CoreSimulator/Volumes/iOS_23F73/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 26.5.simruntime/Contents/Resources/RuntimeRoot/Applications/MediaRemoteUI.app/MediaRemoteUI"
+    },
+    {
+      "pid": 80327,
+      "rssKiB": 205984,
+      "executable": "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+    },
+    {
+      "pid": 67001,
+      "rssKiB": 202592,
+      "executable": "/System/Library/Frameworks/WebKit.framework/Versions/A/XPCServices/com.apple.WebKit.WebContent.xpc/Contents/MacOS/com.apple.WebKit.WebContent"
+    },
+    {
+      "pid": 79448,
+      "rssKiB": 196944,
+      "executable": "pi"
+    }
+  ]
+}

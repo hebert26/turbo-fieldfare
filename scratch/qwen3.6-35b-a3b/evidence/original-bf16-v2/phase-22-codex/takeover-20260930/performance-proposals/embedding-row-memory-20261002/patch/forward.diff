@@ -1,0 +1,1589 @@
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,6 +8,7 @@
+         .iOS(.v26),
+     ],
+     products: [
++        .executable(name: "TurboFieldfareBaselineMemoryProbe", targets: ["TurboFieldfareBaselineMemoryProbe"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -26,6 +27,7 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
++        .executableTarget(name: "TurboFieldfareBaselineMemoryProbe", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareBaselineMemoryProbe"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+--- a/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift
++++ b/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift
+@@ -761,6 +761,15 @@
+         return plan.assignedSlots.map { buffers[$0] }
+     }
+ 
++    // Diagnostic per-consumer hit freshness, identical protected checks.
++    func validateExactBlockConsumer(slot: Int, expert: Int) throws {
++        guard slotExpert.indices.contains(slot), slotExpert[slot] == expert else {
++            throw QwenBF16ExpertCacheError.invalidPlan
++        }
++        do { try validateBoth() }
++        catch { slotExpert[slot] = -1; throw error }
++    }
++
+     private func validateBoth() throws {
+         try Self.validate(source: source, range: gateUpRange)
+         try Self.validate(source: source, range: downRange)
+--- a/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
++++ b/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
+@@ -984,13 +984,15 @@
+         sharedWeights: QwenBF16Weights,
+         scratch: QwenMoEScratch,
+         initializeOutput: Bool,
++        exactBlockAdmission: QwenExactBlockConsumerAdmission? = nil,
++        exactPairSharedNames: QwenBF16SharedNames? = nil,
+         isolation: isolated (any Actor)? = #isolation
+     ) async throws {
+         // Capture inside submit: its encoding failure path still commits the
+         // partially encoded command and holds both buffers until completion.
+         var submittedCommand: MTLCommandBuffer?
+         let timing = QwenProductionTimingMeasurement.command(.groupedMoE)
+-        let retainedBuffers = [hiddenRows, routingWeights, outputRows,
++        var retainedBuffers = [hiddenRows, routingWeights, outputRows,
+             scratch.routedActivation, scratch.sharedGate, scratch.sharedUp,
+             scratch.sharedActivation, scratch.sharedOutput, scratch.sharedOutputGate]
+         do {
+@@ -1143,6 +1145,67 @@
+                 offsets.append((row: rowOffset, weight: weightOffset))
+                 previous = item
+             }
++            // All pair bindings and allocations precede source authentication.
++            // Distinct, tracked single rows let the unchanged shared encoder use offset0.
++            var sharedRows: [(token: Int, rowOffset: Int, hidden: MTLBuffer, output: MTLBuffer)] = []
++            if let names = exactPairSharedNames {
++                let tokens = referencedTokens.sorted()
++                guard exactBlockAdmission != nil, tokenCount == 4, configuration.topK == 8,
++                      tokens == [0, 1] || tokens == [2, 3],
++                      initializeOutput == (tokens == [0, 1]), work.count == 16,
++                      lease.experts.count <= 16 else {
++                    throw QwenMoEError.invalidAffineBinding("exact pair eligibility/clear binding")
++                }
++                for token in tokens {
++                    let ranks = work.filter { $0.tokenIndex == token }.map(\.routeRank)
++                    guard Set(ranks) == Set(0..<configuration.topK), ranks.count == configuration.topK else {
++                        throw QwenMoEError.invalidAffineBinding("exact pair missing original rank")
++                    }
++                }
++                try sharedWeights.requireShape(names.gate, role: .sharedGate,
++                    rows: configuration.sharedIntermediateSize, columns: configuration.hiddenSize)
++                try sharedWeights.requireShape(names.up, role: .sharedUp,
++                    rows: configuration.sharedIntermediateSize, columns: configuration.hiddenSize)
++                try sharedWeights.requireShape(names.down, role: .sharedDown,
++                    rows: configuration.hiddenSize, columns: configuration.sharedIntermediateSize)
++                try sharedWeights.requireShape(names.outputGate, role: .sharedOutputGate,
++                    rows: 1, columns: configuration.hiddenSize)
++                try requireDispatchable(try bf16Pipeline("qwen_moe_silu_multiply_bf16"),
++                    count: configuration.sharedIntermediateSize)
++                try requireDispatchable(try bf16Pipeline("qwen_moe_shared_epilogue_bf16"),
++                    count: configuration.hiddenSize)
++                guard retainedBuffers.allSatisfy({ $0.hazardTrackingMode != .untracked }) else {
++                    throw QwenMoEError.invalidAffineBinding("exact pair requires tracked resources")
++                }
++                let rowBytes = try Self.checkedMultiply(configuration.hiddenSize, MemoryLayout<Float>.stride,
++                    operation: "exact pair row bytes")
++                for token in tokens {
++                    guard let hidden = device.makeBuffer(length: rowBytes,
++                            options: [.storageModePrivate, .hazardTrackingModeTracked]),
++                          let output = device.makeBuffer(length: rowBytes,
++                            options: [.storageModePrivate, .hazardTrackingModeTracked]) else {
++                        throw QwenMoEError.bufferTooSmall(name: "exact pair rows", required: rowBytes, actual: 0)
++                    }
++                    hidden.label = "qwen.exact-pair.hidden.\(token)"
++                    output.label = "qwen.exact-pair.output.\(token)"
++                    let rowOffset = try Self.checkedMultiply(token, rowBytes, operation: "exact pair row offset")
++                    try Self.requireBuffer(hiddenRows, named: "exact pair input", offset: rowOffset,
++                        elements: configuration.hiddenSize, as: Float.self)
++                    try Self.requireBuffer(outputRows, named: "exact pair routed output", offset: rowOffset,
++                        elements: configuration.hiddenSize, as: Float.self)
++                    sharedRows.append((token, rowOffset, hidden, output))
++                    retainedBuffers.append(contentsOf: [hidden, output])
++                }
++                guard Set(retainedBuffers.map { ObjectIdentifier($0) }).count == retainedBuffers.count,
++                      retainedBuffers.allSatisfy({ $0.device === device }),
++                      sharedRows.allSatisfy({ $0.hidden.hazardTrackingMode == .tracked && $0.output.hazardTrackingMode == .tracked }) else {
++                    throw QwenMoEError.invalidAffineBinding("exact pair row alias/device/tracking")
++                }
++                try Self.requireDistinctSharedWeights(sharedWeights, from: retainedBuffers)
++                guard mappedBufferIDs.isDisjoint(with: Set(retainedBuffers.map { ObjectIdentifier($0) })) else {
++                    throw QwenMoEError.invalidAffineBinding("exact pair row aliases mapped expert")
++                }
++            }
+             let gateSelection = try bf16RoutedPipeline(
+                 serialName: "qwen_moe_routed_gate_up_bf16",
+                 cooperativeName: "qwen_moe_routed_gate_up_bf16_cooperative",
+@@ -1158,6 +1221,9 @@
+             try requireDispatchable(downSelection.pipeline, count: configuration.hiddenSize)
+             if initializeOutput { try requireDispatchable(clearPipeline, count: rowElements) }
+             try Task.checkCancellation()
++            // All diagnostic consumer checks finish before a command is encoded.
++            // No await, callback or payload read occurs between these checks and commit.
++            try exactBlockAdmission?.validate(submittedLease: lease, submittedWork: work)
+             try lease.submit(on: queue, timing: timing) { command in
+                 submittedCommand = command
+                 command.label = "qwen.moe.grouped-bf16"
+@@ -1214,6 +1280,30 @@
+                                                cooperative: downSelection.cooperative)
+                     }
+                 }
++                if let names = exactPairSharedNames {
++                    let rowBytes = configuration.hiddenSize * MemoryLayout<Float>.stride
++                    for row in sharedRows {
++                        try Task.checkCancellation()
++                        guard let inputCopies = command.makeBlitCommandEncoder() else {
++                            throw QwenMoEError.commandEncoderUnavailable
++                        }
++                        inputCopies.copy(from: hiddenRows, sourceOffset: row.rowOffset,
++                            to: row.hidden, destinationOffset: 0, size: rowBytes)
++                        inputCopies.copy(from: outputRows, sourceOffset: row.rowOffset,
++                            to: row.output, destinationOffset: 0, size: rowBytes)
++                        inputCopies.endEncoding()
++                        // Encoders are ordered, all resources tracked; shared scratch
++                        // is overwritten/read completely before the next token uses it.
++                        try encodeSharedBF16(commandBuffer: command, hidden: row.hidden,
++                            weights: sharedWeights, names: names, scratch: scratch, output: row.output)
++                        guard let outputCopy = command.makeBlitCommandEncoder() else {
++                            throw QwenMoEError.commandEncoderUnavailable
++                        }
++                        outputCopy.copy(from: row.output, sourceOffset: 0,
++                            to: outputRows, destinationOffset: row.rowOffset, size: rowBytes)
++                        outputCopy.endEncoding()
++                    }
++                }
+                 try Task.checkCancellation()
+             }
+         } catch {
+--- a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
++++ b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+@@ -685,6 +685,7 @@
+ final class QwenBF16CacheResidency: @unchecked Sendable {
+     private let queue: MTLCommandQueue
+     private let set: MTLResidencySet
++    private let memoryPhaseProbe: QwenBaselineMemoryPhaseProbe?
+     private let layerCount: Int
+     private let allocationsPerLayer: Int
+     private let expectedAllocationCount: Int
+@@ -694,7 +695,8 @@
+     private var retainedAllocations: [MTLBuffer] = []
+     private var requested = false
+ 
+-    init(queue: MTLCommandQueue, layerCount: Int, slotCount: Int) throws {
++    init(queue: MTLCommandQueue, layerCount: Int, slotCount: Int,
++         memoryPhaseProbe: QwenBaselineMemoryPhaseProbe? = nil) throws {
+         let (perLayer, perLayerOverflow) = slotCount.multipliedReportingOverflow(by: 2)
+         let (count, countOverflow) = layerCount.multipliedReportingOverflow(by: perLayer)
+         guard layerCount > 0, slotCount > 0, !perLayerOverflow, !countOverflow,
+@@ -706,6 +708,7 @@
+         // produce an ordinary run labeled as a residency trial.
+         set = try queue.device.makeResidencySet(descriptor: descriptor)
+         self.queue = queue
++        self.memoryPhaseProbe = memoryPhaseProbe
+         self.layerCount = layerCount
+         allocationsPerLayer = perLayer
+         expectedAllocationCount = count
+@@ -732,19 +735,27 @@
+         allocationIDs.formUnion(ids)
+         layers.insert(layer)
+         if layers.count == layerCount {
++            memoryPhaseProbe?.record(.residencyRequestBefore, device: queue.device, layer: layer,
++                residency: phaseSnapshot())
+             set.commit()
+             set.requestResidency()
+             queue.addResidencySet(set)
+             requested = true
+-        }
+-    }
+-
+-    func snapshot() -> QwenBF16CacheResidencySnapshot {
+-        lock.lock(); defer { lock.unlock() }
+-        return QwenBF16CacheResidencySnapshot(
++            memoryPhaseProbe?.record(.residencyRequestAfter, device: queue.device, layer: layer,
++                residency: phaseSnapshot())
++        }
++    }
++
++    private func phaseSnapshot() -> QwenBF16CacheResidencySnapshot {
++        QwenBF16CacheResidencySnapshot(
+             registeredLayerCount: layers.count, expectedLayerCount: layerCount,
+             allocationCount: set.allocationCount, expectedAllocationCount: expectedAllocationCount,
+             allocatedSize: set.allocatedSize, requested: requested)
++    }
++
++    func snapshot() -> QwenBF16CacheResidencySnapshot {
++        lock.lock(); defer { lock.unlock() }
++        return phaseSnapshot()
+     }
+ 
+     deinit {
+@@ -964,6 +975,17 @@
+         }
+     }
+ 
++    fileprivate func validateExactBlockConsumer(identifier: UInt64, expert: Int) throws {
++        guard isUsable(identifier: identifier) else { throw QwenExpertMappingError.canceled }
++        stateLock.lock()
++        let slot = reservations[identifier]?.slots.first { activeSlots[$0]?.expertID == expert }
++        stateLock.unlock()
++        guard let slot else { throw QwenExpertMappingError.invalidExpert(expert) }
++        ioLock.lock()
++        defer { ioLock.unlock() }
++        try cache.validateExactBlockConsumer(slot: slot, expert: expert)
++    }
++
+     fileprivate func trackLastUse(identifier: UInt64, on command: MTLCommandBuffer) throws {
+         try withStateLock {
+             guard command.status == .notEnqueued, command.device === device else {
+@@ -1061,6 +1083,10 @@
+     }
+ 
+     deinit { coordinator.releaseUnsubmitted(identifier: identifier) }
++
++    func validateExactBlockConsumer(expert: Int) throws {
++        try coordinator.validateExactBlockConsumer(identifier: identifier, expert: expert)
++    }
+ 
+     func requireUsable() throws {
+         guard coordinator.isUsable(identifier: identifier) else {
+--- /dev/null
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenBaselineMemoryPhaseProbe.swift
+@@ -0,0 +1,50 @@
++import Foundation
++import Darwin
++import Metal
++
++enum QwenBaselineMemoryPhase: String, Sendable {
++    case beforeModelLoad, afterModelLoad, runnerReady, prefillEmbeddingDone
++    case prefillLayerDone, residencyRequestBefore, residencyRequestAfter
++    case prefillDone, decodeDone, diagnosticsStart, diagnosticsEnd
++}
++
++// Immutable diagnostic owner. No callbacks, tensor reads, or shared recording lock.
++struct QwenBaselineMemoryPhaseProbe: Sendable {
++    let requestID: String
++
++    func record(_ phase: QwenBaselineMemoryPhase, device: MTLDevice,
++                layer: Int? = nil, cachedLayerCount: Int? = nil,
++                allocatedCacheBytes: UInt64? = nil,
++                residency: QwenBF16CacheResidencySnapshot? = nil) {
++        func value<T>(_ optional: T?) -> Any {
++            if let optional { return optional }
++            return NSNull()
++        }
++        let record: [String: Any] = [
++            "type": "memoryPhase", "schema": 1, "requestID": requestID,
++            "pid": getpid(), "uptimeNanoseconds": DispatchTime.now().uptimeNanoseconds,
++            "phase": phase.rawValue, "layer": value(layer),
++            "currentAllocatedSizeBytes": device.currentAllocatedSize,
++            "cachedLayerCount": value(cachedLayerCount),
++            "allocatedCacheBytes": value(allocatedCacheBytes),
++            "residencyRegisteredLayers": value(residency?.registeredLayerCount),
++            "residencyAllocationCount": value(residency?.allocationCount),
++            "residencyAllocatedSizeBytes": value(residency?.allocatedSize),
++            "residencyRequested": value(residency?.requested)
++        ]
++        // Each bounded line reaches stderr without stdio buffering. Missing lines stay unknown.
++        guard var data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
++              data.count < 4095 else { return }
++        data.append(10)
++        data.withUnsafeBytes { bytes in
++            guard let base = bytes.baseAddress else { return }
++            var offset = 0
++            while offset < bytes.count {
++                let count = Darwin.write(STDERR_FILENO, base.advanced(by: offset), bytes.count - offset)
++                if count < 0 && errno == EINTR { continue }
++                guard count > 0 else { return }
++                offset += count
++            }
++        }
++    }
++}
+--- /dev/null
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+@@ -0,0 +1,354 @@
++import Foundation
++import Darwin
++import Metal
++import CryptoKit
++import TurboFieldfareOfficialQwenSource
++
++private struct ExactProbeError: Error { let detail: String }
++private func probeRequire(_ condition: Bool, _ detail: String) throws {
++    if !condition { throw ExactProbeError(detail: detail) }
++}
++private func probeSHA(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
++private func probeUpdateRows(_ rows: [[Float]], hash: inout SHA256) {
++    for row in rows {
++        var offset = 0
++        while offset < row.count {
++            let end = min(offset + 1024, row.count)
++            let bits = row[offset..<end].map(\.bitPattern)
++            bits.withUnsafeBytes { hash.update(data: Data($0)) }
++            offset = end
++        }
++    }
++}
++private func probeRowSHA(_ rows: [[Float]]) -> String {
++    var hash = SHA256()
++    probeUpdateRows(rows, hash: &hash)
++    return hash.finalize().map { String(format: "%02x", $0) }.joined()
++}
++private func probeRoutes(_ rows: [QwenExactBlockRoute]) -> [QwenExactBlockRoute] {
++    rows.sorted { $0.position == $1.position ? $0.layer < $1.layer : $0.position < $1.position }
++}
++private func probeProposal(_ history: [Int32], maximum: Int, stops: Set<Int32>) -> [Int32] {
++    guard maximum > 0, history.count > 2 else { return [] }
++    for width in stride(from: min(12, history.count), through: 2, by: -1) {
++        let suffix = Array(history.suffix(width))
++        let upper = history.count - width - 1
++        if upper < 0 { continue }
++        for start in stride(from: upper, through: 0, by: -1) {
++            if Array(history[start..<(start + width)]) == suffix {
++                var proposal: [Int32] = []
++                for token in history[(start + width)..<min(start + width + maximum, history.count)] {
++                    proposal.append(token)
++                    if stops.contains(token) { break }
++                }
++                return proposal
++            }
++        }
++    }
++    return []
++}
++
++/// Isolated causal lookup comparison. Saved output IDs are checked only at the end.
++public enum QwenExactBlockProbe {
++    @MainActor public static func run(registrationURL: URL, requestURL: URL) async throws -> Data {
++        let mode = "serial"
++        let raw = try Data(contentsOf: requestURL)
++        try probeRequire(raw.count < 128 * 1024 && probeSHA(raw) == "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285", "capture identity")
++        guard let request = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
++              let prefixInts = request["inputTokenIDs"] as? [Int],
++              let settings = request["settings"] as? [String: Any],
++              let eosInt = request["codecEOS"] as? Int,
++              let maxContext = request["maximumContext"] as? Int,
++              let maxNew = settings["maxNewTokens"] as? Int,
++              let temperature = settings["temperature"] as? NSNumber,
++              let penalty = settings["repetitionPenalty"] as? NSNumber,
++              let strings = settings["stopStrings"] as? [String],
++              let stops = settings["extraStopTokens"] as? [Int],
++              (prefixInts + stops + [eosInt]).allSatisfy({ $0 >= 0 && $0 <= Int(Int32.max) }) else {
++            throw ExactProbeError(detail: "invalid bounded request")
++        }
++        let prefix = prefixInts.map { Int32($0) }
++        let eos = Int32(eosInt)
++        let maximumOutputs = 29
++        try probeRequire(prefix.count == 1175 && maxContext == 8192 && strings.isEmpty, "frozen geometry")
++        var config = GenerationConfig(maxNewTokens: maxNew, temperature: Float(temperature.doubleValue),
++            topK: settings["topK"] as? Int, topP: (settings["topP"] as? NSNumber).map { Float($0.doubleValue) },
++            repetitionPenalty: Float(penalty.doubleValue), seed: nil, stopStrings: strings,
++            extraStopTokens: Set(stops.map { Int32($0) }))
++        config.logitTransform = .raw
++        try config.validate()
++        try probeRequire(config.temperature == 0 && config.extraStopTokens == [eos], "greedy terminal configuration")
++        var minimumFree = try memoryGuard()
++        try probeRequire(minimumFree >= 50, "launch free memory below50%")
++        let context = try MetalContext()
++        let phaseProbe = QwenBaselineMemoryPhaseProbe(requestID: request["requestID"] as? String ?? "missing")
++        phaseProbe.record(.beforeModelLoad, device: context.device)
++        let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
++            integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
++            expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024,
++            protectedEmbeddingRows: ProcessInfo.processInfo.environment["TURBO_QWEN_PROTECTED_EMBEDDING_ROWS"] == "1",
++            embeddingHooks: .none)
++        phaseProbe.record(.afterModelLoad, device: context.device)
++        guard let source = model.sourceIdentity else { throw ExactProbeError(detail: "missing source identity") }
++        try probeRequire(source.descriptorContentSHA256 == (request["sourceDescriptorSHA256"] as? String)
++            && source.markerSHA256 == (request["sourceMarkerSHA256"] as? String)
++            && source.checksumManifestSHA256 == (request["sourceManifestSHA256"] as? String)
++            && source.shardSetSHA256 == (request["sourceShardSetSHA256"] as? String), "source identity mismatch")
++        let runner = try QwenOfficialSourceRunner(model: model, maxContext: maxContext,
++            expertSlotCount: 16, hooks: .none, memoryPhaseProbe: phaseProbe)
++        await runner.recordMemoryPhase(.runnerReady)
++        let scratch = try RawCompletionScratch(context: context, vocab: model.architecture.vocabularySize)
++        var activeTurn = false
++        func clock() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
++        func cpu() throws -> (Int64, Int64) {
++            var value = rusage()
++            try probeRequire(getrusage(RUSAGE_SELF, &value) == 0, "process CPU observation")
++            return (Int64(value.ru_utime.tv_sec) * 1_000_000 + Int64(value.ru_utime.tv_usec),
++                    Int64(value.ru_stime.tv_sec) * 1_000_000 + Int64(value.ru_stime.tv_usec))
++        }
++        func rollback() async throws {
++            if activeTurn { try await runner.rollbackTurn(); activeTurn = false }
++        }
++        func sample(_ logits: [Float], history: [Int32], position: Int) async throws -> Int32 {
++            try Task.checkCancellation()
++            try model.revalidateSource()
++            try QwenSourceSamplerBoundary.publishFP32Logits(logits, into: scratch.logits,
++                vocabularySize: model.architecture.vocabularySize)
++            guard let command = context.queue.makeCommandBuffer() else { throw ExactProbeError(detail: "sampler command") }
++            scratch.sampler.sample(commandBuffer: command, logits: scratch.logits, probs: scratch.probs,
++                history: history, config: config, position: position, outToken: scratch.outToken)
++            try Task.checkCancellation()
++            command.commit()
++            await command.completed()
++            try probeRequire(command.status == .completed && command.error == nil, "sampler GPU failure")
++            try Task.checkCancellation()
++            let value = scratch.outToken.contents().load(as: UInt32.self)
++            try probeRequire(value < UInt32(model.architecture.vocabularySize), "sample vocabulary")
++            return Int32(value)
++        }
++        func ioJSON(_ snapshot: OfficialSourceIOMeasurement.Snapshot) -> [String: Any] {
++            ["reads": snapshot.reads, "failedReads": snapshot.failedReads,
++             "preads": snapshot.preads.map { ["count": $0.count, "bytes": $0.bytes, "errors": $0.errors] },
++             "validations": snapshot.validations.map { ["count": $0.count, "errors": $0.errors] }]
++        }
++        do {
++            let promptStart = clock()
++            let promptLogits = try await runner.prefill(tokenIDs: prefix, position: 0)
++            let promptWall = clock() - promptStart
++            await runner.recordMemoryPhase(.prefillDone)
++            minimumFree = min(minimumFree, try memoryGuard())
++            let cpuBefore = try cpu()
++            let decodeStart = clock()
++            var turnBegins = 0
++            var turnFinishes = 0
++            var turnRestores = 0
++            var settlementWall: UInt64 = 0
++            var rejectedCycles = 0
++            var replayedInputs = 0
++            var totalRecurrentAppendCalls = 0
++            var totalRecurrentKeptInputs = 0
++            var maximumSavedInputBytes = 0
++            if mode == "serial" {
++                try await runner.beginTurn(); activeTurn = true; turnBegins += 1
++            }
++            var pending = try await sample(promptLogits, history: prefix, position: 0)
++            var outputs = [pending]
++            var history = prefix
++            var cycles: [[String: Any]] = []
++            var acceptedRouteHash = SHA256()
++            var acceptedRawRowHash = SHA256()
++            var acceptedRouteCount = 0
++            var acceptedRawRowCount = 0
++            let routeEncoder = JSONEncoder()
++            routeEncoder.outputFormatting = [.sortedKeys]
++            while !config.extraStopTokens.contains(pending) && outputs.count < maximumOutputs {
++                try Task.checkCancellation()
++                // The budget depends on emitted outputs. It does not inspect saved termination length.
++                let remaining = maximumOutputs - outputs.count
++                let drafts = mode != "serial" ? probeProposal(history + [pending],
++                    maximum: min(3, remaining - 1), stops: config.extraStopTokens) : []
++                let inputs = [pending] + drafts
++                let capture = QwenExactBlockCapture(enableRecurrentRecovery: mode == "new" && inputs.count == 4)
++                let io = OfficialSourceIOMeasurement(); io.setPhase(.decode)
++                try probeRequire(model.source.installIOMeasurement(io), "IO measurement already installed")
++                let before = await runner.routedExpertCacheSummary()
++                let cycleStart = clock()
++                var replayWall: UInt64 = 0
++                var recoveryKind = "none"
++                var recurrentAppendCalls = 0
++                var recurrentKeptInputs = 0
++                var normalizedInputBytes = 0
++                var samples: [Int32] = []
++                var matched = 0
++                var keep = 0
++                do {
++                    if mode != "serial" {
++                        try await runner.beginTurn(); activeTurn = true; turnBegins += 1
++                    }
++                    if mode != "serial" && inputs.count == 4 {
++                        _ = try await runner.prefill(tokenIDs: inputs, position: history.count, exactBlock: capture)
++                    } else {
++                        // Short proposals retain the same policy. Verify their real inputs serially.
++                        for index in inputs.indices {
++                            _ = try await runner.produce(token: inputs[index], position: history.count + index, exactBlock: capture)
++                        }
++                    }
++                    try probeRequire(capture.logits.count == inputs.count, "missing verification rows")
++                    for index in inputs.indices {
++                        let token = try await sample(capture.logits[index],
++                            history: history + Array(inputs.prefix(index + 1)), position: outputs.count + index)
++                        samples.append(token)
++                        keep = index + 1
++                        if config.extraStopTokens.contains(token) { break }
++                        if index < drafts.count {
++                            if token != inputs[index + 1] { break }
++                            matched += 1
++                        }
++                    }
++                    try probeRequire(keep == 1 + matched && !samples.isEmpty, "accepted prefix alignment")
++                    normalizedInputBytes = capture.savedInputBytes
++                    maximumSavedInputBytes = max(maximumSavedInputBytes, normalizedInputBytes)
++                    if keep < inputs.count {
++                        let replayStart = clock()
++                        if mode == "new" && inputs.count == 4 {
++                            let settlement = try await runner.settleRecurrentPrefix(capture, keep: keep)
++                            recoveryKind = "recurrentOnly"
++                            recurrentAppendCalls = settlement.appendCalls
++                            recurrentKeptInputs = settlement.keptInputs
++                            try probeRequire(settlement.savedInputBytes == normalizedInputBytes,
++                                "saved recurrent input accounting")
++                        } else {
++                            recoveryKind = "fullReplay"
++                            try await runner.restoreTurnBaseline(); turnRestores += 1
++                            for index in 0..<keep {
++                                _ = try await runner.produce(token: inputs[index], position: history.count + index)
++                            }
++                            replayedInputs += keep
++                        }
++                        replayWall = clock() - replayStart
++                        settlementWall += replayWall
++                        rejectedCycles += 1
++                        totalRecurrentAppendCalls += recurrentAppendCalls
++                        totalRecurrentKeptInputs += recurrentKeptInputs
++                    }
++                    try Task.checkCancellation()
++                    if mode != "serial" {
++                        try await runner.finishTurn(); activeTurn = false; turnFinishes += 1
++                    }
++                } catch {
++                    model.source.removeIOMeasurement(io)
++                    throw error
++                }
++                let cycleWall = clock() - cycleStart
++                let after = await runner.routedExpertCacheSummary()
++                model.source.removeIOMeasurement(io)
++                let snapshot = io.snapshot()
++                let startPosition = history.count
++                history.append(contentsOf: inputs.prefix(keep))
++                outputs.append(contentsOf: samples)
++                pending = samples.last!
++                let position = await runner.position
++                try probeRequire(position == history.count && outputs.count <= maximumOutputs, "consumed cursor mismatch")
++                let acceptedRoutes = probeRoutes(capture.routes).filter { $0.position < startPosition + keep }
++                try probeRequire(acceptedRoutes.count == keep * 40, "accepted route completeness")
++                for route in acceptedRoutes {
++                    acceptedRouteHash.update(data: try routeEncoder.encode(route))
++                    acceptedRouteHash.update(data: Data([10]))
++                }
++                acceptedRouteCount += acceptedRoutes.count
++                probeUpdateRows(Array(capture.logits.prefix(keep)), hash: &acceptedRawRowHash)
++                acceptedRawRowCount += keep
++                cycles.append(["index": cycles.count, "position": startPosition,
++                    "pendingInput": inputs[0], "proposalIDs": drafts, "provisionalIDs": samples,
++                    "matchedDrafts": matched, "consumedInputs": keep, "verifiedInputs": inputs.count,
++                    "wallNanoseconds": cycleWall, "restoreReplayNanoseconds": replayWall,
++                    "recoveryKind": recoveryKind, "recurrentAppendCalls": recurrentAppendCalls,
++                    "recurrentKeptInputs": recurrentKeptInputs, "normalizedInputBytes": normalizedInputBytes,
++                    "hits": after.hits - before.hits, "misses": after.misses - before.misses,
++                    "routeSHA256": probeSHA(try routeEncoder.encode(probeRoutes(capture.routes))),
++                    "rawRowSHA256": probeRowSHA(capture.logits),
++                    "sourceChecks": ["tokenAdmissions": capture.tokenAdmissions,
++                        "layerAdmissions": capture.layerAdmissions, "reusedPairChecks": capture.reusedPairChecks,
++                        "preGPUChecks": capture.preGPUChecks, "sharedChecks": capture.sharedChecks,
++                        "finalChecks": capture.finalChecks], "io": ioJSON(snapshot)])
++            }
++            if mode == "serial" {
++                try await runner.finishTurn(); activeTurn = false; turnFinishes += 1
++            }
++            let decodeEnd = clock()
++            let decodeWall = decodeEnd - decodeStart
++            let requestWall = decodeEnd - promptStart
++            await runner.recordMemoryPhase(.decodeDone)
++            let cpuAfter = try cpu()
++            minimumFree = min(minimumFree, try memoryGuard())
++            // Golden output is unavailable to every proposal and sampling decision above.
++            guard let expected = request["sampledTokenIDs"] as? [Int] else { throw ExactProbeError(detail: "missing final assertion") }
++            try probeRequire(outputs.map(Int.init) == expected && outputs.count == maximumOutputs
++                && pending == eos, "generated outputs or terminal mismatch")
++            try probeRequire(acceptedRouteCount == 1120 && acceptedRawRowCount == 28, "accepted chain completeness")
++            await runner.recordMemoryPhase(.diagnosticsStart)
++            let liveSavedInputBytesAtEnd = await runner.diagnosticRecurrentInputBytes()
++            try probeRequire(liveSavedInputBytesAtEnd == 0, "recurrent input cleanup")
++            let state = try await runner.diagnosticSnapshot()
++            try probeRequire(state.position == 1203 && state.position == history.count
++                && state.linear.positions.values.allSatisfy({ $0 == state.position })
++                && state.fullKVPositions.values.allSatisfy({ $0 == state.position }), "final state cursor")
++            let linearRows = state.linear.layers.keys.sorted().flatMap { key in
++                [state.linear.layers[key]!.convolutionHistory, state.linear.layers[key]!.recurrentMatrix]
++            }
++            let final: [String: Any] = ["position": state.position, "pendingTokens": 1, "runnerUsable": true,
++                "linearPositions": Dictionary(uniqueKeysWithValues: state.linear.positions.map { (String($0.key), $0.value) }),
++                "fullKVPositions": Dictionary(uniqueKeysWithValues: state.fullKVPositions.map { (String($0.key), $0.value) }),
++                "linearStateSHA256": probeRowSHA(linearRows),
++                "committedKeysSHA256": probeRowSHA(state.committedKeys.keys.sorted().map { state.committedKeys[$0]! }),
++                "committedValuesSHA256": probeRowSHA(state.committedValues.keys.sorted().map { state.committedValues[$0]! })]
++            let report: [String: Any] = ["schema": 1, "mode": mode, "diagnosticOnly": true,
++                "requestSHA256": probeSHA(raw), "sourceDescriptorSHA256": source.descriptorContentSHA256,
++                "protectedEmbeddingRows": model.usesProtectedEmbeddingRows,
++                "protectedEmbeddingRowBytes": model.usesProtectedEmbeddingRows ? 4096 : 0,
++                "residentWeightBytes": model.residentWeightBytes,
++                "removedResidentEmbeddingBytes": model.usesProtectedEmbeddingRows ? 1_017_118_720 : 0,
++                "prefixTokens": prefix.count, "maximumContext": maxContext, "maximumOutputs": maximumOutputs,
++                "expertSlots": 16, "expertCachePolicy": "lfu", "outputIDs": outputs,
++                "expectedOutputIDsMatched": true, "acceptedRouteCount": acceptedRouteCount,
++                "acceptedRawRowCount": acceptedRawRowCount,
++                "acceptedRouteSHA256": acceptedRouteHash.finalize().map { String(format: "%02x", $0) }.joined(),
++                "acceptedRawRowSHA256": acceptedRawRowHash.finalize().map { String(format: "%02x", $0) }.joined(),
++                "promptWallNanoseconds": promptWall,
++                "decodeWallNanoseconds": decodeWall, "requestWallNanoseconds": requestWall,
++                "cycles": cycles, "finalState": final,
++                "settlement": ["wallNanoseconds": settlementWall, "rejectedCycles": rejectedCycles,
++                    "replayedInputs": replayedInputs, "recurrentAppendCalls": totalRecurrentAppendCalls,
++                    "recurrentKeptInputs": totalRecurrentKeptInputs,
++                    "maximumSavedInputBytes": maximumSavedInputBytes,
++                    "liveSavedInputBytesAtEnd": liveSavedInputBytesAtEnd],
++                "transactions": ["begins": turnBegins, "finishes": turnFinishes, "restores": turnRestores],
++                "minimumFreePercent": minimumFree, "processCPUUserBeforeMicroseconds": cpuBefore.0,
++                "processCPUSystemBeforeMicroseconds": cpuBefore.1, "processCPUUserAfterMicroseconds": cpuAfter.0,
++                "processCPUSystemAfterMicroseconds": cpuAfter.1,
++                "terminal": "sampled EOS remains pending and unconsumed",
++                "timingLimits": "Serial memory attribution only; sparse stderr phases added. Decode includes checkpoints, sampling and cycle diagnostics. Final state readback is excluded. Serial owns one turn; legacy/new own per-cycle turns. New replaces only exact4 rejection settlement; short proposals retain charged full replay. Outer conversation integration is not implemented. Not app or native MTP qualification."]
++            let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
++            await runner.recordMemoryPhase(.diagnosticsEnd)
++            return data
++        } catch let operation {
++            do { try await rollback() }
++            catch { throw ExactProbeError(detail: "operation \(operation); rollback \(error)") }
++            throw operation
++        }
++    }
++    private static func memoryGuard() throws -> Int {
++        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/memory_pressure")
++        process.arguments = ["-Q"]
++        let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
++        try process.run(); process.waitUntilExit()
++        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
++        let regex = try NSRegularExpression(pattern: "free percentage: ([0-9]+)%")
++        let range = NSRange(text.startIndex..<text.endIndex, in: text)
++        guard process.terminationStatus == 0, let match = regex.firstMatch(in: text, range: range),
++              let valueRange = Range(match.range(at: 1), in: text), let value = Int(text[valueRange]), value >= 30 else {
++            throw ExactProbeError(detail: "system free memory below30% or guard unavailable")
++        }
++        return value
++    }
++}
+--- /dev/null
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
+@@ -0,0 +1,123 @@
++import Foundation
++
++struct QwenExactBlockRoute: Codable, Sendable, Equatable {
++    let position: Int
++    let layer: Int
++    let ids: [Int]
++    let weights: [UInt32]
++}
++
++// Owned by one isolated, sequential diagnostic runner invocation. No callbacks.
++final class QwenExactBlockCapture: @unchecked Sendable {
++    let wantsRecurrentRecovery: Bool
++    private var recurrentInputs: QwenRecurrentPrefixInputs?
++    private var recurrentSealed = false
++    private var recurrentConsumed = false
++    init(enableRecurrentRecovery: Bool = false) {
++        wantsRecurrentRecovery = enableRecurrentRecovery
++    }
++    var savedInputBytes: Int { recurrentInputs?.byteCount ?? 0 }
++
++    func bindRecurrent(owner: UUID, turn: UUID, base: Int, width: Int,
++                       layers: [Int], fullBaseline: QwenFullAttentionKVSnapshot) throws {
++        guard wantsRecurrentRecovery, recurrentInputs == nil, !recurrentConsumed,
++              width == 2048, layers.count == 30, Set(layers).count == 30 else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        recurrentInputs = QwenRecurrentPrefixInputs(owner: owner, turn: turn,
++            base: base, width: width, layers: layers.sorted(), fullBaseline: fullBaseline)
++    }
++    func saveRecurrentRows(layer: Int, start: Int, rows: [Float]) throws {
++        guard var inputs = recurrentInputs, !recurrentSealed, !recurrentConsumed,
++              inputs.layers.contains(layer), (0...4).contains(start),
++              rows.count > 0, rows.count <= 4 * inputs.width, rows.count.isMultiple(of: inputs.width),
++              rows.allSatisfy(\.isFinite) else { throw QwenTextRunnerError.invalidTransaction }
++        let existing = inputs.rows[layer] ?? []
++        guard existing.count == start * inputs.width,
++              existing.count + rows.count <= 4 * inputs.width else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        inputs.rows[layer] = existing + rows
++        recurrentInputs = inputs
++    }
++    func sealRecurrent() throws {
++        guard let inputs = recurrentInputs, !recurrentSealed, !recurrentConsumed,
++              Set(inputs.rows.keys) == Set(inputs.layers),
++              inputs.rows.values.allSatisfy({ $0.count == 4 * inputs.width }) else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        recurrentSealed = true
++    }
++    func takeRecurrent(owner: UUID, turn: UUID, base: Int,
++                       fullBaseline: QwenFullAttentionKVSnapshot) throws -> QwenRecurrentPrefixInputs {
++        guard let inputs = recurrentInputs, recurrentSealed, !recurrentConsumed,
++              inputs.owner == owner, inputs.turn == turn, inputs.base == base,
++              inputs.fullBaseline == fullBaseline else { throw QwenTextRunnerError.invalidTransaction }
++        recurrentConsumed = true
++        recurrentInputs = nil
++        return inputs
++    }
++    func discardRecurrent() {
++        recurrentConsumed = true
++        recurrentInputs = nil
++        recurrentSealed = false
++    }
++    var logits: [[Float]] = []
++    var routes: [QwenExactBlockRoute] = []
++    var tokenAdmissions = 0
++    var layerAdmissions = 0
++    var reusedPairChecks = 0
++    var preGPUChecks = 0
++    var pairMaps = 0
++    var pairMappedExperts = 0
++    var pairMoECommands = 0
++    var separateSharedCommands = 0
++    var sharedChecks = 0
++    var finalChecks = 0
++}
++
++struct QwenExactBlockConsumerAdmission: Sendable {
++    let model: QwenOfficialSourceModel
++    let lease: QwenBF16ExpertLease
++    let capture: QwenExactBlockCapture
++
++    func validate(submittedLease: QwenBF16ExpertLease, submittedWork: [QwenBF16GroupedExpertWork]) throws {
++        guard submittedLease === lease, !submittedWork.isEmpty else {
++            throw QwenExpertMappingError.canceled
++        }
++        let logicalTokens = Set(submittedWork.map(\.tokenIndex)).sorted()
++        // The first use of each mapped expert already received cache.load's
++        // miss read/publication or hit checks. Every additional logical use
++        // gets the identical hit-range checks, independently, without publish.
++        var firstUses = Set<Int>()
++        for item in submittedWork {
++            if !firstUses.insert(item.expertID).inserted {
++                try lease.validateExactBlockConsumer(expert: item.expertID)
++                capture.reusedPairChecks += 1
++            }
++        }
++        // Last filesystem observations before encoding/submission. Each token
++        // touching this command has its own fresh full-source check.
++        for _ in logicalTokens {
++            try model.revalidateSource()
++            capture.preGPUChecks += 1
++        }
++    }
++}
++
++// One actor-owned block. Arrays retain immutable normalized rows, not scratch aliases.
++struct QwenRecurrentPrefixInputs: Sendable {
++    let owner: UUID
++    let turn: UUID
++    let base: Int
++    let width: Int
++    let layers: [Int]
++    let fullBaseline: QwenFullAttentionKVSnapshot
++    var rows: [Int: [Float]] = [:]
++    var byteCount: Int { rows.values.reduce(0) { $0 + $1.count * MemoryLayout<Float>.stride } }
++}
++struct QwenRecurrentPrefixSettlement: Sendable {
++    let keptInputs: Int
++    let appendCalls: Int
++    let savedInputBytes: Int
++}
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift
+@@ -448,6 +448,45 @@
+         }
+     }
+ 
++    // Diagnostic prefix truncation. Return the ORIGINAL rollback position with refreshed lineage.
++    func truncateDiagnosticPrefix(position: Int, baseline: QwenFullAttentionKVSnapshot,
++                                  expected: QwenFullAttentionKVSnapshot) throws -> QwenFullAttentionKVSnapshot {
++        try withLock {
++            try requireNoActiveUse()
++            guard baseline.owner == owner, expected.owner == owner else {
++                throw QwenFullAttentionKVError.invalidSnapshotOwner
++            }
++            guard baseline.lineage == lineage, expected.lineage == lineage else {
++                throw QwenFullAttentionKVError.invalidSnapshotLineage
++            }
++            guard Set(baseline.positions.keys) == Set(fullLayerIndices),
++                  Set(expected.positions.keys) == Set(fullLayerIndices),
++                  baseline.position >= 0, position >= baseline.position,
++                  position <= expected.position,
++                  baseline.positions.values.allSatisfy({ $0 == baseline.position }),
++                  expected.positions.values.allSatisfy({ $0 == expected.position }) else {
++                throw QwenFullAttentionKVError.inconsistentCommittedPositions
++            }
++            for layer in fullLayerIndices {
++                guard try requireLayer(layer).committedPosition == expected.position else {
++                    throw QwenFullAttentionKVError.inconsistentCommittedPositions
++                }
++            }
++            let createsBranch = position < expected.position
++            guard !createsBranch || lineage < UInt64.max else {
++                throw QwenFullAttentionKVError.arithmeticOverflow(operation: "diagnostic prefix lineage")
++            }
++            for layer in fullLayerIndices {
++                var storage = layers[layer]!
++                storage.committedPosition = position
++                layers[layer] = storage
++            }
++            if createsBranch { lineage += 1 }
++            return QwenFullAttentionKVSnapshot(position: baseline.position,
++                owner: owner, lineage: lineage, positions: baseline.positions)
++        }
++    }
++
+     struct ReplacementCheckpoint: Sendable {
+         fileprivate let owner: UUID
+         fileprivate let identifier: UUID
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
+@@ -5,6 +5,7 @@
+ /// path. Synchronous read gates run inside bounded paired-read workers; async
+ /// gates never supply bytes, offsets, buffers, or an admission identity.
+ struct QwenOfficialSourceTransactionHooks: Sendable {
++    let isKnownNone: Bool
+     let beforeProtectedExpertRead:
+         @Sendable (Int, Int, QwenBF16ExpertReadHooks.Stream) throws -> Void
+     let afterActualGPUSubmission: @Sendable (String) async throws -> Void
+@@ -43,6 +44,7 @@
+         observeActivation: (@Sendable (Int, Int, String, [Float]) -> Void)? = nil,
+         observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)? = nil
+     ) {
++        isKnownNone = false
+         self.beforeProtectedExpertRead = beforeProtectedExpertRead
+         self.afterActualGPUSubmission = afterActualGPUSubmission ?? { _ in }
+         self.afterActualGPUCompletion = afterActualGPUCompletion ?? { _ in }
+@@ -61,7 +63,24 @@
+         self.observeConsumedInput = observeConsumedInput
+     }
+ 
+-    static let none = Self()
++    private init(knownNone: Void) {
++        isKnownNone = true
++        beforeProtectedExpertRead = { _, _, _ in }
++        afterActualGPUSubmission = { _ in }
++        afterActualGPUCompletion = { _ in }
++        requiresSeparateGPUStages = false
++        requiresTokenMajorPrefill = false
++        requiresOrderedPrefillStages = false
++        betweenConsumedTokens = { _ in }
++        beforeTurnCommit = {}
++        beforeRollbackRestore = {}
++        observeRoute = { _, _, _, _, _, _ in }
++        observeRawLogits = { _, _, _ in }
++        observePublicLogitsAndSample = { _, _, _ in }
++        observeActivation = nil
++        observeConsumedInput = nil
++    }
++    static let none = Self(knownNone: ())
+ }
+ 
+ struct QwenOfficialSourceSamplingInput: Sendable {
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
+@@ -57,6 +57,8 @@
+     let sourceContentSHA256: String
+     // Processor metadata is required only when admitting an image companion.
+     private let sourceIndex: [String: String]
++    private let protectedEmbeddingRange: OfficialSourceHandle.TensorRange?
++    var usesProtectedEmbeddingRows: Bool { protectedEmbeddingRange != nil }
+     let entryWeights: QwenBF16Weights
+     let layers: [Layer]
+     let finalNorm: [Float]
+@@ -127,7 +129,9 @@
+                      integrityPolicy: ModelIntegrityPolicy,
+                      expertCacheSlots: Int,
+                      expertCachePolicy: ExpertCachePolicy,
+-                     residencyBudgetBytes: UInt64) throws -> QwenOfficialSourceModel {
++                     residencyBudgetBytes: UInt64,
++                     protectedEmbeddingRows: Bool = false,
++                     embeddingHooks: QwenOfficialSourceTransactionHooks = .none) throws -> QwenOfficialSourceModel {
+         let receipt = try integrityPolicy.verifyOfficialSource(at: registrationURL)
+         let source = try OfficialSourceHandle(registrationURL: registrationURL)
+         try source.validateTrustedReceipt(receipt)
+@@ -152,7 +156,8 @@
+             expertCachePolicy: expertCachePolicy,
+             sourceIntegrityPolicy: integrityPolicy,
+             context: context,
+-            residencyBudgetBytes: residencyBudgetBytes)
++            residencyBudgetBytes: residencyBudgetBytes,
++            protectedEmbeddingRows: protectedEmbeddingRows && embeddingHooks.isKnownNone)
+         try model.revalidateSource()
+         return model
+     }
+@@ -197,7 +202,8 @@
+                  expertCacheSlots: Int,
+                  expertCachePolicy: ExpertCachePolicy,
+                  sourceIntegrityPolicy: ModelIntegrityPolicy?,
+-                 context: MetalContext, residencyBudgetBytes: UInt64) throws {
++                 context: MetalContext, residencyBudgetBytes: UInt64,
++                 protectedEmbeddingRows: Bool = false) throws {
+         let fullLayers = architecture.fullAttentionLayerMask.reduce(0) { $0 + Int($1) }
+         let expectedSchedule = sourceIdentity == nil
+             ? (layers: 2, full: 1) : (layers: 40, full: 10)
+@@ -346,10 +352,28 @@
+                             shape: [expertCount, hiddenWidth, intermediate])
+             routedByLayer.append(names)
+         }
+-        let entry = [
+-            try spec(Self.embeddingTensorName, .embedding, vocab, hidden),
+-            try spec(Self.headTensorName, .head, vocab, hidden),
+-        ]
++        let embeddingRange: OfficialSourceHandle.TensorRange?
++        var entry: [QwenBF16TensorSpec] = []
++        if protectedEmbeddingRows {
++            let token = try source.admitTensor(
++                shardName: Self.shard(Self.embeddingTensorName, mapping),
++                tensorName: Self.embeddingTensorName)
++            let region = LoadedTensorRegion(admittedSourceTensor: token)
++            guard hidden == 2048, vocab > 0,
++                  region.storage == .bf16,
++                  region.shape == [UInt64(vocab), UInt64(hidden)],
++                  region.size == UInt64(vocab) * 4096 else {
++                throw ModelError.indexCorrupt(detail: "protected embedding geometry")
++            }
++            try source.preadTensorRange(token, byteOffset: region.size, byteCount: 0,
++                expectedByteCount: 0,
++                into: UnsafeMutableRawBufferPointer(start: nil, count: 0))
++            embeddingRange = token
++        } else {
++            entry.append(try spec(Self.embeddingTensorName, .embedding, vocab, hidden))
++            embeddingRange = nil
++        }
++        entry.append(try spec(Self.headTensorName, .head, vocab, hidden))
+         let entryWeights = try QwenBF16Weights(context: context, source: source,
+             specifications: entry, residencyBudget: consumed)
+         let finalNorm = try vector("model.language_model.norm.weight", [UInt64(hidden)])
+@@ -451,9 +475,30 @@
+         self.sourceContentSHA256 = sourceContentSHA256
+         // No processor file is opened for text-only source admission.
+         self.sourceIndex = mapping
++        self.protectedEmbeddingRange = embeddingRange
+         self.entryWeights = entryWeights
+         self.layers = built
+         self.finalNorm = finalNorm
++    }
++
++    func protectedEmbeddingRow(_ id: Int32) throws -> [Float]? {
++        guard let range = protectedEmbeddingRange else { return nil }
++        try Task.checkCancellation()
++        guard id >= 0, Int(id) < architecture.vocabularySize,
++              architecture.hiddenSize == 2048 else {
++            throw ModelError.indexCorrupt(detail: "protected embedding token bounds")
++        }
++        let offset = UInt64(id) * 4096
++        guard offset <= range.admittedByteCount, 4096 <= range.admittedByteCount - offset else {
++            throw ModelError.indexCorrupt(detail: "protected embedding row bounds")
++        }
++        var words = [UInt16](repeating: 0, count: 2048)
++        try words.withUnsafeMutableBytes { destination in
++            try source.preadTensorRange(range, byteOffset: offset, byteCount: 4096,
++                expectedByteCount: 4096, into: destination)
++        }
++        try Task.checkCancellation()
++        return words.map { Float(bitPattern: UInt32(UInt16(littleEndian: $0)) << 16) }
+     }
+ 
+     func visionProcessorSHA256() throws -> String {
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -61,6 +61,7 @@
+     private let moeConfiguration: QwenMoEConfiguration
+     private let expertSlotCount: Int
+     private let hooks: QwenOfficialSourceTransactionHooks
++    private let memoryPhaseProbe: QwenBaselineMemoryPhaseProbe?
+     private let useGPULinearPreparation: Bool
+     private let useGroupedLinearPrefill: Bool
+     /// Only this actor mutates the dictionary. A GPU lease can independently
+@@ -80,12 +81,15 @@
+     }
+     private let expertCacheStorage: ExpertCacheStorage
+     private struct TurnCheckpoint {
++        let identifier = UUID()
+         let linear: QwenLinearAttentionSnapshot
+         var full: QwenFullAttentionKVSnapshot
+         let position: Int
+         var replacementFull: QwenFullAttentionKV.ReplacementCheckpoint? = nil
+     }
+     private var turnCheckpoint: TurnCheckpoint?
++    private let recurrentRecoveryOwner = UUID()
++    private var recurrentRecoveryCapture: QwenExactBlockCapture?
+     private var lastPrefillDiagnostics: QwenSourceGroupedPrefillDiagnostics?
+     private var committedPosition = 0
+     private var inFlight = false
+@@ -109,7 +113,8 @@
+     init(model: QwenOfficialSourceModel, maxContext: Int,
+          expertSlotCount: Int,
+          hooks: QwenOfficialSourceTransactionHooks = .none,
+-         useExpertCacheResidency: Bool? = nil) throws {
++         useExpertCacheResidency: Bool? = nil,
++         memoryPhaseProbe: QwenBaselineMemoryPhaseProbe? = nil) throws {
+         let architecture = model.architecture
+         let context = model.context
+         let useGroupedLinearPrefill = ProcessInfo.processInfo.environment[
+@@ -139,7 +144,8 @@
+         let residencyEnabled = useExpertCacheResidency ?? (ProcessInfo.processInfo.environment[
+             "TURBO_QWEN_EXPERT_CACHE_RESIDENCY"] == "1")
+         let residency = residencyEnabled ? try QwenBF16CacheResidency(
+-            queue: context.queue, layerCount: architecture.layers, slotCount: expertSlotCount) : nil
++            queue: context.queue, layerCount: architecture.layers, slotCount: expertSlotCount,
++            memoryPhaseProbe: memoryPhaseProbe) : nil
+         let expertCacheStorage = ExpertCacheStorage(reservation: reservation, residency: residency)
+         let linearState = try QwenLinearAttentionState(
+             device: context.device,
+@@ -227,8 +233,12 @@
+             topK: architecture.expertsPerToken,
+             routedIntermediateSize: architecture.routedIntermediateSize,
+             sharedIntermediateSize: architecture.sharedIntermediateSize)
++        self.memoryPhaseProbe = memoryPhaseProbe
+         self.model = model
+         self.context = context
++        guard !model.usesProtectedEmbeddingRows || hooks.isKnownNone else {
++            throw QwenTextRunnerError.execution(detail: "protected embedding requires genuine hooks.none")
++        }
+         self.hooks = hooks
+         // Internal trial only, fixed for this runner's lifetime. Legacy
+         // diagnostic hooks still select the linear step's separated fallback.
+@@ -254,6 +264,14 @@
+         }
+     }
+ 
++    func recordMemoryPhase(_ phase: QwenBaselineMemoryPhase, layer: Int? = nil) {
++        guard let memoryPhaseProbe else { return }
++        memoryPhaseProbe.record(phase, device: context.device, layer: layer,
++            cachedLayerCount: expertCacheStorage.coordinators.count,
++            allocatedCacheBytes: allocatedCacheBytes,
++            residency: expertCacheStorage.residency?.snapshot())
++    }
++
+     func cacheDiagnostics() -> QwenOfficialSourceCacheDiagnostics {
+         QwenOfficialSourceCacheDiagnostics(
+             slotCount: expertSlotCount, policy: model.expertCachePolicy,
+@@ -279,23 +297,28 @@
+ 
+     func produce(token: Int32, position: Int,
+                  featureRow: [Float]? = nil,
+-                 mropePosition: QwenMRoPEPosition? = nil) async throws -> [Float] {
++                 mropePosition: QwenMRoPEPosition? = nil,
++                 exactBlock: QwenExactBlockCapture? = nil) async throws -> [Float] {
++        if exactBlock != nil, !hooks.isKnownNone {
++            throw QwenTextRunnerError.invalidState(detail: "probe requires genuine no-hook construction")
++        }
+         if let location = QwenCacheMapMeasurement.capture?.qwenProductionLocation(
+             position: position, tokenCount: 1, forward: true) {
+             return try await QwenProductionTimingMeasurement.$location.withValue(location) {
+                 let span = QwenProductionTimingMeasurement.span(.forward)
+                 defer { span?.finish() }
+                 return try await produceToken(token: token, position: position, featureRow: featureRow,
+-                    mropePosition: mropePosition, withinPrefill: false)
++                    mropePosition: mropePosition, withinPrefill: false, exactBlock: exactBlock)
+             }
+         }
+         return try await produceToken(token: token, position: position, featureRow: featureRow,
+-                                      mropePosition: mropePosition, withinPrefill: false)
++                                      mropePosition: mropePosition, withinPrefill: false, exactBlock: exactBlock)
+     }
+ 
+     private func produceToken(token: Int32, position: Int,
+                               featureRow: [Float]?, mropePosition: QwenMRoPEPosition?,
+-                              withinPrefill: Bool) async throws -> [Float] {
++                              withinPrefill: Bool,
++                              exactBlock: QwenExactBlockCapture? = nil) async throws -> [Float] {
+         guard !inFlight, !unusable, !prefillInFlight || withinPrefill else {
+             throw QwenTextRunnerError.operationInProgress
+         }
+@@ -348,7 +371,7 @@
+                 hooks.observeActivation?(position, layer, "residual-after-mixer", hidden)
+                 let post = try qwenOfficialSourceRMSNorm(hidden, weights.postNorm)
+                 hooks.observeActivation?(position, layer, "post-norm", post)
+-                let routed = try await moeStep(input: post, layer: layer)
++                let routed = try await moeStep(input: post, layer: layer, exactBlock: exactBlock)
+                 guard routed.count == width else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                 hidden = zip(hidden, routed).map(+)
+                 guard hidden.allSatisfy(\.isFinite) else {
+@@ -369,6 +392,7 @@
+                 throw QwenTextRunnerError.execution(detail: "nonfinite source logits")
+             }
+             hooks.observeRawLogits(position, token, logits)
++            exactBlock?.logits.append(logits)
+             committedPosition += 1
+             hooks.observeConsumedInput?(position, token, featureRow, mropePosition)
+             return logits
+@@ -410,6 +434,7 @@
+                  featureRowAt: (@Sendable (Int) throws -> [Float]?)? = nil,
+                  mropePositions: [QwenMRoPEPosition]? = nil,
+                  groupedCapture: QwenSourceGroupedPrefillCapture? = nil,
++                 exactBlock: QwenExactBlockCapture? = nil,
+                  onProgress: @Sendable (Int, Int) async -> Void = { _, _ in }) async throws -> [Float] {
+         guard !inFlight, !unusable, !prefillInFlight else {
+             throw QwenTextRunnerError.operationInProgress
+@@ -421,6 +446,14 @@
+               tokenIDs.count <= fullKV.maxContext - position,
+               mropePositions == nil || mropePositions?.count == tokenIDs.count else {
+             throw QwenTextRunnerError.invalidState(detail: "source prefill context/positions")
++        }
++        if exactBlock != nil {
++            guard hooks.isKnownNone, tokenIDs.count == 4, position > 0,
++                  expertSlotCount == 16, model.architecture.expertsPerToken == 8,
++                  featureRowAt == nil, mropePositions == nil, groupedCapture == nil,
++                  turnCheckpoint != nil else {
++                throw QwenTextRunnerError.invalidState(detail: "isolated probe eligibility")
++            }
+         }
+         let width = model.architecture.hiddenSize
+         let topK = model.architecture.expertsPerToken
+@@ -456,11 +489,23 @@
+             && boundedBytes <= 128 * 1024 * 1024
+             && rowElements <= Int(UInt32.max)
+             && rowElements * MemoryLayout<Float>.stride <= context.device.maxBufferLength
++        if exactBlock != nil, !grouped {
++            throw QwenTextRunnerError.invalidState(detail: "probe may not silently use token-major fallback")
++        }
+         lastPrefillDiagnostics = QwenSourceGroupedPrefillDiagnostics(
+             mode: grouped ? .grouped : .tokenMajor, tokenCount: tokenIDs.count)
+ 
+         let ownsCheckpoint = turnCheckpoint == nil
+         if ownsCheckpoint { try beginTurn() }
++        if let capture = exactBlock, capture.wantsRecurrentRecovery {
++            guard recurrentRecoveryCapture == nil, let checkpoint = turnCheckpoint,
++                  checkpoint.position == position, checkpoint.replacementFull == nil else {
++                throw QwenTextRunnerError.invalidTransaction
++            }
++            try capture.bindRecurrent(owner: recurrentRecoveryOwner, turn: checkpoint.identifier,
++                base: position, width: width, layers: linearSteps.keys.sorted(), fullBaseline: checkpoint.full)
++            recurrentRecoveryCapture = capture
++        }
+         prefillInFlight = true
+         defer { prefillInFlight = false }
+         if !grouped {
+@@ -518,6 +563,10 @@
+             let scratch = try moe.makeScratch()
+             for (index, token) in tokenIDs.enumerated() {
+                 try Task.checkCancellation()
++                if let exactBlock {
++                    try model.revalidateSource()
++                    exactBlock.tokenAdmissions += 1
++                }
+                 let feature = try featureRowAt?(index)
+                 let row: [Float]
+                 if let feature {
+@@ -534,6 +583,7 @@
+                 groupedCapture?.observeConsumedInput?(
+                     position + index, token, feature, mropePositions?[index])
+             }
++            recordMemoryPhase(.prefillEmbeddingDone)
+             for layer in model.layers.indices {
+                 try Task.checkCancellation()
+                 let row = model.layers[layer]
+@@ -561,6 +611,9 @@
+                                 let inputRow = Array(UnsafeBufferPointer(
+                                     start: residual.advanced(by: tokenIndex * width), count: width))
+                                 normalizedRows += try qwenOfficialSourceRMSNorm(inputRow, row.inputNorm)
++                            }
++                            if let capture = exactBlock, capture.wantsRecurrentRecovery {
++                                try capture.saveRecurrentRows(layer: layer, start: index, rows: normalizedRows)
+                             }
+                             linearBatchOutput = []
+                             var consumed = 0
+@@ -594,6 +647,9 @@
+                                 mropePosition: mropePositions?[index],
+                                 mropeSections: model.architecture.mropeSections)
+                         } else if let linear = linearSteps[layer] {
++                            if let capture = exactBlock, capture.wantsRecurrentRecovery {
++                                try capture.saveRecurrentRows(layer: layer, start: index, rows: normalized)
++                            }
+                             mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1,
+                                 useGPUPreparation: useGPULinearPreparation)
+                         } else { throw QwenTextRunnerError.stateArchitectureMismatch }
+@@ -627,6 +683,8 @@
+                         ? logits[ranked[topK - 1]] - logits[ranked[topK]] : 0
+                     hooks.observeRoute(position + index, layer, logits, ids, weights, cutoff)
+                     groupedCapture?.observeRoute?(position + index, layer, logits, ids, weights, cutoff)
++                    exactBlock?.routes.append(QwenExactBlockRoute(position: position + index,
++                        layer: layer, ids: ids, weights: weights.map(\.bitPattern)))
+                     for rank in 0..<topK {
+                         routingExpertIDs[index * topK + rank] = ids[rank]
+                         routeValues[index * topK + rank] = weights[rank]
+@@ -653,27 +711,32 @@
+                 }
+                 lastPrefillDiagnostics?.mappedUniqueExperts[layer] = uniqueExperts.count
+                 let coordinator = try expertCoordinator(layer: layer)
+-                var firstCommand = true
+-                var groupStart = 0
+-                while groupStart < uniqueExperts.count {
+-                    let groupEnd = min(groupStart + expertSlotCount, uniqueExperts.count)
+-                    let groupIDs = Array(uniqueExperts[groupStart..<groupEnd])
+-                    let groupWork = groupIDs.flatMap { workByExpert[$0] ?? [] }
+-                    var workStart = 0
+-                    while workStart < groupWork.count {
++                if let exactBlock {
++                    // Fixed complete-token pairs: each union fits the existing16 slots.
++                    // Pair B maps only after pair A has settled and released its lease.
++                    for pairStart in stride(from: 0, to: tokenIDs.count, by: 2) {
+                         try Task.checkCancellation()
+-                        let workEnd = min(workStart + QwenMoE.maximumGroupedContributionsPerCommand,
+-                                          groupWork.count)
+-                        let work = Array(groupWork[workStart..<workEnd])
+-                        // Load the complete group once. Subsequent chunks can map
+-                        // their current subset as hits without evicting this group.
+-                        let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
+-                        try model.revalidateSource()
++                        let pairTokens = [pairStart, pairStart + 1]
++                        let requested = Array(Set(pairTokens.flatMap { token in
++                            (0..<topK).map { routingExpertIDs[token * topK + $0] }
++                        })).sorted()
++                        let work = requested.flatMap { expert in
++                            (workByExpert[expert] ?? []).filter { pairTokens.contains($0.tokenIndex) }
++                        }
++                        guard requested.count <= expertSlotCount, work.count == 2 * topK else {
++                            throw QwenTextRunnerError.invalidState(detail: "incomplete exact pair")
++                        }
++                        for _ in pairTokens {
++                            try model.revalidateSource()
++                            exactBlock.layerAdmissions += 1
++                        }
+                         let measurement = QwenCacheMapMeasurement.capture.map {
+                             QwenCacheMapContext(capture: $0, layer: layer,
+                                                 position: position, tokenCount: tokenIDs.count)
+                         }
+                         let lease = try await coordinator.map(expertIDs: requested, measurement: measurement)
++                        exactBlock.pairMaps += 1
++                        exactBlock.pairMappedExperts += lease.experts.count
+                         successfulCacheHits += UInt64(lease.diagnostics.hits)
+                         successfulCacheMisses += UInt64(lease.diagnostics.misses)
+                         publishCacheSummary()
+@@ -681,37 +744,104 @@
+                         lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
+                         lastRoutedExpertCount = topK
+                         do {
+-                            try model.revalidateSource()
+                             try await moe.submitGroupedExpertsBF16(
+                                 hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
+                                 routingWeights: routingWeights, outputRows: outputRows,
+                                 tokenCount: tokenIDs.count, lease: lease, work: work,
+                                 sharedWeights: row.weights, scratch: scratch,
+-                                initializeOutput: firstCommand)
++                                initializeOutput: pairStart == 0,
++                                exactBlockAdmission: QwenExactBlockConsumerAdmission(
++                                    model: model, lease: lease, capture: exactBlock),
++                                exactPairSharedNames: row.sharedNames)
++                            exactBlock.pairMoECommands += 1
+                         } catch {
+                             try? lease.cancel()
+                             throw error
+                         }
+-                        firstCommand = false
+-                        workStart = workEnd
+-                    }
+-                    groupStart = groupEnd
++                    }
++                } else {
++                    var firstCommand = true
++                    var groupStart = 0
++                    while groupStart < uniqueExperts.count {
++                        let groupEnd = min(groupStart + expertSlotCount, uniqueExperts.count)
++                        let groupIDs = Array(uniqueExperts[groupStart..<groupEnd])
++                        let groupWork = groupIDs.flatMap { workByExpert[$0] ?? [] }
++                        var workStart = 0
++                        while workStart < groupWork.count {
++                            try Task.checkCancellation()
++                            let workEnd = min(workStart + QwenMoE.maximumGroupedContributionsPerCommand,
++                                              groupWork.count)
++                            let work = Array(groupWork[workStart..<workEnd])
++                            // Load the complete group once. Subsequent chunks can map
++                            // their current subset as hits without evicting this group.
++                            let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
++                            let logicalTokens = Array(Set(work.map(\.tokenIndex))).sorted()
++                            if let exactBlock {
++                                for _ in logicalTokens {
++                                    try model.revalidateSource()
++                                    exactBlock.layerAdmissions += 1
++                                }
++                            } else { try model.revalidateSource() }
++                            let measurement = QwenCacheMapMeasurement.capture.map {
++                                QwenCacheMapContext(capture: $0, layer: layer,
++                                                    position: position, tokenCount: tokenIDs.count)
++                            }
++                            let lease = try await coordinator.map(expertIDs: requested, measurement: measurement)
++                            successfulCacheHits += UInt64(lease.diagnostics.hits)
++                            successfulCacheMisses += UInt64(lease.diagnostics.misses)
++                            publishCacheSummary()
++                            lastPrefillDiagnostics?.mappingHits += UInt64(lease.diagnostics.hits)
++                            lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
++                            lastRoutedExpertCount = topK
++                            do {
++                                if exactBlock == nil { try model.revalidateSource() }
++                                try await moe.submitGroupedExpertsBF16(
++                                    hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
++                                    routingWeights: routingWeights, outputRows: outputRows,
++                                    tokenCount: tokenIDs.count, lease: lease, work: work,
++                                    sharedWeights: row.weights, scratch: scratch,
++                                    initializeOutput: firstCommand,
++                                    exactBlockAdmission: exactBlock.map {
++                                        QwenExactBlockConsumerAdmission(model: model, lease: lease,
++                                            capture: $0)
++                                    })
++                            } catch {
++                                try? lease.cancel()
++                                throw error
++                            }
++                            firstCommand = false
++                            workStart = workEnd
++                        }
++                        groupStart = groupEnd
++                    }
+                 }
+                 for index in tokenIDs.indices {
+                     try Task.checkCancellation()
+-                    let post = Array(UnsafeBufferPointer(
+-                        start: inputs.advanced(by: index * width), count: width))
+-                    let output = outputRows.contents().assumingMemoryBound(to: Float.self)
+-                    let routed = Array(UnsafeBufferPointer(
+-                        start: output.advanced(by: index * width), count: width))
+-                    let sharedInput = try floats(post, label: "source prefill shared input")
+-                    let sharedOutput = try floats(routed, label: "source prefill shared output")
+-                    let command = try commandBuffer()
+-                    try moe.encodeSharedBF16(commandBuffer: command, hidden: sharedInput,
+-                        weights: row.weights, names: row.sharedNames,
+-                        scratch: scratch, output: sharedOutput)
+-                    try await settle(command, stage: "source.prefill.shared")
+-                    let combined = read(sharedOutput, count: width)
++                    let combined: [Float]
++                    if exactBlock != nil {
++                        // Only read after both lease-owned pair commands have settled.
++                        let output = outputRows.contents().assumingMemoryBound(to: Float.self)
++                        combined = Array(UnsafeBufferPointer(start: output.advanced(by: index * width), count: width))
++                    } else {
++                        let post = Array(UnsafeBufferPointer(
++                            start: inputs.advanced(by: index * width), count: width))
++                        let output = outputRows.contents().assumingMemoryBound(to: Float.self)
++                        let routed = Array(UnsafeBufferPointer(
++                            start: output.advanced(by: index * width), count: width))
++                        let sharedInput = try floats(post, label: "source prefill shared input")
++                        let sharedOutput = try floats(routed, label: "source prefill shared output")
++                        let command = try commandBuffer()
++                        if let exactBlock {
++                            try model.revalidateSource()
++                            exactBlock.sharedChecks += 1
++                        }
++                        try moe.encodeSharedBF16(commandBuffer: command, hidden: sharedInput,
++                            weights: row.weights, names: row.sharedNames,
++                            scratch: scratch, output: sharedOutput)
++                        try await settle(command, stage: "source.prefill.shared")
++                        exactBlock?.separateSharedCommands += 1
++                        combined = read(sharedOutput, count: width)
++                    }
+                     for column in 0..<width {
+                         residual[index * width + column] = residual[index * width + column] + combined[column]
+                     }
+@@ -723,15 +853,26 @@
+                     }
+                 }
+                 lastPrefillDiagnostics?.completedLayers += 1
+-            }
+-            let finalHidden = Array(UnsafeBufferPointer(
+-                start: residual.advanced(by: (tokenIDs.count - 1) * width), count: width))
+-            let final = try qwenOfficialSourceRMSNorm(finalHidden, model.finalNorm)
+-            let logits = try await projection(model.entryWeights, model.headName,
+-                input: final, outputCount: model.architecture.vocabularySize)
+-            guard logits.count == model.architecture.vocabularySize,
+-                  logits.allSatisfy(\.isFinite) else {
+-                throw QwenTextRunnerError.execution(detail: "nonfinite source prefill logits")
++                recordMemoryPhase(.prefillLayerDone, layer: layer)
++            }
++            var logits: [Float] = []
++            let finalIndices = exactBlock == nil ? [tokenIDs.count - 1] : Array(tokenIDs.indices)
++            for index in finalIndices {
++                let finalHidden = Array(UnsafeBufferPointer(
++                    start: residual.advanced(by: index * width), count: width))
++                let final = try qwenOfficialSourceRMSNorm(finalHidden, model.finalNorm)
++                logits = try await projection(model.entryWeights, model.headName,
++                    input: final, outputCount: model.architecture.vocabularySize)
++                guard logits.count == model.architecture.vocabularySize,
++                      logits.allSatisfy(\.isFinite) else {
++                    throw QwenTextRunnerError.execution(detail: "nonfinite source prefill logits")
++                }
++                if let exactBlock {
++                    try Task.checkCancellation()
++                    try model.revalidateSource()
++                    exactBlock.finalChecks += 1
++                    exactBlock.logits.append(logits)
++                }
+             }
+             groupedCapture?.observeFinalRawLogits?(position + tokenIDs.count - 1,
+                                                   tokenIDs[tokenIDs.count - 1], logits)
+@@ -746,10 +887,12 @@
+             guard full.position == expected, linearPositionsMatch else {
+                 throw QwenTextRunnerError.invalidState(detail: "source prefill final layer positions")
+             }
++            if let capture = exactBlock, capture.wantsRecurrentRecovery { try capture.sealRecurrent() }
+             committedPosition = expected
+             if ownsCheckpoint { turnCheckpoint = nil }
+             return logits
+         } catch {
++            discardRecurrentCapture()
+             await linearState.waitUntilIdle()
+             do {
+                 guard let checkpoint = turnCheckpoint else {
+@@ -805,6 +948,7 @@
+               let checkpoint = turnCheckpoint else {
+             throw QwenTextRunnerError.invalidTransaction
+         }
++        discardRecurrentCapture()
+         await linearState.waitUntilIdle()
+         do {
+             try hooks.beforeRollbackRestore()
+@@ -819,6 +963,78 @@
+         }
+     }
+ 
++    func diagnosticRecurrentInputBytes() -> Int { recurrentRecoveryCapture?.savedInputBytes ?? 0 }
++
++    private func discardRecurrentCapture() {
++        recurrentRecoveryCapture?.discardRecurrent()
++        recurrentRecoveryCapture = nil
++    }
++
++    // Diagnostic only. Rebuild accepted recurrent state from this block's exact normalized inputs.
++    func settleRecurrentPrefix(_ capture: QwenExactBlockCapture, keep: Int) async throws -> QwenRecurrentPrefixSettlement {
++        guard !inFlight, !unusable, !prefillInFlight, hooks.isKnownNone,
++              let checkpoint = turnCheckpoint, checkpoint.replacementFull == nil,
++              recurrentRecoveryCapture === capture, (0...4).contains(keep),
++              committedPosition == checkpoint.position + 4 else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        inFlight = true
++        defer { inFlight = false; discardRecurrentCapture() }
++        do {
++            try Task.checkCancellation()
++            try model.revalidateSource()
++            let inputs = try capture.takeRecurrent(owner: recurrentRecoveryOwner,
++                turn: checkpoint.identifier, base: checkpoint.position, fullBaseline: checkpoint.full)
++            let full = try fullKV.snapshot()
++            guard full.position == checkpoint.position + 4,
++                  linearSteps.keys.allSatisfy({ inputs.layers.contains($0) }),
++                  try linearSteps.keys.allSatisfy({ try linearState.committedPosition(layer: $0) == full.position }) else {
++                throw QwenTextRunnerError.invalidTransaction
++            }
++            await linearState.waitUntilIdle()
++            try Task.checkCancellation()
++            try linearState.restore(checkpoint.linear)
++            var appendCalls = 0
++            for layer in inputs.layers {
++                guard let step = linearSteps[layer], let rows = inputs.rows[layer],
++                      rows.count == 4 * inputs.width else { throw QwenTextRunnerError.invalidTransaction }
++                for index in 0..<keep {
++                    try Task.checkCancellation()
++                    // Fresh admission precedes every new linear submission. Existing projection checks remain.
++                    try model.revalidateSource()
++                    let start = index * inputs.width
++                    _ = try await step.append(normalizedHidden: Array(rows[start..<(start + inputs.width)]),
++                        tokenCount: 1, useGPUPreparation: useGPULinearPreparation)
++                    appendCalls += 1
++                }
++            }
++            let target = checkpoint.position + keep
++            guard try linearSteps.keys.allSatisfy({ try linearState.committedPosition(layer: $0) == target }) else {
++                throw QwenTextRunnerError.invalidState(detail: "recurrent prefix positions")
++            }
++            try Task.checkCancellation()
++            try model.revalidateSource()
++            // No await follows truncation. Preserve the original outer-turn rollback position.
++            let refreshed = try fullKV.truncateDiagnosticPrefix(position: target, baseline: checkpoint.full, expected: full)
++            turnCheckpoint?.full = refreshed
++            committedPosition = target
++            return QwenRecurrentPrefixSettlement(keptInputs: keep,
++                appendCalls: appendCalls, savedInputBytes: inputs.byteCount)
++        } catch let operation {
++            await linearState.waitUntilIdle()
++            do {
++                try linearState.restore(checkpoint.linear)
++                try restoreFullTurnCheckpoint(checkpoint)
++                committedPosition = checkpoint.position
++                turnCheckpoint?.full = try fullKV.snapshot()
++            } catch let rollbackError {
++                unusable = true
++                throw QwenTextRunnerError.execution(detail: "recurrent settlement failed: \(operation); rollback failed: \(rollbackError)")
++            }
++            throw operation
++        }
++    }
++
+     func rollbackTurn() async throws {
+         try await restoreTurnBaseline()
+         fullKV.discardReplacementCheckpoint()
+@@ -834,6 +1050,7 @@
+         }
+         try model.revalidateSource()
+         try validateCompanion()
++        discardRecurrentCapture()
+         fullKV.discardReplacementCheckpoint()
+         turnCheckpoint = nil
+     }
+@@ -906,6 +1123,7 @@
+     }
+ 
+     private func embedding(_ token: Int32) async throws -> [Float] {
++        if let row = try model.protectedEmbeddingRow(token) { return row }
+         let ids = try buffer(elements: 1, stride: MemoryLayout<UInt32>.stride,
+                              label: "source token")
+         ids.contents().storeBytes(of: UInt32(token), as: UInt32.self)
+@@ -937,10 +1155,11 @@
+         return read(outputBuffer, count: outputCount)
+     }
+ 
+-    private func moeStep(input: [Float], layer: Int) async throws -> [Float] {
++    private func moeStep(input: [Float], layer: Int,
++                         exactBlock: QwenExactBlockCapture? = nil) async throws -> [Float] {
+         if let location = QwenProductionTimingMeasurement.location, location.layer != layer {
+             return try await QwenProductionTimingMeasurement.$location.withValue(location.atLayer(layer)) {
+-                try await moeStep(input: input, layer: layer)
++                try await moeStep(input: input, layer: layer, exactBlock: exactBlock)
+             }
+         }
+         let row = model.layers[layer]
+@@ -965,6 +1184,8 @@
+             : 0
+         hooks.observeRoute(committedPosition, layer, routeLogits,
+                            experts, routeWeights, cutoff)
++        exactBlock?.routes.append(QwenExactBlockRoute(position: committedPosition,
++            layer: layer, ids: experts, weights: routeWeights.map(\.bitPattern)))
+         try model.revalidateSource()
+         let coordinator = try expertCoordinator(layer: layer)
+         lastRoutedExpertCount = experts.count
+--- /dev/null
++++ b/Sources/TurboFieldfareBaselineMemoryProbe/Command.swift
+@@ -0,0 +1,31 @@
++import Foundation
++import Darwin
++import TurboFieldfare
++
++@main struct ExactBlockCommand {
++    @MainActor static func main() async {
++        guard CommandLine.arguments.count == 4 else {
++            FileHandle.standardError.write(Data("usage: TurboFieldfareBaselineMemoryProbe registration.json request.json report.json\n".utf8))
++            exit(2)
++        }
++        let output = URL(fileURLWithPath: CommandLine.arguments[3])
++        do {
++            guard !FileManager.default.fileExists(atPath: output.path) else {
++                throw CocoaError(.fileWriteFileExists)
++            }
++            let data = try await QwenExactBlockProbe.run(
++                registrationURL: URL(fileURLWithPath: CommandLine.arguments[1]),
++                requestURL: URL(fileURLWithPath: CommandLine.arguments[2]))
++            try data.write(to: output, options: .atomic)
++            print(String(decoding: data, as: UTF8.self))
++        } catch {
++            let failure = ["passed": false, "error": String(describing: error)] as [String: Any]
++            do {
++                let data = try JSONSerialization.data(withJSONObject: failure, options: [.sortedKeys])
++                if !FileManager.default.fileExists(atPath: output.path) { try data.write(to: output, options: .atomic) }
++            } catch { FileHandle.standardError.write(Data("failure receipt write: \(error)\n".utf8)) }
++            FileHandle.standardError.write(Data("exact block probe failed: \(error)\n".utf8))
++            exit(1)
++        }
++    }
++}

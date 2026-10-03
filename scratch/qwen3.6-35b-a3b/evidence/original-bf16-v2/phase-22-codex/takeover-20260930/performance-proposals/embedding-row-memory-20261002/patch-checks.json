@@ -1,0 +1,7 @@
+{
+  "forwardCheck": 0,
+  "inverseCheck": 0,
+  "copiedBaselineRoundTripExact": true,
+  "PythonAST": "prepare/build/helpers pass",
+  "buildsOrRuns": false
+}

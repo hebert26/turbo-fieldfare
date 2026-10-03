@@ -1,0 +1,150 @@
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+@@ -85,7 +85,9 @@
+         phaseProbe.record(.beforeModelLoad, device: context.device)
+         let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
+             integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
+-            expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024)
++            expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024,
++            protectedEmbeddingRows: ProcessInfo.processInfo.environment["TURBO_QWEN_PROTECTED_EMBEDDING_ROWS"] == "1",
++            embeddingHooks: .none)
+         phaseProbe.record(.afterModelLoad, device: context.device)
+         guard let source = model.sourceIdentity else { throw ExactProbeError(detail: "missing source identity") }
+         try probeRequire(source.descriptorContentSHA256 == (request["sourceDescriptorSHA256"] as? String)
+@@ -302,6 +304,10 @@
+                 "committedValuesSHA256": probeRowSHA(state.committedValues.keys.sorted().map { state.committedValues[$0]! })]
+             let report: [String: Any] = ["schema": 1, "mode": mode, "diagnosticOnly": true,
+                 "requestSHA256": probeSHA(raw), "sourceDescriptorSHA256": source.descriptorContentSHA256,
++                "protectedEmbeddingRows": model.usesProtectedEmbeddingRows,
++                "protectedEmbeddingRowBytes": model.usesProtectedEmbeddingRows ? 4096 : 0,
++                "residentWeightBytes": model.residentWeightBytes,
++                "removedResidentEmbeddingBytes": model.usesProtectedEmbeddingRows ? 1_017_118_720 : 0,
+                 "prefixTokens": prefix.count, "maximumContext": maxContext, "maximumOutputs": maximumOutputs,
+                 "expertSlots": 16, "expertCachePolicy": "lfu", "outputIDs": outputs,
+                 "expectedOutputIDsMatched": true, "acceptedRouteCount": acceptedRouteCount,
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
+@@ -57,6 +57,8 @@
+     let sourceContentSHA256: String
+     // Processor metadata is required only when admitting an image companion.
+     private let sourceIndex: [String: String]
++    private let protectedEmbeddingRange: OfficialSourceHandle.TensorRange?
++    var usesProtectedEmbeddingRows: Bool { protectedEmbeddingRange != nil }
+     let entryWeights: QwenBF16Weights
+     let layers: [Layer]
+     let finalNorm: [Float]
+@@ -127,7 +129,9 @@
+                      integrityPolicy: ModelIntegrityPolicy,
+                      expertCacheSlots: Int,
+                      expertCachePolicy: ExpertCachePolicy,
+-                     residencyBudgetBytes: UInt64) throws -> QwenOfficialSourceModel {
++                     residencyBudgetBytes: UInt64,
++                     protectedEmbeddingRows: Bool = false,
++                     embeddingHooks: QwenOfficialSourceTransactionHooks = .none) throws -> QwenOfficialSourceModel {
+         let receipt = try integrityPolicy.verifyOfficialSource(at: registrationURL)
+         let source = try OfficialSourceHandle(registrationURL: registrationURL)
+         try source.validateTrustedReceipt(receipt)
+@@ -152,7 +156,8 @@
+             expertCachePolicy: expertCachePolicy,
+             sourceIntegrityPolicy: integrityPolicy,
+             context: context,
+-            residencyBudgetBytes: residencyBudgetBytes)
++            residencyBudgetBytes: residencyBudgetBytes,
++            protectedEmbeddingRows: protectedEmbeddingRows && embeddingHooks.isKnownNone)
+         try model.revalidateSource()
+         return model
+     }
+@@ -197,7 +202,8 @@
+                  expertCacheSlots: Int,
+                  expertCachePolicy: ExpertCachePolicy,
+                  sourceIntegrityPolicy: ModelIntegrityPolicy?,
+-                 context: MetalContext, residencyBudgetBytes: UInt64) throws {
++                 context: MetalContext, residencyBudgetBytes: UInt64,
++                 protectedEmbeddingRows: Bool = false) throws {
+         let fullLayers = architecture.fullAttentionLayerMask.reduce(0) { $0 + Int($1) }
+         let expectedSchedule = sourceIdentity == nil
+             ? (layers: 2, full: 1) : (layers: 40, full: 10)
+@@ -346,10 +352,28 @@
+                             shape: [expertCount, hiddenWidth, intermediate])
+             routedByLayer.append(names)
+         }
+-        let entry = [
+-            try spec(Self.embeddingTensorName, .embedding, vocab, hidden),
+-            try spec(Self.headTensorName, .head, vocab, hidden),
+-        ]
++        let embeddingRange: OfficialSourceHandle.TensorRange?
++        var entry: [QwenBF16TensorSpec] = []
++        if protectedEmbeddingRows {
++            let token = try source.admitTensor(
++                shardName: Self.shard(Self.embeddingTensorName, mapping),
++                tensorName: Self.embeddingTensorName)
++            let region = LoadedTensorRegion(admittedSourceTensor: token)
++            guard hidden == 2048, vocab > 0,
++                  region.storage == .bf16,
++                  region.shape == [UInt64(vocab), UInt64(hidden)],
++                  region.size == UInt64(vocab) * 4096 else {
++                throw ModelError.indexCorrupt(detail: "protected embedding geometry")
++            }
++            try source.preadTensorRange(token, byteOffset: region.size, byteCount: 0,
++                expectedByteCount: 0,
++                into: UnsafeMutableRawBufferPointer(start: nil, count: 0))
++            embeddingRange = token
++        } else {
++            entry.append(try spec(Self.embeddingTensorName, .embedding, vocab, hidden))
++            embeddingRange = nil
++        }
++        entry.append(try spec(Self.headTensorName, .head, vocab, hidden))
+         let entryWeights = try QwenBF16Weights(context: context, source: source,
+             specifications: entry, residencyBudget: consumed)
+         let finalNorm = try vector("model.language_model.norm.weight", [UInt64(hidden)])
+@@ -451,9 +475,30 @@
+         self.sourceContentSHA256 = sourceContentSHA256
+         // No processor file is opened for text-only source admission.
+         self.sourceIndex = mapping
++        self.protectedEmbeddingRange = embeddingRange
+         self.entryWeights = entryWeights
+         self.layers = built
+         self.finalNorm = finalNorm
++    }
++
++    func protectedEmbeddingRow(_ id: Int32) throws -> [Float]? {
++        guard let range = protectedEmbeddingRange else { return nil }
++        try Task.checkCancellation()
++        guard id >= 0, Int(id) < architecture.vocabularySize,
++              architecture.hiddenSize == 2048 else {
++            throw ModelError.indexCorrupt(detail: "protected embedding token bounds")
++        }
++        let offset = UInt64(id) * 4096
++        guard offset <= range.admittedByteCount, 4096 <= range.admittedByteCount - offset else {
++            throw ModelError.indexCorrupt(detail: "protected embedding row bounds")
++        }
++        var words = [UInt16](repeating: 0, count: 2048)
++        try words.withUnsafeMutableBytes { destination in
++            try source.preadTensorRange(range, byteOffset: offset, byteCount: 4096,
++                expectedByteCount: 4096, into: destination)
++        }
++        try Task.checkCancellation()
++        return words.map { Float(bitPattern: UInt32(UInt16(littleEndian: $0)) << 16) }
+     }
+ 
+     func visionProcessorSHA256() throws -> String {
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -236,6 +236,9 @@
+         self.memoryPhaseProbe = memoryPhaseProbe
+         self.model = model
+         self.context = context
++        guard !model.usesProtectedEmbeddingRows || hooks.isKnownNone else {
++            throw QwenTextRunnerError.execution(detail: "protected embedding requires genuine hooks.none")
++        }
+         self.hooks = hooks
+         // Internal trial only, fixed for this runner's lifetime. Legacy
+         // diagnostic hooks still select the linear step's separated fallback.
+@@ -1120,6 +1123,7 @@
+     }
+ 
+     private func embedding(_ token: Int32) async throws -> [Float] {
++        if let row = try model.protectedEmbeddingRow(token) { return row }
+         let ids = try buffer(elements: 1, stride: MemoryLayout<UInt32>.stride,
+                              label: "source token")
+         ids.contents().storeBytes(of: UInt32(token), as: UInt32.self)

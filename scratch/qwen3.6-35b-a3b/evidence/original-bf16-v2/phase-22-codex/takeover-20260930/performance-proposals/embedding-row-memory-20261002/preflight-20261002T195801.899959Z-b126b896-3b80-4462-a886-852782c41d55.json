@@ -1,0 +1,452 @@
+{
+  "schema_version": 1,
+  "preflight_id": "b126b896-3b80-4462-a886-852782c41d55",
+  "started_at": "2026-10-02T19:58:01.513728+00:00",
+  "required_head": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "app_version": "installed app019 only",
+  "checks": [
+    {
+      "name": "pinned_plan",
+      "started_at": "2026-10-02T19:58:01.513902+00:00",
+      "passed": true,
+      "detail": {
+        "path": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/preflight-plan.json",
+        "sha256": "1b22816dd689b1c7e6e462547214a22677e562de2257003ca9b5058a11def39f"
+      },
+      "finished_at": "2026-10-02T19:58:01.514169+00:00"
+    },
+    {
+      "name": "clean_commit",
+      "started_at": "2026-10-02T19:58:01.514174+00:00",
+      "passed": true,
+      "detail": {
+        "head": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+        "clean": true
+      },
+      "finished_at": "2026-10-02T19:58:01.589697+00:00"
+    },
+    {
+      "name": "app019_source_hashes",
+      "started_at": "2026-10-02T19:58:01.589699+00:00",
+      "passed": true,
+      "detail": {
+        "receipt": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-token-app-trial-20261002/app-build-019.json",
+        "receipt_sha256": "ad80270396f15832a763f92af037fe233ad6ecd3729ae4795090184f47d35289",
+        "matched": 731
+      },
+      "finished_at": "2026-10-02T19:58:01.652911+00:00"
+    },
+    {
+      "name": "installed_app019",
+      "started_at": "2026-10-02T19:58:01.652923+00:00",
+      "passed": true,
+      "detail": {
+        "matched": 2,
+        "dist_read_or_install": false
+      },
+      "finished_at": "2026-10-02T19:58:01.688502+00:00"
+    },
+    {
+      "name": "verified_gemma_metadata",
+      "started_at": "2026-10-02T19:58:01.688516+00:00",
+      "passed": true,
+      "detail": {
+        "receipt_sha256": "6b085b2172b3005df09af0ee573e466d9e62b0d416d5cd779292b20325958af2",
+        "manifest_sha256": "1cb53c2423f05dfa673e5f0d9a3407aa355b8227b621f8f8e575830a2bb7fa91",
+        "stat_matched_files": 37,
+        "payload_read": false
+      },
+      "finished_at": "2026-10-02T19:58:01.690123+00:00"
+    },
+    {
+      "name": "macos",
+      "started_at": "2026-10-02T19:58:01.690131+00:00",
+      "passed": true,
+      "detail": {
+        "version": "26.6.2"
+      },
+      "finished_at": "2026-10-02T19:58:01.701465+00:00"
+    },
+    {
+      "name": "swift",
+      "started_at": "2026-10-02T19:58:01.701470+00:00",
+      "passed": true,
+      "detail": {
+        "major_minor": [
+          6,
+          3
+        ]
+      },
+      "finished_at": "2026-10-02T19:58:01.814406+00:00"
+    },
+    {
+      "name": "disk",
+      "started_at": "2026-10-02T19:58:01.814414+00:00",
+      "passed": true,
+      "detail": {
+        "free_bytes": 160650612736,
+        "free_GiB": 149.6175422668457
+      },
+      "finished_at": "2026-10-02T19:58:01.814454+00:00"
+    },
+    {
+      "name": "memory",
+      "started_at": "2026-10-02T19:58:01.814456+00:00",
+      "passed": true,
+      "detail": {
+        "system_free_percent": 72
+      },
+      "finished_at": "2026-10-02T19:58:01.819559+00:00"
+    },
+    {
+      "name": "no_competing_processes",
+      "started_at": "2026-10-02T19:58:01.819563+00:00",
+      "passed": true,
+      "detail": {
+        "matching_processes": [],
+        "pattern": "TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm|TurboFieldfareExactMetadataCost|TurboFieldfareExactMetadataParallel|TurboFieldfareExactBlockProbe|TurboFieldfareExpertPredictRecall|TurboFieldfareExpertPredictCPU|TurboFieldfareExpertPrefetchOverlap|TurboFieldfareExactMetadataDecode|TurboFieldfareExactReadIntervals|TurboFieldfareCausalLookupDecode|TurboFieldfareRecurrentPrefixRecovery|TurboFieldfareBaselineMemoryProbe|resident-kernel-timing|source64-token4|qwen.*harness"
+      },
+      "finished_at": "2026-10-02T19:58:01.899931+00:00"
+    }
+  ],
+  "commands": [
+    {
+      "argv": [
+        "git",
+        "rev-parse",
+        "HEAD"
+      ],
+      "exit": 0,
+      "stdout": "526d35a090eb4b87e8b6410babd685d6bb5310e7\n",
+      "stderr": "",
+      "finished_at": "2026-10-02T19:58:01.537321+00:00"
+    },
+    {
+      "argv": [
+        "git",
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "",
+      "finished_at": "2026-10-02T19:58:01.569644+00:00"
+    },
+    {
+      "argv": [
+        "git",
+        "diff",
+        "--quiet",
+        "3fe330585beb148cb1954419a0c41cb70ebbd672",
+        "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+        "--",
+        "Sources",
+        "Tests",
+        "Scripts",
+        "Package.swift",
+        "Package.resolved"
+      ],
+      "exit": 0,
+      "stdout": "",
+      "stderr": "",
+      "finished_at": "2026-10-02T19:58:01.589655+00:00"
+    },
+    {
+      "argv": [
+        "sw_vers",
+        "-productVersion"
+      ],
+      "exit": 0,
+      "stdout": "26.6.2\n",
+      "stderr": "",
+      "finished_at": "2026-10-02T19:58:01.701263+00:00"
+    },
+    {
+      "argv": [
+        "xcrun",
+        "swiftc",
+        "--version"
+      ],
+      "exit": 0,
+      "stdout": "Apple Swift version 6.3.2 (swiftlang-6.3.2.1.108 clang-2100.1.1.101)\nTarget: arm64-apple-macosx26.0\n",
+      "stderr": "swift-driver version: 1.148.6 ",
+      "finished_at": "2026-10-02T19:58:01.814166+00:00"
+    },
+    {
+      "argv": [
+        "memory_pressure",
+        "-Q"
+      ],
+      "exit": 0,
+      "stdout": "The system has 34359738368 (2097152 pages with a page size of 16384).\nSystem-wide memory free percentage: 72%\n",
+      "stderr": "",
+      "finished_at": "2026-10-02T19:58:01.819385+00:00"
+    },
+    {
+      "argv": [
+        "pgrep",
+        "-fl",
+        "TurboFieldfareServer|TurboFieldfareMac|TurboFieldfareDecodeService|TurboFieldfareCLI|TurboFieldfarePackageTests|swiftpm-testing-helper|mlx_lm|mlx-lm|TurboFieldfareExactMetadataCost|TurboFieldfareExactMetadataParallel|TurboFieldfareExactBlockProbe|TurboFieldfareExpertPredictRecall|TurboFieldfareExpertPredictCPU|TurboFieldfareExpertPrefetchOverlap|TurboFieldfareExactMetadataDecode|TurboFieldfareExactReadIntervals|TurboFieldfareCausalLookupDecode|TurboFieldfareRecurrentPrefixRecovery|TurboFieldfareBaselineMemoryProbe|resident-kernel-timing|source64-token4|qwen.*harness"
+      ],
+      "exit": 1,
+      "stdout": "",
+      "stderr": "",
+      "finished_at": "2026-10-02T19:58:01.899871+00:00"
+    }
+  ],
+  "launch_performed": false,
+  "limitations": [
+    "Gemma payloads are stat-checked against the pinned prior verification receipt. Only its small manifest is rehashed, not model payloads.",
+    "This snapshot does not lock out processes or later file changes. Main must launch immediately after a passing fresh check."
+  ],
+  "source_hashes": {
+    "receipt": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-token-app-trial-20261002/app-build-019.json",
+    "receipt_sha256": "ad80270396f15832a763f92af037fe233ad6ecd3729ae4795090184f47d35289",
+    "checked": 731,
+    "mismatches": []
+  },
+  "installed_binaries": [
+    {
+      "name": "TurboFieldfareDecodeService",
+      "path": "/Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareDecodeService",
+      "actual": "083e80a7155db7993af86d391ef84cf634cc2785b62289d79758c8e04f81a046",
+      "expected": "083e80a7155db7993af86d391ef84cf634cc2785b62289d79758c8e04f81a046",
+      "matches": true
+    },
+    {
+      "name": "TurboFieldfareMac",
+      "path": "/Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareMac",
+      "actual": "4985b79913c6cd289f5de7b9ac4c6d284dda404d79a9916a96741a9dcc94fe28",
+      "expected": "4985b79913c6cd289f5de7b9ac4c6d284dda404d79a9916a96741a9dcc94fe28",
+      "matches": true
+    }
+  ],
+  "gemma_file_stats": [
+    {
+      "path": "manifest.json",
+      "expected_size": 7689,
+      "actual_size": 7689,
+      "matches": true
+    },
+    {
+      "path": "model_weights.bin",
+      "expected_size": 1353771068,
+      "actual_size": 1353771068,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_00.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_01.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_02.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_03.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_04.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_05.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_06.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_07.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_08.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_09.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_10.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_11.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_12.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_13.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_14.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_15.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_16.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_17.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_18.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_19.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_20.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_21.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_22.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_23.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_24.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_25.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_26.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_27.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_28.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layer_29.bin",
+      "expected_size": 429916160,
+      "actual_size": 429916160,
+      "matches": true
+    },
+    {
+      "path": "packed_experts/layout.json",
+      "expected_size": 8450186,
+      "actual_size": 8450186,
+      "matches": true
+    },
+    {
+      "path": "tokenizer/chat_template.jinja",
+      "expected_size": 17466,
+      "actual_size": 17466,
+      "matches": true
+    },
+    {
+      "path": "tokenizer/config.json",
+      "expected_size": 12180,
+      "actual_size": 12180,
+      "matches": true
+    },
+    {
+      "path": "tokenizer/tokenizer.json",
+      "expected_size": 32169626,
+      "actual_size": 32169626,
+      "matches": true
+    },
+    {
+      "path": "tokenizer/tokenizer_config.json",
+      "expected_size": 2740,
+      "actual_size": 2740,
+      "matches": true
+    }
+  ],
+  "passed": true,
+  "exit": 0,
+  "finished_at": "2026-10-02T19:58:01.899954+00:00"
+}
