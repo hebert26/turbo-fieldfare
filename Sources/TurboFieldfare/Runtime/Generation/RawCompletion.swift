@@ -318,9 +318,7 @@ public func runRawCompletion(producer: any LogitProducer,
             trailingInvisibleTokens = visible.isEmpty ? trailingInvisibleTokens + 1 : 0
             if verifiedTokens.isEmpty {
                 if let draftRunner, config.maxNewTokens - generated >= 2 {
-                    let proposalCount = min(6, config.maxNewTokens - generated - 1)
-                    let proposed = try draftRunner.proposeDraft(
-                        after: tokenID, count: proposalCount)
+                    let proposed = try draftRunner.proposeDraft(after: tokenID, count: 1)
                     let encodeFirstSample: ((MTLCommandBuffer, MTLBuffer) -> Void)?
                     if config.repetitionPenalty == 1, case .gemmaSoftcap = config.logitTransform {
                         // Select the first token before the existing GPU wait.

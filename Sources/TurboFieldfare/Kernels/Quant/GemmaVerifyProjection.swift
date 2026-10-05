@@ -4,9 +4,6 @@ import Metal
 final class GemmaVerifyProjection {
     private let pipelines: [MTLComputePipelineState]
     private let manyPipelines: [MTLComputePipelineState]
-    private let mma3Pipelines: [MTLComputePipelineState]
-    private let mma4Pipelines: [MTLComputePipelineState]
-    private let mma8Pipelines: [MTLComputePipelineState]
     private let wideHead: MTLComputePipelineState
     var useWideHead = false
     private let gelu: MTLComputePipelineState
@@ -16,7 +13,7 @@ final class GemmaVerifyProjection {
             MetalFunctionConstant(index: 90, value: .uint32(2))
         ], maxTotalThreadsPerThreadgroup: 128)
         gelu = try context.pipeline("gelu_mul_fp16")
-        pipelines = try (1...5).map { count in
+        pipelines = try (1...7).map { count in
             try context.pipeline("gemma_verify_int4", constants: [
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
             ], maxTotalThreadsPerThreadgroup: 128)
@@ -25,24 +22,6 @@ final class GemmaVerifyProjection {
             try context.pipeline("gemma_verify_int4_many", constants: [
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
             ], maxTotalThreadsPerThreadgroup: 128)
-        }
-        mma3Pipelines = try (6...7).map { count in
-            try context.pipeline("gemma_verify_int4_mma", constants: [
-                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count))),
-                MetalFunctionConstant(index: 92, value: .uint32(3)),
-            ], maxTotalThreadsPerThreadgroup: 256)
-        }
-        mma4Pipelines = try (6...7).map { count in
-            try context.pipeline("gemma_verify_int4_mma", constants: [
-                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count))),
-                MetalFunctionConstant(index: 92, value: .uint32(4)),
-            ], maxTotalThreadsPerThreadgroup: 256)
-        }
-        mma8Pipelines = try (6...7).map { count in
-            try context.pipeline("gemma_verify_int4_mma", constants: [
-                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count))),
-                MetalFunctionConstant(index: 92, value: .uint32(8)),
-            ], maxTotalThreadsPerThreadgroup: 256)
         }
     }
 
@@ -123,22 +102,13 @@ final class GemmaVerifyProjection {
             throw SharedExpertError.dimensionMismatch("Invalid verification projection")
         }
         let wide = useWideHead && inputs.count == 2 && projection.rows == 262144 && projection.cols == 2816
-        let matrix = inputs.count > 5
-        let quantGroups = Int(projection.cols / 64)
-        let splits = quantGroups.isMultiple(of: 8) ? 8
-            : (quantGroups.isMultiple(of: 4) ? 4 : 3)
-        guard !matrix || Int(projection.cols / 64) % splits == 0 else {
-            throw SharedExpertError.dimensionMismatch("Invalid matrix verification projection")
-        }
         guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
-        let pipeline = matrix
-            ? (splits == 8 ? mma8Pipelines : (splits == 4 ? mma4Pipelines : mma3Pipelines))[inputs.count - 6]
-            : (wide ? wideHead : pipelines[inputs.count - 1])
+        let pipeline = wide ? wideHead : pipelines[inputs.count - 1]
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(projection.weights, offset: projection.weightsOffset, index: 0)
         encoder.setBuffer(projection.scales, offset: projection.scalesOffset, index: 1)
         encoder.setBuffer(projection.biases, offset: projection.biasesOffset, index: 2)
-        if matrix {
+        if !wide {
             for index in 0..<7 {
                 let bound = min(index, inputs.count - 1)
                 encoder.setBuffer(inputs[bound].buffer, offset: inputs[bound].offset, index: 3 + index)
@@ -148,8 +118,8 @@ final class GemmaVerifyProjection {
             var columns = projection.cols
             encoder.setBytes(&rows, length: 4, index: 17)
             encoder.setBytes(&columns, length: 4, index: 18)
-            encoder.dispatchDecode(MTLSize(width: (Int(rows) + 7) / 8, height: 1, depth: 1),
-                threads: MTLSize(width: splits * 32, height: 1, depth: 1), conditional: nil)
+            encoder.dispatchDecode(MTLSize(width: (Int(rows) + 3) / 4, height: 1, depth: 1),
+                threads: MTLSize(width: 128, height: 1, depth: 1), conditional: conditional)
             encoder.endEncoding()
             return
         }
