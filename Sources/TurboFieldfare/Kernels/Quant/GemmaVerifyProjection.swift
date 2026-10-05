@@ -4,6 +4,7 @@ import Metal
 final class GemmaVerifyProjection {
     private let pipelines: [MTLComputePipelineState]
     private let manyPipelines: [MTLComputePipelineState]
+    private let mma3Pipelines: [MTLComputePipelineState]
     private let mma4Pipelines: [MTLComputePipelineState]
     private let mma8Pipelines: [MTLComputePipelineState]
     private let wideHead: MTLComputePipelineState
@@ -24,6 +25,12 @@ final class GemmaVerifyProjection {
             try context.pipeline("gemma_verify_int4_many", constants: [
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
             ], maxTotalThreadsPerThreadgroup: 128)
+        }
+        mma3Pipelines = try (6...7).map { count in
+            try context.pipeline("gemma_verify_int4_mma", constants: [
+                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count))),
+                MetalFunctionConstant(index: 92, value: .uint32(3)),
+            ], maxTotalThreadsPerThreadgroup: 256)
         }
         mma4Pipelines = try (6...7).map { count in
             try context.pipeline("gemma_verify_int4_mma", constants: [
@@ -115,15 +122,17 @@ final class GemmaVerifyProjection {
                   $0.offset <= $0.buffer.length - Int(projection.rows) * 2 }) else {
             throw SharedExpertError.dimensionMismatch("Invalid verification projection")
         }
-        guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
         let wide = useWideHead && inputs.count == 2 && projection.rows == 262144 && projection.cols == 2816
         let matrix = inputs.count > 5
-        let splits = projection.cols == 2816 ? 4 : 8
+        let quantGroups = Int(projection.cols / 64)
+        let splits = quantGroups.isMultiple(of: 8) ? 8
+            : (quantGroups.isMultiple(of: 4) ? 4 : 3)
         guard !matrix || Int(projection.cols / 64) % splits == 0 else {
             throw SharedExpertError.dimensionMismatch("Invalid matrix verification projection")
         }
+        guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
         let pipeline = matrix
-            ? (splits == 4 ? mma4Pipelines : mma8Pipelines)[inputs.count - 6]
+            ? (splits == 8 ? mma8Pipelines : (splits == 4 ? mma4Pipelines : mma3Pipelines))[inputs.count - 6]
             : (wide ? wideHead : pipelines[inputs.count - 1])
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(projection.weights, offset: projection.weightsOffset, index: 0)
