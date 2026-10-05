@@ -2240,6 +2240,9 @@ actor VisionCaptureToolLoop {
                 configuration: configuration,
                 activity: activity)
         }
+        if clickResult.isPointerPreCaptureFailureBeforeSubmission {
+            return try pointerPreCaptureFailureOutcome(for: intent)
+        }
         return try outcome(
             for: intent,
             result: clickResult,
@@ -2247,6 +2250,28 @@ actor VisionCaptureToolLoop {
             manifest: AuthorityManifest(),
             systemAlert: nil,
             progressed: !clickResult.isError)
+    }
+
+    private func pointerPreCaptureFailureOutcome(
+        for intent: NavigationIntent
+    ) throws -> NavigationOutcome {
+        let body: [String: JSONValue] = [
+            "operation": .string(intent.operation.rawValue),
+            "outcome": .string("not_dispatched"),
+            "is_error": .bool(true),
+            "dispatch_attempted": .bool(false),
+            "refusal": .object([
+                "code": .string("POINTER_PRE_CAPTURE_FAILED"),
+                "reason": .string("before_click_evidence_unavailable"),
+            ]),
+            "instruction": .string(
+                "No click was sent. Take a fresh screenshot. If the same visible control is still present, choose computer_use_click again with its current coordinates. Do not claim success."),
+        ]
+        return NavigationOutcome(
+            content: try encodeOutcomeBody(body),
+            recoverableColdMissArguments: nil,
+            progressed: false,
+            successfulReadOnlyObservation: false)
     }
 
     private func closeComputerUseTask(
@@ -3823,7 +3848,8 @@ actor VisionCaptureToolLoop {
                 result, arguments: arguments, configuration: configuration)
             || Self.isRecoverableStaleCacheAction(
                 result,
-                arguments: arguments) {
+                arguments: arguments)
+            || result.isPointerPreCaptureFailureBeforeSubmission {
             await activity(.requestStatus(
                 id: activityID,
                 status: .recoverablePreDispatchRefusal(serverOutcome),

@@ -29,6 +29,7 @@ struct VisionCaptureMCPResult: Sendable {
     let isActionAuthorizationExpiredBeforeDispatch: Bool
     let isObservedTapTargetUnavailableBeforeDispatch: Bool
     let isDeliveredTransitionContinuation: Bool
+    let isPointerPreCaptureFailureBeforeSubmission: Bool
     var isObservationTopologyRefreshBeforeDispatch: Bool = false
 
     /// Format the existing response directly into a bounded display excerpt.
@@ -389,10 +390,47 @@ actor VisionCaptureMCPClient {
                 && refusalCode == "DISCOVERY_SCREEN_TRANSITION_CONTRADICTED"
                 && Self.provesDeliveredTransitionContinuation(
                     in: result, arguments: arguments),
+            isPointerPreCaptureFailureBeforeSubmission:
+                isError
+                && refusalCode == "POINTER_PRE_CAPTURE_FAILED"
+                && Self.provesPointerPreCaptureFailureBeforeSubmission(
+                    in: result, arguments: arguments),
             isObservationTopologyRefreshBeforeDispatch:
                 isError && refusalCode == "CACHE_ACTION_CAPABILITY_STALE"
                 && dispatchAttempts == [false]
                 && Self.provesObservationTopologyRefresh(in: result, arguments: arguments))
+    }
+
+    private static func provesPointerPreCaptureFailureBeforeSubmission(
+        in value: JSONValue,
+        arguments: JSONValue
+    ) -> Bool {
+        guard let request = arguments.objectValue,
+              request["request"] == .string("click pointer"),
+              case .string(let bundleID)? = request["bundle_id"], !bundleID.isEmpty,
+              request["session_id"] == nil, request["session_kind"] == nil,
+              let parameters = request["parameters"]?.objectValue,
+              Set(parameters.keys) == [
+                  "udid", "computer_use_task_id", "computer_use_generation",
+                  "x_norm", "y_norm", "intent", "cache_policy",
+              ],
+              case .string(let udid)? = parameters["udid"], !udid.isEmpty,
+              case .string(let taskID)? = parameters["computer_use_task_id"],
+              UUID(uuidString: taskID) != nil,
+              case .integer(let generation)? = parameters["computer_use_generation"],
+              generation > 0,
+              case .integer(let x)? = parameters["x_norm"], (0...1_000).contains(x),
+              case .integer(let y)? = parameters["y_norm"], (0...1_000).contains(y),
+              case .string(let intent)? = parameters["intent"],
+              !intent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              parameters["cache_policy"] == .string("visual_bypass"),
+              let root = value.objectValue,
+              root["isError"] == .bool(true),
+              root["event_submission_attempted"] == .bool(false),
+              root["dispatch_phase"] == .string("pre_submission"),
+              !findBooleanValues(named: "dispatch_attempted", in: value).contains(true)
+        else { return false }
+        return true
     }
 
     /// A complete retired-grant refusal permits reads only. Missing copies,
