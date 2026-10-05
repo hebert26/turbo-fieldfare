@@ -953,6 +953,7 @@ actor VisionCaptureToolLoop {
     private var staleActionConfirmation: StaleActionConfirmation?
     private var blockedStaleActions: Set<StaleActionConfirmation> = []
     private var journeyEvents: [JourneyEvent] = []
+    private var completedCycleActions: [JourneyAction] = []
     private var verifiedTypingActions: Set<VerifiedTypingAction> = []
     private var currentUserPrompt = ""
     private var userRestrictions = AgentUserRestrictions()
@@ -4153,6 +4154,8 @@ actor VisionCaptureToolLoop {
         - If the screenshot shows the software keyboard and the intended field is already focused, type may omit target.
         - If a needed control requires_screenshot, take a screenshot first.
         - If an open form exposes no editable fields, inspect its pixels or expand an offered sheet before canceling.
+        - If a form remains after a verified tap, do not tap the same semantic choice again. Take a screenshot and use computer_use_click on the visible submit control.
+        - If a read exposes only software-keyboard controls while app content is visible, take a screenshot next. Do not repeat observe.
 
         Evaluate evidence
         - An accepted request is not proof of execution. A VisionCapture verified action proves that action occurred; it completes a workflow only when its evidence proves the requested outcome.
@@ -4689,6 +4692,20 @@ actor VisionCaptureToolLoop {
                     if let label { selected["label"] = .string(label) }
                     if let role = object["role"] { selected["role"] = role }
                     unavailableChoices.append(.object(selected))
+                    continue
+                }
+                if completedCycleActions.contains(where: { action in
+                    Self.matchesCompletedCycleEntry(
+                        object, isField: isField,
+                        operation: action.operation.rawValue,
+                        selector: action.selector,
+                        selectorKind: action.selectorKind,
+                        role: action.role,
+                        desiredState: action.desiredState)
+                }) {
+                    var completed = readableChoiceFacts(object, isField: isField)
+                    completed["availability"] = .string("verified_action_returned_to_same_screen")
+                    unavailableChoices.append(.object(completed))
                     continue
                 }
                 if !readOnlyRequired, !unavailable, recovery == nil,
@@ -6207,6 +6224,7 @@ actor VisionCaptureToolLoop {
         currentScreenObservationMetadataInvalid = false
         currentEditableFields.removeAll(keepingCapacity: true)
         currentJourneyHint = nil
+        completedCycleActions.removeAll(keepingCapacity: true)
     }
 
     private func recordCompletedJourneyAction(
@@ -6276,6 +6294,7 @@ actor VisionCaptureToolLoop {
         guard let contentIdentity else {
             currentScreenContentIdentity = nil
             currentJourneyHint = nil
+            completedCycleActions.removeAll(keepingCapacity: true)
             return
         }
 
@@ -6295,6 +6314,7 @@ actor VisionCaptureToolLoop {
         } else {
             interveningActions = []
         }
+        completedCycleActions = interveningActions
 
         if !interveningActions.isEmpty {
             let recent = interveningActions
