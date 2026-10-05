@@ -15,6 +15,85 @@ void gemma_verify_int4(
     device const half* x2 [[buffer(5)]],
     device const half* x3 [[buffer(6)]],
     device const half* x4 [[buffer(7)]],
+    device half* y0 [[buffer(8)]],
+    device half* y1 [[buffer(9)]],
+    device half* y2 [[buffer(10)]],
+    device half* y3 [[buffer(11)]],
+    device half* y4 [[buffer(12)]],
+    constant uint& rows [[buffer(13)]],
+    constant uint& columns [[buffer(14)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    const uint row = group * 4u + simd;
+    if (row >= rows) return;
+    device const half* inputs[5] = {x0, x1, x2, x3, x4};
+    device half* outputs[5] = {y0, y1, y2, y3, y4};
+    float acc[5] = {};
+    const uint groups = columns / 64u;
+    const uint blocks = groups / 4u;
+    for (uint block = 0; block < blocks; ++block) {
+        const uint byteBase = block * 128u + lane * 4u;
+        const uint scaleIndex = row * groups + block * 4u + (lane >> 3);
+        device const ushort* packed = (device const ushort*)(weights + row * (columns / 2u) + byteBase);
+        const uint w0 = uint(packed[0]);
+        const uint w1 = uint(packed[1]);
+        const float scale = float(scales[scaleIndex]);
+        const float bias = float(biases[scaleIndex]);
+        #pragma unroll
+        for (uint token = 0; token < GEMMA_VERIFY_BATCH; ++token) {
+            device const half* x = inputs[token] + byteBase * 2u;
+            const half4 a = *((device const half4*)x);
+            const half4 b = *((device const half4*)(x + 4u));
+            const float e0 = float(a.x), e1 = float(a.y), e2 = float(a.z), e3 = float(a.w);
+            const float e4 = float(b.x), e5 = float(b.y), e6 = float(b.z), e7 = float(b.w);
+            const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+            float dot = 0;
+            dot = fma(float(w0 & 0x000fu), e0, dot);
+            dot = fma(float(w0 & 0x00f0u), e1 * 0x1p-4f, dot);
+            dot = fma(float(w0 & 0x0f00u), e2 * 0x1p-8f, dot);
+            dot = fma(float(w0 & 0xf000u), e3 * 0x1p-12f, dot);
+            dot = fma(float(w1 & 0x000fu), e4, dot);
+            dot = fma(float(w1 & 0x00f0u), e5 * 0x1p-4f, dot);
+            dot = fma(float(w1 & 0x0f00u), e6 * 0x1p-8f, dot);
+            dot = fma(float(w1 & 0xf000u), e7 * 0x1p-12f, dot);
+            acc[token] = fma(scale, dot, acc[token]);
+            acc[token] = fma(bias, sum, acc[token]);
+        }
+    }
+    for (uint g = blocks * 4u; g < groups; ++g) {
+        const uchar packed = weights[row * (columns / 2u) + g * 32u + lane];
+        const float scale = float(scales[row * groups + g]);
+        const float bias = float(biases[row * groups + g]);
+        #pragma unroll
+        for (uint token = 0; token < GEMMA_VERIFY_BATCH; ++token) {
+            const float a = float(inputs[token][g * 64u + lane * 2u]);
+            const float b = float(inputs[token][g * 64u + lane * 2u + 1u]);
+            float dot = fma(float(uint(packed & 0x0fu)), a, 0.0f);
+            dot = fma(float(uint(packed >> 4)), b, dot);
+            acc[token] = fma(scale, dot, acc[token]);
+            acc[token] = fma(bias, a + b, acc[token]);
+        }
+    }
+    #pragma unroll
+    for (uint token = 0; token < GEMMA_VERIFY_BATCH; ++token) {
+        const float value = simd_sum(acc[token]);
+        if (lane == 0) outputs[token][row] = half(value);
+    }
+}
+
+// Keep large verification batches out of the normal two-token kernel.
+[[kernel, max_total_threads_per_threadgroup(128)]]
+void gemma_verify_int4_wide(
+    device const uchar* weights [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const half* x0 [[buffer(3)]],
+    device const half* x1 [[buffer(4)]],
+    device const half* x2 [[buffer(5)]],
+    device const half* x3 [[buffer(6)]],
+    device const half* x4 [[buffer(7)]],
     device const half* x5 [[buffer(8)]],
     device const half* x6 [[buffer(9)]],
     device half* y0 [[buffer(10)]],

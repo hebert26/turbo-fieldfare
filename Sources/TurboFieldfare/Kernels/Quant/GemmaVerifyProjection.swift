@@ -3,6 +3,7 @@ import Metal
 /// A small batch with the same sums as the decode projection.
 final class GemmaVerifyProjection {
     private let pipelines: [MTLComputePipelineState]
+    private let widePipelines: [MTLComputePipelineState]
     private let manyPipelines: [MTLComputePipelineState]
     private let wideHead: MTLComputePipelineState
     var useWideHead = false
@@ -13,8 +14,13 @@ final class GemmaVerifyProjection {
             MetalFunctionConstant(index: 90, value: .uint32(2))
         ], maxTotalThreadsPerThreadgroup: 128)
         gelu = try context.pipeline("gelu_mul_fp16")
-        pipelines = try (1...7).map { count in
+        pipelines = try (1...5).map { count in
             try context.pipeline("gemma_verify_int4", constants: [
+                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
+            ], maxTotalThreadsPerThreadgroup: 128)
+        }
+        widePipelines = try (6...7).map { count in
+            try context.pipeline("gemma_verify_int4_wide", constants: [
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
             ], maxTotalThreadsPerThreadgroup: 128)
         }
@@ -101,14 +107,16 @@ final class GemmaVerifyProjection {
                   $0.offset <= $0.buffer.length - Int(projection.rows) * 2 }) else {
             throw SharedExpertError.dimensionMismatch("Invalid verification projection")
         }
-        let wide = useWideHead && inputs.count == 2 && projection.rows == 262144 && projection.cols == 2816
+        let wideBatch = inputs.count > 5
+        let wideHead = useWideHead && inputs.count == 2 && projection.rows == 262144 && projection.cols == 2816
         guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
-        let pipeline = wide ? wideHead : pipelines[inputs.count - 1]
+        let pipeline = wideBatch ? widePipelines[inputs.count - 6]
+            : (wideHead ? self.wideHead : pipelines[inputs.count - 1])
         encoder.setComputePipelineState(pipeline)
         encoder.setBuffer(projection.weights, offset: projection.weightsOffset, index: 0)
         encoder.setBuffer(projection.scales, offset: projection.scalesOffset, index: 1)
         encoder.setBuffer(projection.biases, offset: projection.biasesOffset, index: 2)
-        if !wide {
+        if wideBatch {
             for index in 0..<7 {
                 let bound = min(index, inputs.count - 1)
                 encoder.setBuffer(inputs[bound].buffer, offset: inputs[bound].offset, index: 3 + index)
@@ -132,7 +140,7 @@ final class GemmaVerifyProjection {
         var columns = projection.cols
         encoder.setBytes(&rows, length: 4, index: 13)
         encoder.setBytes(&columns, length: 4, index: 14)
-        let rowsPerGroup = wide ? 16 : 4
+        let rowsPerGroup = wideHead ? 16 : 4
         encoder.dispatchDecode(MTLSize(width: (Int(rows) + rowsPerGroup - 1) / rowsPerGroup, height: 1, depth: 1),
                                threads: MTLSize(width: 128, height: 1, depth: 1), conditional: conditional)
         encoder.endEncoding()
