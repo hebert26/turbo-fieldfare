@@ -283,6 +283,10 @@ actor VisionCaptureMCPClient {
             "describe system alert": "describe_system_alert",
             "press system alert button": "press_system_alert_button",
             "go back": "go_back",
+            "tap coordinates": "tap_coordinates",
+            "activate computer use": "activate_computer_use",
+            "click pointer": "click_pointer",
+            "hide pointer": "hide_pointer",
         ]
         let action: String
         if let mapped = fixed[request] {

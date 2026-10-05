@@ -228,6 +228,31 @@ import TurboFieldfare
             selector: "bottom-emoji", role: "button"))
     }
 
+    @Test
+    func repeatedThinkingCanReuseOneCurrentScreenshot() throws {
+        let packet: JSONValue = .object([
+            "last_action": .object([
+                "action": .string("screenshot"),
+                "verdict": .string("observed"),
+            ]),
+            "observation": .object([
+                "current_image_evidence": .bool(true),
+                "state": .string("current"),
+            ]),
+        ])
+
+        let retry = try VisionCaptureToolLoop.repeatedThinkingRetryContent(
+            from: packet.encoded(), imageCount: 1)
+        let content = try #require(retry)
+        let recovered = try JSONDecoder().decode(
+            JSONValue.self, from: Data(content.utf8)).objectValue
+        #expect(recovered?["generation_recovery"] != nil)
+        #expect(recovered?["image_attachment_order"] != nil)
+        let missingImage = try VisionCaptureToolLoop.repeatedThinkingRetryContent(
+            from: packet.encoded(), imageCount: 0)
+        #expect(missingImage == nil)
+    }
+
     private static func field(
         id: String?, label: String, identifier: String, x: Int, y: Int
     ) -> JSONValue {

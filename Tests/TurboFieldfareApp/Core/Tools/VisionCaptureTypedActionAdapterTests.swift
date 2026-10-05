@@ -83,6 +83,31 @@ import TurboFieldfare
         #expect(request.objectValue?["request"] == .string("type Add milk to the list"))
     }
 
+    @Test func mapsVisualActionsWithoutChangingTheirParameters() throws {
+        let actions: [(String, String)] = [
+            ("tap coordinates", "tap_coordinates"),
+            ("activate computer use", "activate_computer_use"),
+            ("click pointer", "click_pointer"),
+            ("hide pointer", "hide_pointer"),
+        ]
+        for (requestName, actionName) in actions {
+            let request: JSONValue = .object([
+                "request": .string(requestName),
+                "bundle_id": .string("com.example.nestmind"),
+                "parameters": .object([
+                    "udid": .string("device-1"),
+                    "x_norm": .integer(500),
+                    "y_norm": .integer(400),
+                ]),
+            ])
+            let adapted = try VisionCaptureMCPClient.typedExecuteArguments(
+                request,
+                supportedActions: [actionName])
+            #expect(adapted.objectValue?["action"] == .string(actionName))
+            #expect(adapted.objectValue?["parameters"] == request.objectValue?["parameters"])
+        }
+    }
+
     @Test func refusesUnknownRequestsAndActionsTheServerDidNotAdvertise() {
         expectRefused(.object([
             "request": .string("open settings"),

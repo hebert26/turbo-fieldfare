@@ -264,6 +264,17 @@ public final class AppModel {
         VisionRuntime.isSupportedOnDefaultDevice
     }
 
+    /// A 64-slot Gemma cache is expensive to rebuild after every Agent Mode
+    /// screenshot. A 32 GB Mac can keep that cache beside the image tower.
+    static func automaticVisionResidencyPolicy(
+        expertCacheSlots: Int,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> VisionResidencyPolicy {
+        let thirtyTwoGiB = UInt64(32) * 1_024 * 1_024 * 1_024
+        return expertCacheSlots >= 64 && physicalMemoryBytes >= thirtyTwoGiB
+            ? .keepReady : .onDemand
+    }
+
     public convenience init(
         modelDirectory: URL? = nil,
         client: any AppInferenceClient = RealInferenceClient(),
@@ -327,17 +338,15 @@ public final class AppModel {
             : (modelDirectory ?? selectedEntry.location.textModelURL))
         self.selectedModelID = selectedModelID
         self.modelPathText = directory.path
-        // The app always releases the image tower after each image. Keeping it
-        // resident saves a few hundred milliseconds on a run of images and
-        // holds about 1 GB of page cache to do it — a trade worth exposing to
-        // a CLI or server operator, not to someone using the app, where it was
-        // one more setting whose effect no figure on screen could show.
-        // `keepReady` remains available through AppRuntimeOptions for those.
+        // Keep the large expert cache across Agent Mode screenshots when this
+        // Mac has enough unified memory. Releasing 64 slots makes the next
+        // decode rebuild several gigabytes of cache.
         self.runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
-            visionResidencyPolicy: .onDemand,
+            visionResidencyPolicy: Self.automaticVisionResidencyPolicy(
+                expertCacheSlots: settings.expertCacheSlots),
             toolThinkingEnabled: settings.toolThinkingEnabled(for: selectedModelID))
         self.maxContextTokens = settings.contextTokens(for: selectedModelID)
         self.temperature = settings.temperature
@@ -2366,11 +2375,8 @@ public final class AppModel {
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
-            // Pinned for the same reason as `init`: the app always releases the
-            // image tower. Reading the persisted value here would let a
-            // `keepReady` written by an older build resurrect ~1 GB of resident
-            // tower on a machine with no control that shows or clears it.
-            visionResidencyPolicy: .onDemand,
+            visionResidencyPolicy: Self.automaticVisionResidencyPolicy(
+                expertCacheSlots: settings.expertCacheSlots),
             toolThinkingEnabled: settings.toolThinkingEnabled(for: modelID))
         maxContextTokens = settings.contextTokens(for: modelID)
         temperature = settings.temperature
