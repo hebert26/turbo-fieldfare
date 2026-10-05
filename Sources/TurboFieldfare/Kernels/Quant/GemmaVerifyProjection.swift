@@ -3,7 +3,6 @@ import Metal
 /// A small batch with the same sums as the decode projection.
 final class GemmaVerifyProjection {
     private let pipelines: [MTLComputePipelineState]
-    private let widePipelines: [MTLComputePipelineState]
     private let manyPipelines: [MTLComputePipelineState]
     private let wideHead: MTLComputePipelineState
     var useWideHead = false
@@ -19,11 +18,6 @@ final class GemmaVerifyProjection {
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
             ], maxTotalThreadsPerThreadgroup: 128)
         }
-        widePipelines = try (6...7).map { count in
-            try context.pipeline("gemma_verify_int4_wide", constants: [
-                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
-            ], maxTotalThreadsPerThreadgroup: 128)
-        }
         manyPipelines = try (1...5).map { count in
             try context.pipeline("gemma_verify_int4_many", constants: [
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
@@ -35,7 +29,7 @@ final class GemmaVerifyProjection {
                     inputs: [(buffer: MTLBuffer, offset: Int)],
                     outputs: [[(buffer: MTLBuffer, offset: Int)]],
                     conditional: DecodeDispatch? = nil) throws {
-        guard (1...3).contains(projections.count), (1...7).contains(inputs.count),
+        guard (1...3).contains(projections.count), (1...5).contains(inputs.count),
               outputs.count == projections.count,
               projections.allSatisfy({ $0.cols == projections[0].cols && $0.cols % 64 == 0 && $0.weightsOffset % 2 == 0 }),
               inputs.allSatisfy({ $0.offset >= 0 && $0.offset % 8 == 0 &&
@@ -45,16 +39,7 @@ final class GemmaVerifyProjection {
                       $0.offset >= 0 && $0.offset % 2 == 0 &&
                       $0.offset <= $0.buffer.length - Int(projection.rows) * 2
                   }
-              }), inputs.count <= 5 || conditional == nil else {
-            throw SharedExpertError.dimensionMismatch("Invalid joined verification projection")
-        }
-        if inputs.count > 5 {
-            for index in projections.indices {
-                try encode(command: command, projection: projections[index],
-                    inputs: inputs, outputs: outputs[index])
-            }
-            return
-        }
+              }) else { throw SharedExpertError.dimensionMismatch("Invalid joined verification projection") }
         guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
         encoder.setComputePipelineState(manyPipelines[inputs.count - 1])
         for index in 0..<3 {
@@ -99,7 +84,7 @@ final class GemmaVerifyProjection {
     func encode(command: MTLCommandBuffer, projection: SharedExpertProjection,
                 inputs: [(buffer: MTLBuffer, offset: Int)],
                 outputs: [(buffer: MTLBuffer, offset: Int)], conditional: DecodeDispatch? = nil) throws {
-        guard (1...7).contains(inputs.count), outputs.count == inputs.count,
+        guard (1...5).contains(inputs.count), outputs.count == inputs.count,
               projection.cols % 64 == 0, projection.weightsOffset % 2 == 0,
               inputs.allSatisfy({ $0.offset >= 0 && $0.offset % 8 == 0 &&
                   $0.offset <= $0.buffer.length - Int(projection.cols) * 2 }),
@@ -107,30 +92,12 @@ final class GemmaVerifyProjection {
                   $0.offset <= $0.buffer.length - Int(projection.rows) * 2 }) else {
             throw SharedExpertError.dimensionMismatch("Invalid verification projection")
         }
-        let wideBatch = inputs.count > 5
-        let wideHead = useWideHead && inputs.count == 2 && projection.rows == 262144 && projection.cols == 2816
         guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
-        let pipeline = wideBatch ? widePipelines[inputs.count - 6]
-            : (wideHead ? self.wideHead : pipelines[inputs.count - 1])
-        encoder.setComputePipelineState(pipeline)
+        let wide = useWideHead && inputs.count == 2 && projection.rows == 262144 && projection.cols == 2816
+        encoder.setComputePipelineState(wide ? wideHead : pipelines[inputs.count - 1])
         encoder.setBuffer(projection.weights, offset: projection.weightsOffset, index: 0)
         encoder.setBuffer(projection.scales, offset: projection.scalesOffset, index: 1)
         encoder.setBuffer(projection.biases, offset: projection.biasesOffset, index: 2)
-        if wideBatch {
-            for index in 0..<7 {
-                let bound = min(index, inputs.count - 1)
-                encoder.setBuffer(inputs[bound].buffer, offset: inputs[bound].offset, index: 3 + index)
-                encoder.setBuffer(outputs[bound].buffer, offset: outputs[bound].offset, index: 10 + index)
-            }
-            var rows = projection.rows
-            var columns = projection.cols
-            encoder.setBytes(&rows, length: 4, index: 17)
-            encoder.setBytes(&columns, length: 4, index: 18)
-            encoder.dispatchDecode(MTLSize(width: (Int(rows) + 3) / 4, height: 1, depth: 1),
-                threads: MTLSize(width: 128, height: 1, depth: 1), conditional: conditional)
-            encoder.endEncoding()
-            return
-        }
         for index in 0..<5 {
             let bound = min(index, inputs.count - 1)
             encoder.setBuffer(inputs[bound].buffer, offset: inputs[bound].offset, index: 3 + index)
@@ -140,7 +107,7 @@ final class GemmaVerifyProjection {
         var columns = projection.cols
         encoder.setBytes(&rows, length: 4, index: 13)
         encoder.setBytes(&columns, length: 4, index: 14)
-        let rowsPerGroup = wideHead ? 16 : 4
+        let rowsPerGroup = wide ? 16 : 4
         encoder.dispatchDecode(MTLSize(width: (Int(rows) + rowsPerGroup - 1) / rowsPerGroup, height: 1, depth: 1),
                                threads: MTLSize(width: 128, height: 1, depth: 1), conditional: conditional)
         encoder.endEncoding()

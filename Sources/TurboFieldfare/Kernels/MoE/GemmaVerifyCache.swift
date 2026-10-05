@@ -19,7 +19,7 @@ final class GemmaVerifyCache {
             guard let selected = device.makeBuffer(length: selectedLength, options: .storageModeShared),
                   let routes = device.makeBuffer(length: 16 * 4, options: .storageModeShared),
                   let groupedArguments = device.makeBuffer(length: groupedLength, options: .storageModeShared),
-                  let groupedSlots = device.makeBuffer(length: 56 * 7 * 4, options: .storageModeShared) else {
+                  let groupedSlots = device.makeBuffer(length: 40 * 5 * 4, options: .storageModeShared) else {
                 throw MetalError.noDevice
             }
             secondSelected = selected

@@ -2,8 +2,6 @@ import Metal
 
 /// Groups the verification work by expert while keeping each token's route order.
 final class GemmaVerifyMoE {
-    private static let maxTokens = 7
-    private static let maxExperts = 56
     private let gateUp, down, reduce: MTLComputePipelineState
     private let pairGateUp, pairDown: MTLComputePipelineState
     var useStaticPair = true
@@ -30,31 +28,29 @@ final class GemmaVerifyMoE {
             return result
         }
         arguments = try buffer(encoder.encodedLength)
-        slots = try buffer(Self.maxExperts * Self.maxTokens * 4)
-        partials = try (0..<Self.maxTokens).map { _ in try buffer(8 * 2816 * 4) }
+        slots = try buffer(40 * 5 * 4)
+        partials = try (0..<5).map { _ in try buffer(8 * 2816 * 4) }
     }
 
     /// The caller must finish the prior layer before reusing this argument buffer.
     func encode(command: MTLCommandBuffer, rows: [GemmaVerifyRow], experts: [Int],
                 blobs: [MTLBuffer], routes: [[Int]], offsets: MoEExpertOffsets) throws {
-        guard (1...Self.maxTokens).contains(rows.count), rows.count == routes.count,
-              experts.count <= Self.maxExperts, experts.count == blobs.count,
+        guard (1...5).contains(rows.count), rows.count == routes.count,
+              experts.count <= 40, experts.count == blobs.count,
               routes.allSatisfy({ $0.count == 8 && Set($0).count == 8 }) else {
             throw ModelError.indexCorrupt(detail: "Invalid verification routes")
         }
         let indices = Dictionary(uniqueKeysWithValues: experts.enumerated().map { ($0.element, $0.offset) })
         let mapping = slots.contents().assumingMemoryBound(to: UInt32.self)
-        for index in 0..<(Self.maxExperts * Self.maxTokens) { mapping[index] = UInt32.max }
+        for index in 0..<(40 * 5) { mapping[index] = UInt32.max }
         for (token, route) in routes.enumerated() {
             for (slot, expert) in route.enumerated() {
                 guard let index = indices[expert] else { throw ModelError.indexCorrupt(detail: "Missing verification route") }
-                mapping[index * Self.maxTokens + token] = UInt32(slot)
+                mapping[index * 5 + token] = UInt32(slot)
             }
         }
         encoder.setArgumentBuffer(arguments, offset: 0)
-        for index in 0..<Self.maxExperts {
-            encoder.setBuffer(index < blobs.count ? blobs[index] : nil, offset: 0, index: index)
-        }
+        for index in 0..<40 { encoder.setBuffer(index < blobs.count ? blobs[index] : nil, offset: 0, index: index) }
         bindRows(rows, arguments: arguments)
         try dispatch(command: command, rows: rows, arguments: arguments, slots: slots,
             blobs: blobs, heap: nil, expertCount: experts.count, offsets: offsets, conditional: nil)
@@ -70,17 +66,13 @@ final class GemmaVerifyMoE {
     }
 
     private func bindRows(_ rows: [GemmaVerifyRow], arguments: MTLBuffer) {
-        for index in 0..<Self.maxTokens {
+        for index in 0..<5 {
             let row = rows[min(index, rows.count - 1)]
-            encoder.setBuffer(row.routedX, offset: 0, index: Self.maxExperts + index)
-            encoder.setBuffer(row.moeActs, offset: 0,
-                index: Self.maxExperts + Self.maxTokens + index)
-            encoder.setBuffer(row.outWeights, offset: 0,
-                index: Self.maxExperts + Self.maxTokens * 2 + index)
-            encoder.setBuffer(partials[index], offset: 0,
-                index: Self.maxExperts + Self.maxTokens * 3 + index)
-            encoder.setBuffer(row.h2Buf, offset: 0,
-                index: Self.maxExperts + Self.maxTokens * 4 + index)
+            encoder.setBuffer(row.routedX, offset: 0, index: 40 + index)
+            encoder.setBuffer(row.moeActs, offset: 0, index: 45 + index)
+            encoder.setBuffer(row.outWeights, offset: 0, index: 50 + index)
+            encoder.setBuffer(partials[index], offset: 0, index: 55 + index)
+            encoder.setBuffer(row.h2Buf, offset: 0, index: 60 + index)
         }
     }
 
