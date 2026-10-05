@@ -70,7 +70,7 @@ final class GemmaDraftRunner {
         upScratch = try buffer(8192 * 2)
         activationScratch = try buffer(8192 * 2)
         seed = try buffer(4)
-        proposals = try (0..<4).map { _ in try buffer(4) }
+        proposals = try (0..<6).map { _ in try buffer(4) }
         layerScales = (0..<4).map { layer in
             let tensor = weights.tensor("model.layers.\(layer).layer_scalar")
             let bits = weights.buffer.contents().advanced(by: tensor.offset).load(as: UInt16.self)
@@ -79,7 +79,7 @@ final class GemmaDraftRunner {
     }
 
     func draft(after token: Int32, count: Int, using state: Context) throws -> [Int32] {
-        guard (1...4).contains(count), token >= 0, token < 262144,
+        guard (1...6).contains(count), token >= 0, token < 262144,
               state.sliding.count > 0, state.full.count > 0,
               state.hiddenOffset >= 0,
               state.hiddenOffset <= state.normalizedHidden.length,

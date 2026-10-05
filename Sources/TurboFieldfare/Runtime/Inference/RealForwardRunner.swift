@@ -2340,7 +2340,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     func verifyDraft(tokens: [Int32],
                      encodeFirstSample: ((MTLCommandBuffer, MTLBuffer) -> Void)? = nil) async throws -> [MTLBuffer] {
         try prefillChunkState.requireClean(operation: "verifyDraft")
-        guard let kv, (1...5).contains(tokens.count),
+        guard let kv, (1...7).contains(tokens.count),
               cfg.hiddenSize == 2816, cfg.topKExperts == 8, cfg.moeIntermediateSize == 704,
               cfg.numExperts == 128, shared.weightBits == 4,
               (model.routedExpertCacheSlotCount(layer: 0) ?? 0) >= 64,

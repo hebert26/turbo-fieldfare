@@ -4,12 +4,12 @@ using namespace metal;
 constant uint GEMMA_VERIFY_MOE_BATCH [[function_constant(91)]];
 
 struct GemmaVerifyExperts {
-    device const uchar* weights[40];
-    device const half* inputs[5];
-    device half* acts[5];
-    device const half* routing[5];
-    device float* partials[5];
-    device half* outputs[5];
+    device const uchar* weights[56];
+    device const half* inputs[7];
+    device half* acts[7];
+    device const half* routing[7];
+    device float* partials[7];
+    device half* outputs[7];
 };
 
 // Keep adjacent work on the same expert so all input tokens share its cache lines.
@@ -30,7 +30,7 @@ void gemma_verify_expert_gate_up(
         ? GEMMA_VERIFY_MOE_BATCH : tokenCount;
     #pragma unroll
     for (uint token = 0; token < count; ++token) {
-        const uint slot = slots[group.y * 5u + token];
+        const uint slot = slots[group.y * 7u + token];
         if (slot == 0xffffffffu) continue;
         const float2 gu = moe_int4_gate_up_rows_simd_dev_vec_u16load(
             base + offsets.gate_W_off, (device const bfloat*)(base + offsets.gate_s_off),
@@ -59,7 +59,7 @@ void gemma_verify_expert_down(
         ? GEMMA_VERIFY_MOE_BATCH : tokenCount;
     #pragma unroll
     for (uint token = 0; token < count; ++token) {
-        const uint slot = slots[group.y * 5u + token];
+        const uint slot = slots[group.y * 7u + token];
         if (slot == 0xffffffffu) continue;
         const float value = moe_int4_gemv_row_simd_dev_vec(
             base + offsets.down_W_off, (device const bfloat*)(base + offsets.down_s_off),
@@ -119,7 +119,7 @@ kernel void gemma_verify_cache_resolve(
         firstSelected.blob[index] = cache.blob[slots[index]];
         secondSelected.blob[index] = cache.blob[slots[index + 8u]];
     }
-    for (uint index = 0; index < 40u * 5u; ++index) groupedSlots[index] = 0xffffffffu;
+    for (uint index = 0; index < 56u * 7u; ++index) groupedSlots[index] = 0xffffffffu;
     uint unique[16];
     uint count = 0;
     for (uint index = 0; index < 16u; ++index) {
@@ -130,7 +130,7 @@ kernel void gemma_verify_cache_resolve(
             grouped.weights[count] = cache.blob[slots[index]];
             ++count;
         }
-        groupedSlots[group * 5u + index / 8u] = index % 8u;
+        groupedSlots[group * 7u + index / 8u] = index % 8u;
     }
     // Four dense dispatches precede the grouped expert work.
     dispatches[firstTail + 4u].y = count;

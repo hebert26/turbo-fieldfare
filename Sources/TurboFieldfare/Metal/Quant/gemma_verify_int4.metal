@@ -1,7 +1,9 @@
 #include <metal_stdlib>
+#include <metal_simdgroup_matrix>
 using namespace metal;
 
 constant uint GEMMA_VERIFY_BATCH [[function_constant(90)]];
+constant uint GEMMA_VERIFY_MMA_SPLITS [[function_constant(92)]];
 
 // Reuse each packed weight across the proposed tokens.
 // Each token keeps the normal decode order of sums and multiply-adds.
@@ -80,6 +82,125 @@ void gemma_verify_int4(
     for (uint token = 0; token < GEMMA_VERIFY_BATCH; ++token) {
         const float value = simd_sum(acc[token]);
         if (lane == 0) outputs[token][row] = half(value);
+    }
+}
+
+// Verify six or seven tokens as one small matrix multiply. Each simdgroup
+// handles one slice of K. The final threads add those slices.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void gemma_verify_int4_mma(
+    device const uchar* weights [[buffer(0)]],
+    device const bfloat* scales [[buffer(1)]],
+    device const bfloat* biases [[buffer(2)]],
+    device const half* x0 [[buffer(3)]],
+    device const half* x1 [[buffer(4)]],
+    device const half* x2 [[buffer(5)]],
+    device const half* x3 [[buffer(6)]],
+    device const half* x4 [[buffer(7)]],
+    device const half* x5 [[buffer(8)]],
+    device const half* x6 [[buffer(9)]],
+    device half* y0 [[buffer(10)]],
+    device half* y1 [[buffer(11)]],
+    device half* y2 [[buffer(12)]],
+    device half* y3 [[buffer(13)]],
+    device half* y4 [[buffer(14)]],
+    device half* y5 [[buffer(15)]],
+    device half* y6 [[buffer(16)]],
+    constant uint& rows [[buffer(17)]],
+    constant uint& columns [[buffer(18)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint simd [[simdgroup_index_in_threadgroup]],
+    uint lane [[thread_index_in_simdgroup]])
+{
+    const uint outputBase = group * 8u;
+    threadgroup half weightTiles[8u * 512u];
+    threadgroup half inputTiles[8u * 64u];
+    threadgroup float partials[8u * 64u];
+    device const half* inputs[7] = {x0, x1, x2, x3, x4, x5, x6};
+    device half* outputs[7] = {y0, y1, y2, y3, y4, y5, y6};
+
+    if (simd < GEMMA_VERIFY_MMA_SPLITS) {
+        simdgroup_matrix<float, 8, 8> accumulator(0.0f);
+        threadgroup half* weightTile = weightTiles + simd * 512u;
+        threadgroup half* inputTile = inputTiles + simd * 64u;
+        const uint quantGroups = columns / 64u;
+        const uint groupsPerSplit = quantGroups / GEMMA_VERIFY_MMA_SPLITS;
+        const uint firstGroup = simd * groupsPerSplit;
+
+        for (uint localGroup = 0; localGroup < groupsPerSplit; ++localGroup) {
+            const uint quantGroup = firstGroup + localGroup;
+            const uint columnBase = quantGroup * 64u;
+            const uint outputInTile = lane & 7u;
+            const uint inputQuarter = lane >> 3u;
+            const uint outputRow = outputBase + outputInTile;
+
+            if (outputRow < rows) {
+                const uint scaleIndex = outputRow * quantGroups + quantGroup;
+                const float scale = float(scales[scaleIndex]);
+                const float bias = float(biases[scaleIndex]);
+                device const uint* packed =
+                    (device const uint*)(weights + outputRow * (columns / 2u))
+                    + columnBase / 8u + inputQuarter * 2u;
+                const uint first = packed[0];
+                const uint second = packed[1];
+                #pragma unroll
+                for (uint element = 0; element < 8u; ++element) {
+                    weightTile[(inputQuarter * 16u + element) * 8u + outputInTile] =
+                        half(float((first >> (element * 4u)) & 15u) * scale + bias);
+                    weightTile[(inputQuarter * 16u + 8u + element) * 8u + outputInTile] =
+                        half(float((second >> (element * 4u)) & 15u) * scale + bias);
+                }
+            } else {
+                #pragma unroll
+                for (uint element = 0; element < 16u; ++element) {
+                    weightTile[(inputQuarter * 16u + element) * 8u + outputInTile] = half(0.0f);
+                }
+            }
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+
+            #pragma unroll
+            for (uint inner = 0; inner < 8u; ++inner) {
+                const uint firstElement = lane;
+                const uint firstToken = firstElement >> 3u;
+                const uint firstColumn = firstElement & 7u;
+                inputTile[firstElement] = firstToken < GEMMA_VERIFY_BATCH
+                    ? inputs[firstToken][columnBase + inner * 8u + firstColumn]
+                    : half(0.0f);
+                const uint secondElement = lane + 32u;
+                const uint secondToken = secondElement >> 3u;
+                const uint secondColumn = secondElement & 7u;
+                inputTile[secondElement] = secondToken < GEMMA_VERIFY_BATCH
+                    ? inputs[secondToken][columnBase + inner * 8u + secondColumn]
+                    : half(0.0f);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+
+                simdgroup_matrix<half, 8, 8> inputMatrix;
+                simdgroup_matrix<half, 8, 8> weightMatrix;
+                simdgroup_load(inputMatrix, inputTile, 8u);
+                simdgroup_load(weightMatrix, weightTile + inner * 64u, 8u);
+                simdgroup_multiply_accumulate(
+                    accumulator, inputMatrix, weightMatrix, accumulator);
+                simdgroup_barrier(mem_flags::mem_threadgroup);
+            }
+        }
+        simdgroup_store(accumulator, partials + simd * 64u, 8u);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    const uint threadIndex = simd * 32u + lane;
+    for (uint element = threadIndex; element < 64u;
+         element += GEMMA_VERIFY_MMA_SPLITS * 32u) {
+        const uint token = element >> 3u;
+        const uint outputInTile = element & 7u;
+        const uint outputRow = outputBase + outputInTile;
+        if (token < GEMMA_VERIFY_BATCH && outputRow < rows) {
+            float value = 0.0f;
+            #pragma unroll
+            for (uint split = 0; split < GEMMA_VERIFY_MMA_SPLITS; ++split) {
+                value += partials[split * 64u + element];
+            }
+            outputs[token][outputRow] = half(value);
+        }
     }
 }
 
