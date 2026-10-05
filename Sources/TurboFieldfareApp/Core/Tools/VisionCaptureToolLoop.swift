@@ -2938,7 +2938,7 @@ actor VisionCaptureToolLoop {
             }
             body["observation_outcome"] = .string("succeeded")
             body["instruction"] = .string(
-                "The image was captured before the current accessibility read. Choices and positions come from that read and any following cache validation; visual agreement is unverified. Use only these new target IDs. If the image and facts disagree or the target remains ambiguous, report the uncertainty. Do not guess a target or retry refused input.")
+                "The image was captured before the current accessibility read. Choices and positions come from that read and any following cache validation; visual agreement is unverified. Use only these new target IDs. If a choice label matches a visible control but its position does not, do not use that target ID; use an offered visual click at the visible control. If the target remains ambiguous, report the uncertainty. Do not guess a target or retry refused input.")
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -4148,6 +4148,7 @@ actor VisionCaptureToolLoop {
         - Use relevant content already on screen rather than reopening its section.
         - If a current choice advances an unfinished check, act before requesting another screen read.
         - When current_image_evidence is true, match unlabeled choices to visible controls by position. A missing label alone does not require another observation.
+        - Compare each choice position with the visible control. If a matching label points somewhere else in the screenshot, do not use that target ID. Use computer_use_click at the visible control instead.
         - When current_image_evidence is true, tap_coordinates and computer_use_click may use a visible control's normalized screenshot position. Use computer_use_click when native pointer evidence is useful.
         - If the screenshot shows the software keyboard and the intended field is already focused, type may omit target.
         - If a needed control requires_screenshot, take a screenshot first.
