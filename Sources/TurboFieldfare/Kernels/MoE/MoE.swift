@@ -60,6 +60,7 @@ final class MoE {
     private let phase2ReduceK8PSO: MTLComputePipelineState
     private let phase2ReduceK8SpecializedPSO: MTLComputePipelineState
     private let routedArgEncoder: MTLArgumentEncoder
+    var routedArgumentLength: Int { routedArgEncoder.encodedLength }
     private let reusableRoutedArgBuffer: MTLBuffer
 
     init(context: MetalContext) throws {
@@ -117,7 +118,9 @@ final class MoE {
                                    outWeights: MTLBuffer,
                                    numExperts: UInt32,
                                    d: UInt32,
-                                   topK: UInt32) {
+                                   topK: UInt32,
+                                   conditional: DecodeDispatch? = nil,
+                                   cacheSelection: GPUExpertCache.Selection? = nil) {
         precondition(d.isMultiple(of: UInt32(Quantization.groupSize)))
         precondition(numExperts <= 256)
         precondition(topK == UInt32(Self.maxStreamedExperts))
@@ -137,13 +140,20 @@ final class MoE {
             encoder.setBuffer(routerLogits, offset: 0, index: 5)
             encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
             encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 7)
-            encoder.dispatchThreadgroups(
+            encoder.dispatchDecode(
                 MTLSize(width: (Int(numExperts) + 3) / 4, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 128, height: 1, depth: 1))
+                threads: MTLSize(width: 128, height: 1, depth: 1),
+                conditional: conditional)
             encoder.endEncoding()
         }
 
-        if let encoder = commandBuffer.makeComputeCommandEncoder() {
+        if let cacheSelection {
+            precondition(useSpecialized && conditional != nil)
+            cacheSelection.encode(commandBuffer: commandBuffer, logits: routerLogits,
+                                  perExpertScale: perExpertScale,
+                                  perExpertScaleOffset: perExpertScaleOffset,
+                                  outIndices: outIndices, outWeights: outWeights)
+        } else if let encoder = commandBuffer.makeComputeCommandEncoder() {
             encoder.setComputePipelineState(
                 useSpecialized ? routerSelectK8SpecializedPSO : routerSelectK8PSO)
             encoder.setBuffer(routerLogits, offset: 0, index: 0)
@@ -151,9 +161,10 @@ final class MoE {
             encoder.setBuffer(outIndices, offset: 0, index: 2)
             encoder.setBuffer(outWeights, offset: 0, index: 3)
             encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 4)
-            encoder.dispatchThreadgroups(
+            encoder.dispatchDecode(
                 MTLSize(width: 1, height: 1, depth: 1),
-                threadsPerThreadgroup: MTLSize(width: 32, height: 1, depth: 1))
+                threads: MTLSize(width: 32, height: 1, depth: 1),
+                conditional: conditional)
             encoder.endEncoding()
         }
     }
@@ -186,9 +197,12 @@ final class MoE {
         acts: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        conditional: DecodeDispatch? = nil,
+        routedHeap: MTLHeap? = nil
     ) {
-        validate(routedBlobs: routedBlobs, topK: topK)
+        if conditional == nil { validate(routedBlobs: routedBlobs, topK: topK) }
+        else { precondition(topK == 8 && routedBlobs.count <= 128) }
         var dimension = d
         var intermediate = f
         var expertCount = topK
@@ -198,7 +212,8 @@ final class MoE {
                 ? phase1U16SpecializedPSO
                 : phase1U16PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
-        for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
+        if let routedHeap { encoder.useHeap(routedHeap) }
+        else { for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) } }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(x, offset: 0, index: 2)
@@ -206,9 +221,10 @@ final class MoE {
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 4)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 5)
         encoder.setBytes(&expertCount, length: MemoryLayout<UInt32>.stride, index: 6)
-        encoder.dispatchThreadgroups(
+        encoder.dispatchDecode(
             MTLSize(width: (Int(topK * f) + 7) / 8, height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            threads: MTLSize(width: 256, height: 1, depth: 1),
+            conditional: conditional)
         encoder.endEncoding()
     }
 
@@ -268,9 +284,12 @@ final class MoE {
         y: MTLBuffer,
         d: UInt32,
         f: UInt32,
-        topK: UInt32
+        topK: UInt32,
+        conditional: DecodeDispatch? = nil,
+        routedHeap: MTLHeap? = nil
     ) {
-        validate(routedBlobs: routedBlobs, topK: topK)
+        if conditional == nil { validate(routedBlobs: routedBlobs, topK: topK) }
+        else { precondition(topK == 8 && routedBlobs.count <= 128) }
         var dimension = d
         var intermediate = f
         guard let encoder = commandBuffer.makeComputeCommandEncoder() else { return }
@@ -279,7 +298,8 @@ final class MoE {
                 ? phase2ReduceK8SpecializedPSO
                 : phase2ReduceK8PSO)
         encoder.setBuffer(routedArgBuffer, offset: 0, index: 0)
-        for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) }
+        if let routedHeap { encoder.useHeap(routedHeap) }
+        else { for buffer in routedBlobs { encoder.useResource(buffer, usage: .read) } }
         var offsets = routedOffsets
         encoder.setBytes(&offsets, length: MemoryLayout<MoEExpertOffsets>.stride, index: 1)
         encoder.setBuffer(acts, offset: 0, index: 2)
@@ -288,9 +308,10 @@ final class MoE {
         encoder.setBuffer(y, offset: 0, index: 5)
         encoder.setBytes(&dimension, length: MemoryLayout<UInt32>.stride, index: 6)
         encoder.setBytes(&intermediate, length: MemoryLayout<UInt32>.stride, index: 7)
-        encoder.dispatchThreadgroups(
+        encoder.dispatchDecode(
             MTLSize(width: Int(d), height: 1, depth: 1),
-            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+            threads: MTLSize(width: 256, height: 1, depth: 1),
+            conditional: conditional)
         encoder.endEncoding()
     }
 

@@ -56,7 +56,8 @@ final class FusedQKVEpilogue {
                        position: UInt32,
                        theta: Float,
                        rotatedPairs: UInt32,
-                       eps: Float) {
+                       eps: Float,
+                       conditional: DecodeDispatch? = nil) {
         precondition(headDim <= 512,
                      "headDim > 512 exceeds the fused QKV epilogue scratch")
         precondition(rotatedPairs * 2 <= headDim,
@@ -89,8 +90,9 @@ final class FusedQKVEpilogue {
 
         let threads = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
         let groups = Int(numQHeads + 2 * numKVHeads)
-        enc.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        enc.dispatchDecode(MTLSize(width: groups, height: 1, depth: 1),
+                                 threads: MTLSize(width: threads, height: 1, depth: 1),
+                                 conditional: conditional)
         enc.endEncoding()
     }
 }

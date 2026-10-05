@@ -4,6 +4,7 @@ import Metal
 /// The hot path writes one token ID without materializing vocab-sized logits.
 final class LMHeadChainInt4 {
     static let rowsPerThreadgroup = 8
+    private static let rowThreadsPerThreadgroup = 64
 
     private static let rowSummaryStride = 2
     private static let realDecodeD: UInt32 = 2816
@@ -27,10 +28,14 @@ final class LMHeadChainInt4 {
          maxD: Int = 2816,
          maxVocab: Int = 262144) throws {
         self.rms = try RMSNorm(context: context)
-        self.rowGreedy = try context.pipeline("lm_head_greedy_int4_rows_chunk_raw")
+        self.rowGreedy = try context.pipeline(
+            "lm_head_greedy_int4_rows_chunk_raw",
+            constants: [],
+            maxTotalThreadsPerThreadgroup: Self.rowThreadsPerThreadgroup)
         self.rowGreedySpecialized = try context.pipeline(
             "lm_head_greedy_int4_rows_chunk_raw",
-            constants: Self.realDecodeHeadConstants)
+            constants: Self.realDecodeHeadConstants,
+            maxTotalThreadsPerThreadgroup: Self.rowThreadsPerThreadgroup)
         self.rowReducer = try context.pipeline("lm_head_greedy_int4_rows_reduce")
         self.maxD = maxD
         self.maxVocab = maxVocab
@@ -99,7 +104,7 @@ final class LMHeadChainInt4 {
             encoder.setBytes(&vocabValue, length: MemoryLayout<UInt32>.size, index: 6)
 
             let threadgroupSize = MTLSize(
-                width: 32 * Self.rowsPerThreadgroup,
+                width: Self.rowThreadsPerThreadgroup,
                 height: 1,
                 depth: 1)
             encoder.dispatchThreadgroups(

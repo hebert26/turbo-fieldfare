@@ -48,11 +48,8 @@ inline float int8_gelu_pytorch_tanh(float x) {
 
 // y[m] = sum_{n} W[m, n] * x[n]. One-SIMD-per-row variant: 32 threads
 // cooperate on a single output row, each handling 2 elements per group of 64.
-// Mirror of `dequant_int4_gemv_simd` but with one byte per element (no nibble
-// unpack). Dispatch: threadgroupsPerGrid=(M,1,1), threadsPerThreadgroup=(32,1,1).
-// See `dequant_int4_gemv_simd` for the multi-row-per-TG rationale; same trick
-// applied here so the M=2112/2816 shared MLP GEMVs and the M=262144 lm_head
-// stay in the GPU's preferred 256-thread/TG zone.
+// Each threadgroup has 256 threads and computes eight output rows.
+// Each weight uses one byte.
 [[kernel, max_total_threads_per_threadgroup(256)]]
 kernel void dequant_int8_gemv_simd(
     device const uint8_t* W      [[buffer(0)]],

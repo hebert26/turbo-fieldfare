@@ -36,7 +36,8 @@ final class FusedPostAttentionSetup {
                        preFFN2Weight: MTLBuffer,
                        preFFN2WeightOffset: Int = 0,
                        d: UInt32,
-                       eps: Float) {
+                       eps: Float,
+                       conditional: DecodeDispatch? = nil) {
         precondition(d <= 4096,
                      "D > 4096 exceeds the fused post-attention setup scratch")
         guard let enc = cb.makeComputeCommandEncoder() else { return }
@@ -55,8 +56,9 @@ final class FusedPostAttentionSetup {
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size, index: 9)
 
         let threads = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
-        enc.dispatchThreads(MTLSize(width: threads, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        enc.dispatchDecode(MTLSize(width: 1, height: 1, depth: 1),
+                           threads: MTLSize(width: threads, height: 1, depth: 1),
+                           conditional: conditional)
         enc.endEncoding()
     }
 }

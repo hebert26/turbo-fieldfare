@@ -3388,7 +3388,12 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
             rdadviseCallsPerToken: value.rdadviseCallsPerToken,
             rdadviseMegabytesPerToken: value.rdadviseMegabytesPerToken,
             rdadviseSkippedPerToken: value.rdadviseSkippedPerToken,
-            rdadviseFailures: value.rdadviseFailures)
+            rdadviseFailures: value.rdadviseFailures,
+            gpuExpertCacheEligibleForwards: value.gpuExpertCacheEligibleForwards ?? 0,
+            gpuExpertCacheBatches: value.gpuExpertCacheBatches ?? 0,
+            gpuExpertCacheHitExperts: value.gpuExpertCacheHitExperts ?? 0,
+            gpuExpertCacheFirstMisses: value.gpuExpertCacheFirstMisses ?? 0,
+            gpuExpertCacheCPUFallbackLayers: value.gpuExpertCacheCPUFallbackLayers ?? 0)
     }
 
     private static func decodeRuntimeOptions(_ options: AppRuntimeOptions)

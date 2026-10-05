@@ -10,6 +10,7 @@ final class FusedQKVGEMV {
 
     private let pso: MTLComputePipelineState
     private let specializedPSOs: [Shape: MTLComputePipelineState]
+    private static let threadsPerThreadgroup = 64
 
     private static let realDecodeShapes: [Shape] = [
         Shape(qRows: 4096, kvRows: 2048, n: 2816),
@@ -19,7 +20,7 @@ final class FusedQKVGEMV {
     init(context: MetalContext) throws {
         self.pso = try context.pipeline("dequant_int4_qkv_gemv_simd",
                                         constants: [],
-                                        maxTotalThreadsPerThreadgroup: 512)
+                                        maxTotalThreadsPerThreadgroup: Self.threadsPerThreadgroup)
         var variants: [Shape: MTLComputePipelineState] = [:]
         for shape in Self.realDecodeShapes {
             variants[shape] = try context.pipeline(
@@ -30,7 +31,7 @@ final class FusedQKVGEMV {
                     MetalFunctionConstant(index: 25, value: .uint32(shape.n)),
                     MetalFunctionConstant(index: 26, value: .bool(true)),
                 ],
-                maxTotalThreadsPerThreadgroup: 512)
+                maxTotalThreadsPerThreadgroup: Self.threadsPerThreadgroup)
         }
         self.specializedPSOs = variants
     }
@@ -51,7 +52,8 @@ final class FusedQKVGEMV {
                        vOut: MTLBuffer, vOutOffset: Int = 0,
                        qRows: UInt32,
                        kvRows: UInt32,
-                       n: UInt32) {
+                       n: UInt32,
+                       conditional: DecodeDispatch? = nil) {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         precondition(qWeightsOffset % 2 == 0 &&
@@ -80,13 +82,15 @@ final class FusedQKVGEMV {
         enc.setBytes(&qVar, length: MemoryLayout<UInt32>.size, index: 13)
         enc.setBytes(&kvVar, length: MemoryLayout<UInt32>.size, index: 14)
         enc.setBytes(&nVar, length: MemoryLayout<UInt32>.size, index: 15)
-        let totalRows = Int(qRows + 2 * kvRows)
-        enc.dispatchThreadgroups(MTLSize(width: (totalRows + 7) / 8,
+        // Each projection keeps its own final group of up to four rows.
+        let rowGroups = (Int(qRows) + 3) / 4 + 2 * ((Int(kvRows) + 3) / 4)
+        enc.dispatchDecode(MTLSize(width: (rowGroups + 1) / 2,
                                          height: 1,
                                          depth: 1),
-                                 threadsPerThreadgroup: MTLSize(width: 256,
+                                 threads: MTLSize(width: Self.threadsPerThreadgroup,
                                                                  height: 1,
-                                                                 depth: 1))
+                                                                 depth: 1),
+                                 conditional: conditional)
         enc.endEncoding()
     }
 }

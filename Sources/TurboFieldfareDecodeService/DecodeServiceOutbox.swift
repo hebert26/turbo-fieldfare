@@ -394,6 +394,11 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             rdadviseCallsPerToken: value.rdadviseCallsPerToken,
             rdadviseMegabytesPerToken: value.rdadviseMegabytesPerToken,
             rdadviseSkippedPerToken: value.rdadviseSkippedPerToken,
-            rdadviseFailures: value.rdadviseFailures)
+            rdadviseFailures: value.rdadviseFailures,
+            gpuExpertCacheEligibleForwards: value.gpuExpertCacheEligibleForwards,
+            gpuExpertCacheBatches: value.gpuExpertCacheBatches,
+            gpuExpertCacheHitExperts: value.gpuExpertCacheHitExperts,
+            gpuExpertCacheFirstMisses: value.gpuExpertCacheFirstMisses,
+            gpuExpertCacheCPUFallbackLayers: value.gpuExpertCacheCPUFallbackLayers)
     }
 }

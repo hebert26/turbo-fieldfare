@@ -37,7 +37,8 @@ struct LiveGenerationPreviewText: NSViewRepresentable {
             width: contentSize.width,
             height: CGFloat.greatestFiniteMagnitude)
         view.textContainer?.lineFragmentPadding = 0
-        view.layoutManager?.allowsNonContiguousLayout = true
+        // This short preview must finish layout before its height changes.
+        view.layoutManager?.allowsNonContiguousLayout = false
         view.isAutomaticLinkDetectionEnabled = false
         view.isAutomaticDataDetectionEnabled = false
         view.setAccessibilityIdentifier(accessibilityID)

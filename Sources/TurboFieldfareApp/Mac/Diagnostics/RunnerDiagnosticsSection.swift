@@ -119,6 +119,15 @@ private struct AdvancedRunnerDiagnosticsView: View {
                 .help("CPU time waiting for each layer's router results, including queued prior-layer work. Excludes the final routed drain and does not identify individual GPU kernel time.")
             DiagnosticRow("cb2 / token", MetricFormat.milliseconds(runner.cb2MillisecondsPerToken))
             DiagnosticRow("Head / token", MetricFormat.milliseconds(runner.headMillisecondsPerToken))
+            if runner.gpuExpertCacheEligibleForwards > 0 {
+                DiagnosticRow("GPU expert cache",
+                              "\(runner.gpuExpertCacheEligibleForwards) eligible forwards · "
+                                + "\(runner.gpuExpertCacheBatches) batches · "
+                                + "\(runner.gpuExpertCacheHitExperts) GPU expert hits · "
+                                + "\(runner.gpuExpertCacheFirstMisses) first misses · "
+                                + "\(runner.gpuExpertCacheCPUFallbackLayers) CPU layers",
+                              multiline: true)
+            }
             if hasRDAdviceActivity {
                 DiagnosticRow("RDADVISE / token",
                               MetricFormat.milliseconds(runner.rdadviseMillisecondsPerToken))

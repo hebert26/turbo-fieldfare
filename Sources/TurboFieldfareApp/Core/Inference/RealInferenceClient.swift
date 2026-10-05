@@ -306,7 +306,7 @@ public final class RealInferenceClient: AppModelLifecycleClient, @unchecked Send
                 continuation.finish(throwing: AppInferenceError.generationInFlight)
                 return
             }
-            let task = Task { [self] in
+            let task = Task(priority: .userInitiated) { [self] in
                 defer { generationStop?.finish() }
                 let activateStop: (@Sendable () -> Void)?
                 if let generationStop {
@@ -2485,6 +2485,9 @@ actor RealInferenceSession {
             guard let runner, let tokenizer, let ctx, let scratch else {
                 throw AppInferenceError.modelLoadFailed("session lost its loaded state")
             }
+            let activity = ProcessInfo.processInfo.beginActivity(
+                options: [.userInitiated, .latencyCritical], reason: "Generate a Gemma answer")
+            defer { ProcessInfo.processInfo.endActivity(activity) }
             runner.captureGPUCompletionTiming = request.captureGPUCompletionTiming
             defer { runner.captureGPUCompletionTiming = false }
             if let measurementCapture {
@@ -2758,7 +2761,12 @@ actor RealInferenceSession {
             rdadviseCallsPerToken: Double(now.rdadviseCalls &- base.rdadviseCalls) / forwards,
             rdadviseMegabytesPerToken: Double(now.rdadviseBytes &- base.rdadviseBytes) / 1_048_576.0 / forwards,
             rdadviseSkippedPerToken: Double(now.rdadviseSkipped &- base.rdadviseSkipped) / forwards,
-            rdadviseFailures: now.rdadviseFailures &- base.rdadviseFailures)
+            rdadviseFailures: now.rdadviseFailures &- base.rdadviseFailures,
+            gpuExpertCacheEligibleForwards: now.gpuExpertCacheEligibleForwards &- base.gpuExpertCacheEligibleForwards,
+            gpuExpertCacheBatches: now.gpuExpertCacheBatches &- base.gpuExpertCacheBatches,
+            gpuExpertCacheHitExperts: now.gpuExpertCacheHitExperts &- base.gpuExpertCacheHitExperts,
+            gpuExpertCacheFirstMisses: now.gpuExpertCacheFirstMisses &- base.gpuExpertCacheFirstMisses,
+            gpuExpertCacheCPUFallbackLayers: now.gpuExpertCacheCPUFallbackLayers &- base.gpuExpertCacheCPUFallbackLayers)
     }
 
     private static func stopReason(_ reason: StopReason) -> AppStopReason {
@@ -2838,6 +2846,11 @@ private struct RunnerCounterSnapshot {
     let rdadviseBytes: UInt64
     let rdadviseFailures: UInt64
     let rdadviseSkipped: UInt64
+    let gpuExpertCacheEligibleForwards: UInt64
+    let gpuExpertCacheBatches: UInt64
+    let gpuExpertCacheHitExperts: UInt64
+    let gpuExpertCacheFirstMisses: UInt64
+    let gpuExpertCacheCPUFallbackLayers: UInt64
 
     init(_ runner: RealForwardRunner) {
         gpuCompletionEnabled = runner.captureGPUCompletionTiming
@@ -2856,5 +2869,10 @@ private struct RunnerCounterSnapshot {
         rdadviseBytes = runner.totalRDAdviseBytes
         rdadviseFailures = runner.totalRDAdviseFailures
         rdadviseSkipped = runner.totalRDAdviseSkipped
+        gpuExpertCacheEligibleForwards = runner.totalGPUExpertCacheEligibleForwards
+        gpuExpertCacheBatches = runner.totalGPUExpertCacheBatches
+        gpuExpertCacheHitExperts = runner.totalGPUExpertCacheHitExperts
+        gpuExpertCacheFirstMisses = runner.totalGPUExpertCacheFirstMisses
+        gpuExpertCacheCPUFallbackLayers = runner.totalGPUExpertCacheCPUFallbackLayers
     }
 }

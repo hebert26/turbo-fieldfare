@@ -150,6 +150,22 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     private let attention: Attention
     private let shared: SharedExpertRuntime
     private let moe: MoE
+    private var gpuExpertCache: GPUExpertCache?
+    private var draftHiddenSource: (buffer: MTLBuffer, offset: Int, position: Int, normalized: Bool)?
+    private var draftNormalizedHidden: MTLBuffer?
+    var captureVerificationGPUTime = false
+    var enableVerificationGPUCache = false
+    private(set) var lastVerificationGPUTime = GemmaVerificationGPUTime()
+    private var draftVerifyCache: GemmaVerifyCache?
+    private var draftVerifyFusions: GemmaVerifyFusions?
+    private var configuredDraftRunner: GemmaDraftRunner?
+    public var usesGemmaDraft: Bool { configuredDraftRunner != nil && supportsGemmaDraft }
+    private(set) var lastVerificationCachedLayers = 0
+    private(set) var lastVerificationCacheMisses = 0
+    private var draftVerifyMoE: GemmaVerifyMoE?
+    private var draftVerifyProjection: GemmaVerifyProjection?
+    private var draftVerifyRows: [GemmaVerifyRow] = []
+    private var pendingDraftVerification: (start: Int, count: Int)?
     private let fusionHead: LMHeadChainInt4
     private let fusedQKVGEMV: FusedQKVGEMV
     private let fusedQKVEpilogue: FusedQKVEpilogue
@@ -378,6 +394,44 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             perLayer.append(buf)
         }
         self.effectiveScaleBuffers = perLayer
+        if runtimeConfiguration.gemmaDraftEnabled, supportsGemmaDraft {
+            let directory = model.directoryURL.resolvingSymlinksInPath()
+                .deletingPathExtension().appendingPathExtension("draft.gturbo")
+            if FileManager.default.fileExists(atPath: directory.appendingPathComponent("manifest.json").path) {
+                try configureGemmaDraft(directory: directory)
+            }
+        }
+    }
+
+    private var supportsGemmaDraft: Bool {
+        !useFusedGreedyHead && !rdadviseEnabled && model.measurementCapture == nil
+            && cfg.hiddenSize == 2816 && cfg.vocabSize == 262144 && cfg.numLayers == 30
+            && cfg.topKExperts == 8 && cfg.numExperts == 128 && cfg.moeIntermediateSize == 704
+            && shared.weightBits == 4 && model.routedExpertCacheSlotCount(layer: 0) == 64
+            && ProcessInfo.processInfo.physicalMemory >= 32 * 1_024 * 1_024 * 1_024
+    }
+
+    func configureGemmaDraft(directory: URL?) throws {
+        guard let directory else {
+            releaseGemmaResidency()
+            configuredDraftRunner = nil
+            return
+        }
+        guard supportsGemmaDraft else {
+            throw PrefillError.chunkedUnsupported("This runtime cannot use the Gemma draft model")
+        }
+        let weights = try GemmaDraftWeights(directory: directory, device: ctx.device)
+        let draftRunner = try GemmaDraftRunner(context: ctx, weights: weights)
+        try prepareDraftVerification(rowCount: 2)
+        releaseGemmaResidency()
+        configuredDraftRunner = draftRunner
+    }
+
+    func proposeDraft(after token: Int32, count: Int) throws -> [Int32] {
+        guard let configuredDraftRunner else {
+            throw PrefillError.chunkedUnsupported("No Gemma draft model is loaded")
+        }
+        return try configuredDraftRunner.draft(after: token, count: count, using: makeDraftContext())
     }
 
     public func reset() {
@@ -420,6 +474,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     }
 
     private func resetTransientState() {
+        draftHiddenSource = nil
+        pendingDraftVerification = nil
         prefillChunkState.reset()
         rdadviseSkipUntilPosition = -1
         rdadviseAdaptiveState.reset()
@@ -432,6 +488,11 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
     /// CPU time blocked for router results, including queued prior-layer work.
     /// Excludes the final routed drain and is not individual GPU kernel time.
     public private(set) var totalRouterWaitNanos: UInt64 = 0
+    public private(set) var totalGPUExpertCacheEligibleForwards: UInt64 = 0
+    public private(set) var totalGPUExpertCacheBatches: UInt64 = 0
+    public private(set) var totalGPUExpertCacheHitExperts: UInt64 = 0
+    public private(set) var totalGPUExpertCacheFirstMisses: UInt64 = 0
+    public private(set) var totalGPUExpertCacheCPUFallbackLayers: UInt64 = 0
     /// Opt-in diagnostic only. Reading timestamps never changes command scheduling.
     public var captureGPUCompletionTiming = false
     public struct GPUCompletionTiming: Sendable {
@@ -923,6 +984,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                               bytesPerToken: bytesPerToken)
         }
 
+        draftHiddenSource = nil
+        pendingDraftVerification = nil
         prefillChunkState.markDirty(startPosition: startPosition, tokenCount: tokens.count)
 
         guard var cb = ctx.queue.makeCommandBuffer() else {
@@ -1475,6 +1538,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         kv?.advance(by: tokens.count)
+        draftHiddenSource = (scratch.hidden, (t - 1) * D * MemoryLayout<Float16>.stride,
+                             startPosition + tokens.count, false)
         prefillChunkState.markCommitted()
     }
 
@@ -1500,6 +1565,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             throw PrefillError.prefillCursorMismatch(
                 "produce position \(position) exceeds maxContext \(maxContext)")
         }
+        draftHiddenSource = nil
+        pendingDraftVerification = nil
         let D    = UInt32(cfg.hiddenSize)
         let FmoE = UInt32(cfg.moeIntermediateSize)
         let eps: Float = 1e-6
@@ -1532,6 +1599,35 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             let encodeAndCommitNanos: UInt64
         }
         var pendingRoutedCommand: PendingRoutedCommand?
+
+        // Small-cache and measured runs keep the existing execution path.
+        let useGPUCache = emitHead && measurementCapture == nil
+            && !captureGPUCompletionTiming && !rdadviseEnabled
+            && shared.weightBits == 4 && cfg.hiddenSize == 2816
+            && cfg.moeIntermediateSize == 704 && cfg.numExperts == 128
+            && cfg.topKExperts == 8
+            && model.routedExpertCacheSlotCount(layer: 0) == 64
+            && ProcessInfo.processInfo.physicalMemory >= 32 * 1_024 * 1_024 * 1_024
+            && ctx.device.argumentBuffersSupport == .tier2
+        if useGPUCache { totalGPUExpertCacheEligibleForwards &+= 1 }
+        if useGPUCache && gpuExpertCache == nil {
+            gpuExpertCache = try GPUExpertCache(context: ctx,
+                                                selectedLength: moe.routedArgumentLength)
+        }
+        var batchLeases: [PreadExpertStreamer.GPUReadLease] = []
+        var batchCB: MTLCommandBuffer?
+        var batchStart = 0
+        var batchEncodeNanos: UInt64 = 0
+        var resumeExpertLayer: Int?
+        defer {
+            // A thrown error must not leave a writer using shared scratch.
+            if let pending = pendingRoutedCommand {
+                if let cb = pending.sharedCB { waitUntilCompleted(cb) }
+                if let cb = pending.phase1HitCB { waitUntilCompleted(cb) }
+                waitUntilCompleted(pending.cb)
+            }
+            for lease in batchLeases { lease.release() }
+        }
 
         func finishPendingRoutedCommand(_ pending: PendingRoutedCommand,
                                         waitIfNeeded: Bool) throws {
@@ -1586,7 +1682,33 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             }
         }
 
-        for L in 0..<cfg.numLayers {
+        var L = 0
+        while L < cfg.numLayers {
+            if useGPUCache, batchCB == nil, resumeExpertLayer == nil,
+               UInt64(ctx.device.currentAllocatedSize) <= ctx.device.recommendedMaxWorkingSetSize,
+               let cache = gpuExpertCache {
+                batchLeases = model.beginGPUExpertReads(
+                    startLayer: L, maxLayers: GPUExpertCache.maxLayers,
+                    byteLimit: GPUExpertCache.maxBatchBytes)
+                if !batchLeases.isEmpty {
+                    guard let commandBuffer = ctx.queue.makeCommandBuffer() else {
+                        throw MetalError.noQueue
+                    }
+                    batchCB = commandBuffer
+                    batchStart = L
+                    batchEncodeNanos = 0
+                    cache.reset()
+                    for (index, lease) in batchLeases.enumerated() {
+                        cache.layers[index].prepare(lease)
+                    }
+                }
+            }
+            let batchIndex = L - batchStart
+            let conditional = batchCB == nil ? nil
+                : gpuExpertCache?.layers[batchIndex].dispatch
+            let cacheSelection = batchCB == nil ? nil
+                : gpuExpertCache?.selection(index: batchIndex,
+                                           slotCount: batchLeases[batchIndex].buffers.count)
             let isFull = cfg.fullAttentionLayerMask[L] != 0
             let headDimL = isFull ? cfg.fullHeadDim : cfg.headDim
             let numKVL   = isFull ? cfg.numFullKVHeads : cfg.numKVHeads
@@ -1623,7 +1745,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                 x: hidden,
                                 weight: inNorm.buffer, weightOffset: Int(inNorm.offset),
                                 out: normed,
-                                d: D, eps: eps)
+                                d: D, eps: eps, conditional: conditional)
             }
 
             let gQKV: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -1643,7 +1765,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                     vOut: vSlot.buffer, vOutOffset: vSlot.offset,
                                     qRows: qDim,
                                     kvRows: kvDim,
-                                    n: D)
+                                    n: D, conditional: conditional)
             }
 
             let gQKVEpilogue: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -1666,7 +1788,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                         position: UInt32(position),
                                         theta: isFull ? Float(cfg.fullRopeTheta) : Float(cfg.ropeTheta),
                                         rotatedPairs: rotated,
-                                        eps: eps)
+                                        eps: eps, conditional: conditional)
             }
 
             let gAttention: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -1685,7 +1807,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                          numKVHeads: UInt32(numKVL),
                                          seqLen: seqLen,
                                          scale: 1.0,
-                                         stageTiming: stageTiming)
+                                         stageTiming: stageTiming, conditional: conditional)
                 } else {
                     let ringCapacity = kv?.ringCapacity(layer: L) ?? 0
                     let activeRingCapacity = ringCapacity > 0 && Int(seqLen) > ringCapacity
@@ -1702,7 +1824,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                         seqLen: seqLen,
                                         window: UInt32(cfg.slidingWindow),
                                         scale: 1.0,
-                                        ringCapacity: activeRingCapacity)
+                                        ringCapacity: activeRingCapacity, conditional: conditional)
                 }
             }
             let gOProj: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -1710,7 +1832,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                             weights: o.buffer, weightsOffset: Int(o.offset),
                             scales:  o.buffer, scalesOffset:  Int(o.scaleOffset),
                             biases:  o.buffer, biasesOffset:  Int(o.biasOffset),
-                            x: attnOut, y: oOut, m: D, n: qDim)
+                            x: attnOut, y: oOut, m: D, n: qDim, conditional: conditional)
             }
 
             let gPostAttnSetup: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -1727,7 +1849,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                                preFFN2Weight: preFFN2.buffer,
                                                preFFN2WeightOffset: Int(preFFN2.offset),
                                                d: D,
-                                               eps: eps)
+                                               eps: eps, conditional: conditional)
             }
 
             let gRouter: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -1740,46 +1862,136 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                     perExpertScale: perExpertScale.buffer,
                     perExpertScaleOffset: Int(perExpertScale.offset),
                     outIndices: outIndices, outWeights: outWeights,
-                    numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts))
+                    numExperts: UInt32(cfg.numExperts), d: D, topK: UInt32(cfg.topKExperts),
+                    conditional: conditional, cacheSelection: cacheSelection)
             }
 
-            let cb = ctx.queue.makeCommandBuffer()!
-            gInputNorm(cb)
-            gQKV(cb)
-            gQKVEpilogue(cb)
-            gAttention(cb)
-            gOProj(cb)
-            gPostAttnSetup(cb)
-            gRouter(cb)
-            cb.commit()
-            let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
-            waitUntilCompleted(cb)
-            let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
-            if isFull {
-                stageTiming?.completedLayer(L, buffer: cb,
-                                            encodeCommitNanos: tWait - tCb1Start,
-                                            waitNanos: waitNanos)
+            if let commandBuffer = batchCB, let cache = gpuExpertCache,
+               let conditional {
+                let lease = batchLeases[batchIndex]
+                let state = cache.layers[batchIndex]
+                gInputNorm(commandBuffer)
+                gQKV(commandBuffer)
+                gQKVEpilogue(commandBuffer)
+                gAttention(commandBuffer)
+                gOProj(commandBuffer)
+                gPostAttnSetup(commandBuffer)
+                gRouter(commandBuffer)
+                guard conditional.count == GPUExpertCache.routerDispatchCount else {
+                    throw MetalError.commandBufferFailed("Incomplete layer before expert lookup")
+                }
+                try shared.encodeCached(commandBuffer: commandBuffer, x: denseX,
+                                        gate: sharedProj.gate, up: sharedProj.up,
+                                        down: sharedProj.down, y: h1Buf,
+                                        scratchGate: denseScratchGate,
+                                        scratchUp: denseScratchUp,
+                                        scratchAct: denseScratchAct,
+                                        conditional: conditional)
+                rms.encodeBF16W(commandBuffer: commandBuffer, x: h1Buf,
+                                weight: sharedProj.postF1.buffer,
+                                weightOffset: Int(sharedProj.postF1.offset),
+                                out: h1Buf, d: D, eps: eps, conditional: conditional)
+                let offsets = model.routedExpertOffsets(layer: L)
+                moe.encodeRoutedPersistentPhase1U16Load(
+                    commandBuffer: commandBuffer, routedArgBuffer: state.selected,
+                    routedBlobs: lease.populatedBuffers, routedOffsets: offsets,
+                    x: routedX, acts: moeActs, d: D, f: FmoE,
+                    topK: UInt32(cfg.topKExperts), conditional: conditional, routedHeap: lease.heap)
+                moe.encodeRoutedPersistentPhase2Reduce(
+                    commandBuffer: commandBuffer, routedArgBuffer: state.selected,
+                    routedBlobs: lease.populatedBuffers, routedOffsets: offsets,
+                    acts: moeActs, routingWeights: outWeights, residual: zeroResidual,
+                    y: h2Buf, d: D, f: FmoE, topK: UInt32(cfg.topKExperts),
+                    conditional: conditional, routedHeap: lease.heap)
+                let scalar = layerScalarView.buffer.contents()
+                    .advanced(by: Int(layerScalarView.offset)).load(as: UInt16.self)
+                fusedTail.encode(commandBuffer: commandBuffer, h2: h2Buf, h1: h1Buf,
+                                 hidden: hidden, postFFN2Weight: postF2.buffer,
+                                 postFFN2WeightOffset: Int(postF2.offset),
+                                 postFFNWeight: postF.buffer,
+                                 postFFNWeightOffset: Int(postF.offset), d: D, eps: eps,
+                                 layerScalar: Quantization.bf16ToFloat(scalar),
+                                 conditional: conditional)
+                guard conditional.count == GPUExpertCache.layerDispatchCount else {
+                    throw MetalError.commandBufferFailed("Incomplete cached expert layer")
+                }
+                batchEncodeNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start
+                L += 1
+                if batchIndex + 1 < batchLeases.count { continue }
+
+                commandBuffer.commit()
+                let waitStart = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                waitUntilCompleted(commandBuffer)
+                totalRouterWaitNanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - waitStart
+                totalCb1Nanos &+= batchEncodeNanos
+                if let pending = pendingRoutedCommand {
+                    try finishPendingRoutedCommand(pending, waitIfNeeded: false)
+                    pendingRoutedCommand = nil
+                }
+                try checkCommandBufferError(commandBuffer)
+                let completed = cache.firstMissingLayer ?? batchLeases.count
+                guard completed >= 0 && completed <= batchLeases.count else {
+                    throw MetalError.commandBufferFailed("Invalid expert cache checkpoint")
+                }
+                totalGPUExpertCacheBatches &+= 1
+                totalGPUExpertCacheHitExperts &+= UInt64(completed * cfg.topKExperts)
+                if completed < batchLeases.count { totalGPUExpertCacheFirstMisses &+= 1 }
+                for index in 0..<completed {
+                    try batchLeases[index].recordCompletedHits(cache.layers[index].completedRoutes)
+                }
+                if completed < batchLeases.count {
+                    L = batchStart + completed
+                    resumeExpertLayer = L
+                }
+                for lease in batchLeases { lease.release() }
+                batchCB = nil
+                batchLeases.removeAll()
+                continue
             }
-            let completedPending = pendingRoutedCommand
-            if let pending = completedPending {
-                try finishPendingRoutedCommand(pending, waitIfNeeded: false)
-                pendingRoutedCommand = nil
-            }
-            try checkCommandBufferError(cb)
-            totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
-            totalRouterWaitNanos &+= waitNanos
-            if let pending = completedPending {
-                recordPendingGPUCompletion(pending)
-            }
-            if captureGPUCompletionTiming {
+
+            if resumeExpertLayer == L {
+                // The GPU already wrote this layer's K/V and router output.
+                resumeExpertLayer = nil
+            } else {
+                let cb = ctx.queue.makeCommandBuffer()!
+                gInputNorm(cb)
+                gQKV(cb)
+                gQKVEpilogue(cb)
+                gAttention(cb)
+                gOProj(cb)
+                gPostAttnSetup(cb)
+                gRouter(cb)
+                cb.commit()
+                let tWait = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                waitUntilCompleted(cb)
+                let waitNanos = clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tWait
                 if isFull {
-                    fullAttentionRouterGPUCompletion.record(cb)
-                } else {
-                    slidingAttentionRouterGPUCompletion.record(cb)
+                    stageTiming?.completedLayer(L, buffer: cb,
+                                                encodeCommitNanos: tWait - tCb1Start,
+                                                waitNanos: waitNanos)
+                }
+                let completedPending = pendingRoutedCommand
+                if let pending = completedPending {
+                    try finishPendingRoutedCommand(pending, waitIfNeeded: false)
+                    pendingRoutedCommand = nil
+                }
+                try checkCommandBufferError(cb)
+                totalCb1Nanos &+= clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb1Start - waitNanos
+                totalRouterWaitNanos &+= waitNanos
+                if let pending = completedPending {
+                    recordPendingGPUCompletion(pending)
+                }
+                if captureGPUCompletionTiming {
+                    if isFull {
+                        fullAttentionRouterGPUCompletion.record(cb)
+                    } else {
+                        slidingAttentionRouterGPUCompletion.record(cb)
+                    }
                 }
             }
 
             // CPU readback to fetch routed-expert blobs from disk.
+            if useGPUCache { totalGPUExpertCacheCPUFallbackLayers &+= 1 }
             let idxPtr = outIndices.contents().bindMemory(to: UInt32.self,
                                                           capacity: cfg.topKExperts)
             var experts = [Int](repeating: 0, count: cfg.topKExperts)
@@ -1900,6 +2112,13 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
             if let cb = phase1HitCB {
                 cb.commit()
             }
+            var routedWorkOwnsInputs = false
+            defer {
+                if !routedWorkOwnsInputs {
+                    waitUntilCompleted(sharedCB)
+                    if let cb = phase1HitCB { waitUntilCompleted(cb) }
+                }
+            }
             if rdadviseEnabled && rdadvisePolicyMode != .off {
                 let requestedMisses = plannedFetch?.misses.count ?? experts.count
                 let estimatedAdviceBytes = try model.routedExpertAdviceByteEstimate(
@@ -2002,6 +2221,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                 sharedCB: sharedCB,
                 phase1HitCB: phase1HitCB,
                 encodeAndCommitNanos: clock_gettime_nsec_np(CLOCK_UPTIME_RAW) - tCb2Start)
+            routedWorkOwnsInputs = true
+            L += 1
             continue
         }
         if let pending = pendingRoutedCommand {
@@ -2055,7 +2276,453 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         }
 
         kv?.advance()
+        draftHiddenSource = (hidden, 0, position + 1, false)
         forwardSucceeded = true
+    }
+
+    private func prepareDraftVerification(rowCount: Int) throws {
+        while draftVerifyRows.count < rowCount {
+            draftVerifyRows.append(try GemmaVerifyRow(device: ctx.device, config: cfg))
+        }
+        if draftVerifyProjection == nil { draftVerifyProjection = try GemmaVerifyProjection(context: ctx) }
+        if draftVerifyMoE == nil { draftVerifyMoE = try GemmaVerifyMoE(context: ctx) }
+        if draftVerifyFusions == nil { draftVerifyFusions = try GemmaVerifyFusions(context: ctx) }
+    }
+
+    private var gemmaResidency: MTLResidencySet?
+
+    deinit { releaseGemmaResidency() }
+
+    private func releaseGemmaResidency() {
+        if let gemmaResidency {
+            ctx.queue.removeResidencySet(gemmaResidency)
+            gemmaResidency.endResidency()
+            self.gemmaResidency = nil
+        }
+    }
+
+    private func keepGemmaBuffersReady() {
+        guard gemmaResidency == nil, usesGemmaDraft,
+              UInt64(ctx.device.currentAllocatedSize) <= ctx.device.recommendedMaxWorkingSetSize else { return }
+        let leases = model.beginGPUExpertReads(startLayer: 0, maxLayers: cfg.numLayers,
+            byteLimit: Int(ctx.device.recommendedMaxWorkingSetSize))
+        defer { for lease in leases { lease.release() } }
+        guard leases.count == cfg.numLayers, leases.allSatisfy({ $0.heap != nil }) else { return }
+        let descriptor = MTLResidencySetDescriptor()
+        descriptor.label = "Loaded Gemma buffers"
+        descriptor.initialCapacity = 96
+        guard let set = try? ctx.device.makeResidencySet(descriptor: descriptor) else { return }
+        set.addAllocation(model.residentBuffer.buffer)
+        if let configuredDraftRunner { set.addAllocation(configuredDraftRunner.weightBuffer) }
+        for lease in leases { set.addAllocation(lease.heap!) }
+        if let kv {
+            for layer in 0..<cfg.numLayers {
+                set.addAllocation(kv.keyBuffer(layer: layer, validTokenCount: kv.position))
+                set.addAllocation(kv.valueBuffer(layer: layer, validTokenCount: kv.position))
+            }
+        }
+        set.commit()
+        guard set.allocatedSize <= ctx.device.recommendedMaxWorkingSetSize else { return }
+        set.requestResidency()
+        ctx.queue.addResidencySet(set)
+        gemmaResidency = set
+    }
+
+    var enableVerificationWideHead = true
+    var enableInlineVerificationFetch = true
+    var enableVerificationPairedAttention = true
+    var enableVerificationTokenReuse = true
+    var enableEarlyVerificationDense = true
+    var deferVerificationDenseWait = true
+    var enableVerificationStaticMoE = true
+
+    /// Runs the existing decode arithmetic across at most five known input tokens.
+    func verifyDraft(tokens: [Int32],
+                     encodeFirstSample: ((MTLCommandBuffer, MTLBuffer) -> Void)? = nil) async throws -> [MTLBuffer] {
+        try prefillChunkState.requireClean(operation: "verifyDraft")
+        guard let kv, (1...5).contains(tokens.count),
+              cfg.hiddenSize == 2816, cfg.topKExperts == 8, cfg.moeIntermediateSize == 704,
+              cfg.numExperts == 128, shared.weightBits == 4,
+              (model.routedExpertCacheSlotCount(layer: 0) ?? 0) >= 64,
+              tokens.count <= maxContext - kv.position,
+              tokens.count <= kv.maxRewindTokens,
+              tokens.allSatisfy({ $0 >= 0 && $0 < cfg.vocabSize }) else {
+            throw PrefillError.chunkedUnsupported("Invalid Gemma verification batch")
+        }
+        try Task.checkCancellation()
+        try prepareDraftVerification(rowCount: tokens.count)
+        keepGemmaBuffersReady()
+        guard let projection = draftVerifyProjection, let routed = draftVerifyMoE else { throw MetalError.noDevice }
+        attention.useTokenPairReuse = enableVerificationTokenReuse
+        projection.useWideHead = enableVerificationWideHead
+        routed.useStaticPair = enableVerificationStaticMoE
+        let rows = Array(draftVerifyRows.prefix(tokens.count))
+        lastVerificationGPUTime = GemmaVerificationGPUTime()
+        lastVerificationCachedLayers = 0
+        lastVerificationCacheMisses = 0
+        let start = kv.position
+        pendingDraftVerification = nil
+        draftHiddenSource = nil
+        prefillChunkState.markDirty(startPosition: start, tokenCount: tokens.count)
+        var pending: MTLCommandBuffer?
+        var pendingDense: MTLCommandBuffer?
+        func checkDense() throws {
+            guard let dense = pendingDense else { return }
+            try checkCommandBufferError(dense)
+            if captureVerificationGPUTime {
+                lastVerificationGPUTime.dense += max(0, dense.gpuEndTime - dense.gpuStartTime)
+            }
+            pendingDense = nil
+        }
+        defer { if let pending { waitUntilCompleted(pending) } }
+        let embedding = model.embedding
+        try runSync { command in
+            for (index, row) in rows.enumerated() {
+                embedInt4.encode(commandBuffer: command,
+                    table: embedding.buffer, tableOffset: Int(embedding.offset),
+                    scales: embedding.buffer, scalesOffset: Int(embedding.scaleOffset),
+                    biases: embedding.buffer, biasesOffset: Int(embedding.biasOffset),
+                    out: row.hidden, tokenId: UInt32(tokens[index]),
+                    d: UInt32(cfg.hiddenSize), outScale: Float(cfg.hiddenSize).squareRoot())
+            }
+        }
+        let d = UInt32(cfg.hiddenSize)
+        var layer = 0
+        while layer < cfg.numLayers {
+            try Task.checkCancellation()
+            var prefixReady = false
+            var scheduledDense: MTLCommandBuffer?
+            if let cached = try runCachedVerifyLayers(startLayer: layer, rows: rows,
+                                                      position: start, projection: projection) {
+                if let previous = pending {
+                    try checkCommandBufferError(previous)
+                    if captureVerificationGPUTime {
+                        lastVerificationGPUTime.routed += max(0, previous.gpuEndTime - previous.gpuStartTime)
+                    }
+                    pending = nil
+                }
+                try checkDense()
+                layer = cached.nextLayer
+                prefixReady = cached.prefixReady
+                if !prefixReady { continue }
+            }
+            if !prefixReady {
+                let previous = pending
+                guard let prefix = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
+                try encodeVerifyPrefixes(prefix, rows: rows, layer: layer, start: start, projection: projection)
+                prefix.commit()
+                pending = prefix
+                if enableEarlyVerificationDense {
+                    // Queue shared work while the prefix is still running.
+                    guard let dense = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
+                    try encodeVerifyDense(dense, rows: rows, layer: layer, projection: projection)
+                    dense.commit()
+                    pending = dense
+                    scheduledDense = dense
+                }
+                try waitForCompletion(prefix)
+                if captureVerificationGPUTime {
+                    lastVerificationGPUTime.prefix += max(0, prefix.gpuEndTime - prefix.gpuStartTime)
+                }
+                if let previous {
+                    try checkCommandBufferError(previous)
+                    if captureVerificationGPUTime {
+                        lastVerificationGPUTime.routed += max(0, previous.gpuEndTime - previous.gpuStartTime)
+                    }
+                }
+                if scheduledDense == nil { pending = nil }
+            }
+            try checkDense()
+            let routes = rows.map { row in
+                (0..<cfg.topKExperts).map {
+                    Int(row.outIndices.contents().assumingMemoryBound(to: UInt32.self)[$0])
+                }
+            }
+            let experts = Set(routes.flatMap { $0 }).sorted()
+            guard experts.allSatisfy({ $0 >= 0 && $0 < cfg.numExperts }),
+                  let plan = try model.planRoutedExpertsIfPossible(layer: layer, experts: experts) else {
+                throw ModelError.indexCorrupt(detail: "Cannot hold the verification experts")
+            }
+            let dense: MTLCommandBuffer
+            if let scheduledDense {
+                dense = scheduledDense
+            } else {
+                guard let command = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
+                dense = command
+                try encodeVerifyDense(dense, rows: rows, layer: layer, projection: projection)
+                dense.commit()
+                pending = dense
+            }
+            let blobs = try await model.fetchVerificationExperts(plan: plan, inlineMisses: enableInlineVerificationFetch)
+            let offsets = model.routedExpertOffsets(layer: layer)
+            guard let tail = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
+            try routed.encode(command: tail, rows: rows, experts: experts,
+                blobs: blobs.map(\.buffer), routes: routes, offsets: offsets)
+            try encodeVerifyTails(tail, rows: rows, layer: layer)
+            tail.commit()
+            pending = tail
+            // The next completed prefix also completes this shared work.
+            pendingDense = dense
+            if !deferVerificationDenseWait {
+                waitUntilCompleted(dense)
+                try checkDense()
+            }
+            layer += 1
+        }
+        let finalNorm = model.finalNorm
+        guard let headCommand = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
+        try draftVerifyFusions!.normalize(command: headCommand, inputs: rows.map(\.hidden),
+            outputs: rows.map(\.normed), weight: finalNorm)
+        try projection.encode(command: headCommand,
+            projection: SharedExpertProjection(weights: embedding.buffer, scales: embedding.buffer,
+                biases: embedding.buffer, weightsOffset: Int(embedding.offset),
+                scalesOffset: Int(embedding.scaleOffset), biasesOffset: Int(embedding.biasOffset),
+                rows: UInt32(cfg.vocabSize), cols: d),
+            inputs: rows.map { ($0.normed, 0) }, outputs: rows.map { ($0.logits, 0) })
+        encodeFirstSample?(headCommand, rows[0].logits)
+        headCommand.commit()
+        try waitForCompletion(headCommand)
+        try checkDense()
+        if let previous = pending {
+            try checkCommandBufferError(previous)
+            if captureVerificationGPUTime {
+                lastVerificationGPUTime.routed += max(0, previous.gpuEndTime - previous.gpuStartTime)
+            }
+        }
+        if captureVerificationGPUTime {
+            lastVerificationGPUTime.head = max(0, headCommand.gpuEndTime - headCommand.gpuStartTime)
+        }
+        pending = nil
+        try Task.checkCancellation()
+        kv.advance(by: tokens.count)
+        prefillChunkState.markCommitted()
+        pendingDraftVerification = (start, tokens.count)
+        return rows.map(\.logits)
+    }
+
+    func acceptVerifiedPrefix(count: Int) throws {
+        try prefillChunkState.requireClean(operation: "acceptVerifiedPrefix")
+        guard let pending = pendingDraftVerification, count > 0, count <= pending.count,
+              continuationPosition == pending.start + pending.count else {
+            throw PrefillError.prefillCursorMismatch("Invalid verified prefix")
+        }
+        let position = pending.start + count
+        let retainedHidden = draftVerifyRows[count - 1].normed
+        try rewind(to: position)
+        draftHiddenSource = (retainedHidden, 0, position, true)
+    }
+
+    private func encodeVerifyDense(_ command: MTLCommandBuffer, rows: [GemmaVerifyRow],
+                                   layer: Int, projection: GemmaVerifyProjection,
+                                   conditional: DecodeDispatch? = nil) throws {
+        let sharedProjection = sharedExpertProjections[layer]
+        try projection.encodeMany(command: command, projections: [sharedProjection.gate, sharedProjection.up],
+            inputs: rows.map { ($0.denseX, 0) },
+            outputs: [rows.map { ($0.denseScratchGate, 0) }, rows.map { ($0.denseScratchUp, 0) }],
+            conditional: conditional)
+        try draftVerifyFusions!.gelu(command: command, rows: rows,
+            count: sharedProjection.gate.rows, conditional: conditional)
+        try projection.encode(command: command, projection: sharedProjection.down,
+            inputs: rows.map { ($0.denseScratchAct, 0) }, outputs: rows.map { ($0.h1Buf, 0) }, conditional: conditional)
+        try draftVerifyFusions!.normalize(command: command, inputs: rows.map(\.h1Buf),
+            outputs: rows.map(\.h1Buf), weight: sharedProjection.postF1, conditional: conditional)
+    }
+
+    private func encodeVerifyTails(_ command: MTLCommandBuffer, rows: [GemmaVerifyRow],
+                                   layer: Int, conditional: DecodeDispatch? = nil) throws {
+        let postF2 = try model.postFFN2(layer: layer)
+        let postF = try model.postFFN(layer: layer)
+        let scalarView = try model.layerScalar(layer: layer)
+        let scalar = Quantization.bf16ToFloat(scalarView.buffer.contents()
+            .advanced(by: Int(scalarView.offset)).load(as: UInt16.self))
+        try draftVerifyFusions!.tail(command: command, rows: rows,
+            postFFN2: postF2, postFFN: postF, scalar: scalar, conditional: conditional)
+    }
+
+    /// A miss leaves both tokens after the router, ready for the CPU fetch path.
+    private func runCachedVerifyLayers(startLayer: Int, rows: [GemmaVerifyRow],
+                                      position: Int, projection: GemmaVerifyProjection) throws
+        -> (nextLayer: Int, prefixReady: Bool)? {
+        guard enableVerificationGPUCache, rows.count == 2, ctx.device.argumentBuffersSupport == .tier2,
+              ProcessInfo.processInfo.physicalMemory >= 32 * 1_024 * 1_024 * 1_024,
+              UInt64(ctx.device.currentAllocatedSize) <= ctx.device.recommendedMaxWorkingSetSize else { return nil }
+        if draftVerifyCache == nil {
+            draftVerifyCache = try GemmaVerifyCache(context: ctx, selectedLength: moe.routedArgumentLength,
+                                                   groupedLength: draftVerifyMoE!.argumentLength)
+        }
+        guard let cache = draftVerifyCache else { throw MetalError.noDevice }
+        let leases = model.beginGPUExpertReads(startLayer: startLayer,
+            maxLayers: (model.routedExpertCacheSlotCount(layer: 0) ?? 0) >= 96 ? GPUExpertCache.maxLayers : 4, byteLimit: GPUExpertCache.maxBatchBytes)
+        guard !leases.isEmpty else { return nil }
+        defer { for lease in leases { lease.release() } }
+        cache.prepare(leases)
+        guard let command = ctx.queue.makeCommandBuffer() else { throw MetalError.noQueue }
+        command.label = "Gemma verification cache"
+        for (index, lease) in leases.enumerated() {
+            let layer = startLayer + index
+            let state = cache.layers[index]
+            let conditional = state.dispatch
+            try encodeVerifyPrefixes(command, rows: rows, layer: layer, start: position,
+                                     projection: projection, conditional: conditional)
+            try cache.encodeLookup(command: command, index: index, slotCount: lease.buffers.count,
+                                   indices: rows.map(\.outIndices))
+            try encodeVerifyDense(command, rows: rows, layer: layer, projection: projection, conditional: conditional)
+            let offsets = model.routedExpertOffsets(layer: layer)
+            try draftVerifyMoE!.encodeCached(command: command, rows: rows,
+                arguments: state.groupedArguments, slots: state.groupedSlots,
+                blobs: lease.populatedBuffers, heap: lease.heap, offsets: offsets, conditional: conditional)
+            try encodeVerifyTails(command, rows: rows, layer: layer, conditional: conditional)
+            guard conditional.count == GemmaVerifyCache.layerDispatches else {
+                throw MetalError.commandBufferFailed("Invalid cached verification layer")
+            }
+        }
+        command.commit()
+        try waitForCompletion(command)
+        if captureVerificationGPUTime {
+            lastVerificationGPUTime.cached += max(0, command.gpuEndTime - command.gpuStartTime)
+        }
+        let completed = cache.firstMissingLayer ?? leases.count
+        guard completed >= 0, completed <= leases.count else {
+            throw MetalError.commandBufferFailed("Invalid verification cache checkpoint")
+        }
+        for index in 0..<completed {
+            try leases[index].recordCompletedHitGroups(cache.layers[index].completedRoutes)
+        }
+        lastVerificationCachedLayers += completed
+        let missed = completed < leases.count
+        if missed { lastVerificationCacheMisses += 1 }
+        return (startLayer + completed, missed)
+    }
+
+    private func encodeVerifyPrefixes(_ command: MTLCommandBuffer, rows: [GemmaVerifyRow],
+                                      layer: Int, start: Int,
+                                      projection: GemmaVerifyProjection, conditional: DecodeDispatch? = nil) throws {
+        guard let kv else { throw MetalError.noDevice }
+        let d = UInt32(cfg.hiddenSize)
+        let full = cfg.fullAttentionLayerMask[layer] != 0
+        let headDim = UInt32(full ? cfg.fullHeadDim : cfg.headDim)
+        let heads = UInt32(full ? cfg.numFullKVHeads : cfg.numKVHeads)
+        let qDim = UInt32(cfg.numHeads) * headDim
+        let kvDim = heads * headDim
+        let inputNorm = try model.inputNorm(layer: layer)
+        let q = try model.qProj(layer: layer)
+        let k = try model.kProj(layer: layer)
+        let v = full ? k : try model.vProj(layer: layer)
+        let o = try model.oProj(layer: layer)
+        let qNorm = try model.qNorm(layer: layer)
+        let kNorm = try model.kNorm(layer: layer)
+        let postAttention = try model.postAttnNorm(layer: layer)
+        let preFFN = try model.preFFN(layer: layer)
+        let preFFN2 = try model.preFFN2(layer: layer)
+        let router = try model.router(layer: layer)
+        let perExpertScale = try model.routerPerExpertScale(layer: layer)
+        let keySlots = rows.indices.map { kv.kSlot(layer: layer, position: start + $0) }
+        let valueSlots = rows.indices.map { kv.vSlot(layer: layer, position: start + $0) }
+        try draftVerifyFusions!.normalize(command: command, inputs: rows.map(\.hidden),
+            outputs: rows.map(\.normed), weight: inputNorm, conditional: conditional)
+        func matrix(_ view: TensorView, m: UInt32, n: UInt32) -> SharedExpertProjection {
+            SharedExpertProjection(weights: view.buffer, scales: view.buffer,
+                biases: view.buffer, weightsOffset: Int(view.offset),
+                scalesOffset: Int(view.scaleOffset), biasesOffset: Int(view.biasOffset), rows: m, cols: n)
+        }
+        try projection.encodeMany(command: command,
+            projections: [matrix(q, m: qDim, n: d), matrix(k, m: kvDim, n: d), matrix(v, m: kvDim, n: d)],
+            inputs: rows.map { ($0.normed, 0) },
+            outputs: [rows.map { ($0.qScratch, 0) }, keySlots, valueSlots], conditional: conditional)
+        try draftVerifyFusions!.epilogue(command: command, rows: rows, keys: keySlots, values: valueSlots,
+            qNorm: qNorm, kNorm: kNorm, headDim: headDim, heads: UInt32(cfg.numHeads), kvHeads: heads,
+            position: start, theta: Float(full ? cfg.fullRopeTheta : cfg.ropeTheta),
+            rotatedPairs: full ? UInt32(Double(cfg.fullHeadDim) * cfg.partialRotaryFactor / 2) : headDim / 2,
+            conditional: conditional)
+        let capacity = full ? 0 : kv.ringCapacity(layer: layer)
+        var index = 0
+        while index < rows.count {
+            if conditional == nil, enableVerificationPairedAttention, index + 1 < rows.count,
+               keySlots[index].buffer === keySlots[index + 1].buffer,
+               valueSlots[index].buffer === valueSlots[index + 1].buffer {
+                let pair = Array(rows[index...index + 1])
+                let encoded = try attention.encodePair(commandBuffer: command,
+                    queries: pair.map(\.qScratch), keys: keySlots[index].buffer,
+                    values: valueSlots[index].buffer, outputs: pair.map(\.attnOut),
+                    full: full, firstLength: UInt32(start + index + 1),
+                    window: UInt32(cfg.slidingWindow),
+                    ringCapacity: capacity > 0 && start + index + 2 > capacity ? UInt32(capacity) : 0)
+                if encoded {
+                    index += 2
+                    continue
+                }
+            }
+            let row = rows[index]
+            let position = start + index
+            let keys = keySlots[index]
+            let values = valueSlots[index]
+            if full {
+                attention.encodeFull(commandBuffer: command, q: row.qScratch,
+                    k: keys.buffer, v: values.buffer, out: row.attnOut,
+                    headDim: headDim, numQHeads: UInt32(cfg.numHeads), numKVHeads: heads,
+                    seqLen: UInt32(position + 1), scale: 1, conditional: conditional)
+            } else {
+                attention.encodeSWA(commandBuffer: command, q: row.qScratch,
+                    k: keys.buffer, v: values.buffer, out: row.attnOut,
+                    headDim: headDim, numQHeads: UInt32(cfg.numHeads), numKVHeads: heads,
+                    seqLen: UInt32(position + 1), window: UInt32(cfg.slidingWindow), scale: 1,
+                    ringCapacity: capacity > 0 && position + 1 > capacity ? UInt32(capacity) : 0,
+                    conditional: conditional)
+            }
+            index += 1
+        }
+        try projection.encode(command: command, projection: matrix(o, m: d, n: qDim),
+            inputs: rows.map { ($0.attnOut, 0) }, outputs: rows.map { ($0.oOut, 0) }, conditional: conditional)
+        try draftVerifyFusions!.postAttention(command: command, rows: rows,
+            post: postAttention, preFFN: preFFN, preFFN2: preFFN2, conditional: conditional)
+        for row in rows {
+            moe.encodeRouterGemma4(commandBuffer: command,
+                weights: router.buffer, weightsOffset: Int(router.offset),
+                scales: router.buffer, scalesOffset: Int(router.scaleOffset),
+                biases: router.buffer, biasesOffset: Int(router.biasOffset), hidden: row.routerInput,
+                effectiveScale: effectiveScaleBuffers[layer], perExpertScale: perExpertScale.buffer,
+                perExpertScaleOffset: Int(perExpertScale.offset), outIndices: row.outIndices,
+                outWeights: row.outWeights, numExperts: UInt32(cfg.numExperts), d: d, topK: UInt32(cfg.topKExperts), conditional: conditional)
+        }
+    }
+
+    func makeDraftContext() throws -> GemmaDraftRunner.Context {
+        guard cfg.hiddenSize == 2816, let kv, let source = draftHiddenSource,
+              source.position > 0, source.position == kv.position,
+              let slidingLayer = cfg.fullAttentionLayerMask.lastIndex(of: 0),
+              let fullLayer = cfg.fullAttentionLayerMask.lastIndex(where: { $0 != 0 }) else {
+            throw ModelError.indexCorrupt(detail: "No completed Gemma state for drafting")
+        }
+        let normalized: MTLBuffer
+        let normalizedOffset: Int
+        if source.normalized {
+            normalized = source.buffer
+            normalizedOffset = source.offset
+        } else {
+            if draftNormalizedHidden == nil {
+                draftNormalizedHidden = ctx.device.makeBuffer(length: 2816 * 2, options: .storageModeShared)
+            }
+            guard let buffer = draftNormalizedHidden else { throw MetalError.noDevice }
+            normalized = buffer
+            normalizedOffset = 0
+            let finalNorm = model.finalNorm
+            try runSync { command in
+                rms.encodeBF16W(commandBuffer: command, x: source.buffer, xOffset: source.offset,
+                               weight: finalNorm.buffer, weightOffset: Int(finalNorm.offset),
+                               out: normalized, d: 2816, eps: 1e-6)
+            }
+        }
+        let capacity = kv.ringCapacity(layer: slidingLayer)
+        return GemmaDraftRunner.Context(embedding: model.embedding,
+            normalizedHidden: normalized, hiddenOffset: normalizedOffset,
+            sliding: .init(keys: kv.keyBuffer(layer: slidingLayer, validTokenCount: source.position),
+                           values: kv.valueBuffer(layer: slidingLayer, validTokenCount: source.position),
+                           count: UInt32(source.position),
+                           ringCapacity: source.position > capacity && capacity > 0 ? UInt32(capacity) : 0),
+            full: .init(keys: kv.keyBuffer(layer: fullLayer, validTokenCount: source.position),
+                        values: kv.valueBuffer(layer: fullLayer, validTokenCount: source.position),
+                        count: UInt32(source.position), ringCapacity: 0),
+            position: UInt32(source.position))
     }
 
     private func runSync(_ body: (MTLCommandBuffer) -> Void) throws {

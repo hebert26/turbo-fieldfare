@@ -24,6 +24,11 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
     public var rdadviseMegabytesPerToken: Double
     public var rdadviseSkippedPerToken: Double
     public var rdadviseFailures: UInt64
+    public var gpuExpertCacheEligibleForwards: UInt64
+    public var gpuExpertCacheBatches: UInt64
+    public var gpuExpertCacheHitExperts: UInt64
+    public var gpuExpertCacheFirstMisses: UInt64
+    public var gpuExpertCacheCPUFallbackLayers: UInt64
 
     public init(cb1MillisecondsPerToken: Double = 0,
                 routerWaitMillisecondsPerToken: Double? = nil,
@@ -35,7 +40,12 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
                 rdadviseCallsPerToken: Double = 0,
                 rdadviseMegabytesPerToken: Double = 0,
                 rdadviseSkippedPerToken: Double = 0,
-                rdadviseFailures: UInt64 = 0) {
+                rdadviseFailures: UInt64 = 0,
+                gpuExpertCacheEligibleForwards: UInt64 = 0,
+                gpuExpertCacheBatches: UInt64 = 0,
+                gpuExpertCacheHitExperts: UInt64 = 0,
+                gpuExpertCacheFirstMisses: UInt64 = 0,
+                gpuExpertCacheCPUFallbackLayers: UInt64 = 0) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.routerWaitMillisecondsPerToken = routerWaitMillisecondsPerToken
         self.gpuCompletionTiming = gpuCompletionTiming
@@ -47,6 +57,11 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
         self.rdadviseMegabytesPerToken = rdadviseMegabytesPerToken
         self.rdadviseSkippedPerToken = rdadviseSkippedPerToken
         self.rdadviseFailures = rdadviseFailures
+        self.gpuExpertCacheEligibleForwards = gpuExpertCacheEligibleForwards
+        self.gpuExpertCacheBatches = gpuExpertCacheBatches
+        self.gpuExpertCacheHitExperts = gpuExpertCacheHitExperts
+        self.gpuExpertCacheFirstMisses = gpuExpertCacheFirstMisses
+        self.gpuExpertCacheCPUFallbackLayers = gpuExpertCacheCPUFallbackLayers
     }
 }
 

@@ -245,7 +245,8 @@ public actor GemmaMultimodalConversation {
     private var uncommittedBoundary: [Int32] = []
     private var boundaryNeedsReplay = false
     private var toolState: ToolState?
-    private var checkpointOpening: (id: UUID, turn: EncodedTurn, state: ToolState)?
+    private var checkpointOpening: (
+        id: UUID, turn: EncodedTurn, state: ToolState, needsFormatCorrection: Bool)?
     private var assessedResultBridge: (result: ConversationToolResult,
         calls: [GFTokenizer.HistoricalToolCall], tokens: [Int32])?
     private var largestCheckpointResultTokens = 0
@@ -484,7 +485,7 @@ public actor GemmaMultimodalConversation {
             assessedResultBridge = nil
             checkpointOpening = (id, turn,
                 ToolState(messages: preparedReplacement.messages, tools: state.tools,
-                          awaitingResults: false))
+                          awaitingResults: false), false)
         } else {
             // Reuse the exact suffix on ordinary continuation. Capacity assess
             // does not construct or tokenize the growing replacement ledger.
@@ -515,9 +516,23 @@ public actor GemmaMultimodalConversation {
             throw MultimodalConversationError.invalidToolContinuation
         }
         try checkCancellation()
+        if opening.needsFormatCorrection {
+            let messages = try Self.correctingCheckpointToolFormat(opening.state.messages)
+            let template = try tokenizer.encodeToolChat(messages: messages, tools: opening.state.tools)
+            let features = opening.turn.prefillInput?.imageSpans.map(\.features) ?? []
+            let input = features.isEmpty ? nil
+                : try MultimodalPromptRenderer.expandingImageTokens(template, features: features)
+            opening.turn = EncodedTurn(
+                effectiveTokenIDs: input?.effectiveTokenIDs ?? template, prefillInput: input)
+            opening.state.messages = messages
+            opening.needsFormatCorrection = false
+            checkpointOpening = opening
+        }
         generating = true
         defer { finishGeneration() }
-        let completion = try await completeEncodedTurn(opening.turn, config: config,
+        let completion: StructuredConversationTurnResult
+        do {
+            completion = try await completeEncodedTurn(opening.turn, config: config,
             prefillConfig: prefillConfig, checkCancellation: checkCancellation,
             shouldStop: shouldStop, allowedTools: Set(opening.state.tools.map(\.name)),
             acceptsUnknownToolNames: true, captureToolFailureEvidence: captureToolFailureEvidence,
@@ -525,11 +540,38 @@ public actor GemmaMultimodalConversation {
             captureThoughtPreview: captureThoughtPreview, detectThoughtRepetition: detectThoughtRepetition,
             onProgress: onProgress,
             onStructuredProgress: onStructuredProgress)
+        } catch {
+            if let failure = error as? StructuredToolFailure,
+               failure.canRegenerateToolResult {
+                checkpointOpening?.needsFormatCorrection = true
+            }
+            throw error
+        }
         opening.state.messages.append(Self.assistantMessage(for: completion))
         opening.state.awaitingResults = !completion.toolCalls.isEmpty
         toolState = opening.state
         checkpointOpening = nil
         return completion
+    }
+
+    static func correctingCheckpointToolFormat(
+        _ messages: [GFTokenizer.Message]
+    ) throws -> [GFTokenizer.Message] {
+        guard let last = messages.last, last.role == .user else {
+            throw MultimodalConversationError.invalidToolContinuation
+        }
+        let feedback = """
+
+
+        Host format correction: Your previous tool request was malformed. No action from that response was sent. Use only the latest permitted choices. Do not repeat completed actions. Gemma string values must use <|"|> delimiters, for example action:<|"|>observe<|"|>. Close every object and finish the tool call.
+        """
+        let content = last.content ?? ""
+        guard !content.hasSuffix(feedback) else { return messages }
+        var corrected = messages
+        corrected[corrected.count - 1] = GFTokenizer.Message(
+            role: last.role, content: content + feedback, toolCalls: last.toolCalls,
+            toolCallID: last.toolCallID, name: last.name, toolImageCount: last.toolImageCount)
+        return corrected
     }
 
     /// Stages the next user turn without prefilling it.

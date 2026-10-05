@@ -44,8 +44,12 @@ public enum AppInferenceError: Error, Equatable, Sendable, CustomStringConvertib
             return "Generation cancelled."
         case .conversationLineageLost(let message):
             return "This conversation can no longer continue: \(message) Start a new chat."
-        case .unknown(let message), .structuredToolFailure(let message, _, _):
+        case .unknown(let message):
             return message
+        case .structuredToolFailure(let message, _, _):
+            return message == "malformed"
+                ? "The model produced an invalid tool request. That request was not sent to the app."
+                : message
         case .repeatedThought(let recovery):
             return recovery.canRetryToolResult
                 ? "The unfinished model response repeated itself. Its prior tool boundary was restored. No action from that response was executed."

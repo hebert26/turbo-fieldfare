@@ -2874,6 +2874,8 @@ public final class AppModel {
                         generation: generation)
                 } catch is CancellationError {
                     await self.finishAgentFailure(.cancelled, generation: generation)
+                } catch VisionCaptureAgentError.proposalCorrectionExhausted(let message) {
+                    await self.finishAgentProposalPause(message, generation: generation)
                 } catch let error as VisionCaptureAgentError {
                     await self.finishAgentFailure(
                         .conversationLineageLost(error.description),
@@ -3319,28 +3321,35 @@ public final class AppModel {
                     "The repetition receipt conflicted with completed tool-call output. No recovery or action was admitted.")
             }
             if allowsMalformedRegeneration, calls.isEmpty,
-               case .results(let results) = toolTurn,
                let failure = error as? AppInferenceError,
                case .structuredToolFailure(_, true, _) = failure {
                 try Task.checkCancellation()
-                // The pending tool result was rolled back, not its preceding
-                // app action. Reprocess that result once without invoking MCP.
-                let feedback = """
-
-
-                Host format correction: Your previous response was malformed and no proposed action was executed. Make one visioncapture_navigate call using its schema and the latest permitted choices. Use the selected model's native string delimiters. Do not replay earlier input.
-                """
-                let corrected = results.map { result in
-                    return AppToolResult(callID: result.callID, name: result.name,
-                        content: result.content + feedback, imageAttachments: result.imageAttachments)
+                let recoveryID = UUID()
+                await applyAgentActivity(.generationRecovery(id: recoveryID,
+                    text: "Correcting an invalid model tool request. No action was sent.",
+                    status: .dispatching), generation: generation)
+                var correctedRequest = baseRequest
+                if case .user = toolTurn {
+                    correctedRequest.prompt += AppToolTurn.formatCorrectionInstruction
                 }
-                return try await generateAgentStep(
-                    client: client, baseRequest: baseRequest,
-                    toolTurn: .results(corrected), generation: generation,
-                    allowsMalformedRegeneration: false)
+                do {
+                    let corrected = try await generateAgentStep(
+                        client: client, baseRequest: correctedRequest,
+                        toolTurn: toolTurn.correctingMalformedResponse(), generation: generation,
+                        allowsMalformedRegeneration: false)
+                    await applyAgentActivity(.generationRecovery(id: recoveryID,
+                        text: "Model response regenerated after a format correction.",
+                        status: .succeeded), generation: generation)
+                    return corrected
+                } catch {
+                    await applyAgentActivity(.generationRecovery(id: recoveryID,
+                        text: "The format correction did not complete.",
+                        status: error is CancellationError ? .cancelled
+                            : .localFailure(reason: String(describing: error))), generation: generation)
+                    throw error
+                }
             }
             if !allowsMalformedRegeneration, calls.isEmpty,
-               case .results = toolTurn,
                let failure = error as? AppInferenceError,
                case .structuredToolFailure(_, true, let evidence) = failure {
                 throw AppInferenceError.structuredToolFailure(
@@ -3608,6 +3617,22 @@ public final class AppModel {
                 pendingAgentInstruction = nil
             }
             restoreUnsentAgentInstruction(instruction)
+        }
+    }
+
+    private func finishAgentProposalPause(_ message: String, generation: Int) async {
+        guard generation == runIdentity, !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        interruptAgentCompaction(.invalidRequest(message))
+        outputText = message
+        conversation.interruptUncommittedTurn(text: message, stopReason: .failed)
+        finishTerminalRun()
+        // Retain the task record. The next message opens a fresh model session.
+        archiveConversationContext()
+        error = .invalidRequest(message)
+        if let instruction = pendingAgentInstruction {
+            pendingAgentInstruction = nil
+            await continueAgentTask(with: instruction)
         }
     }
 

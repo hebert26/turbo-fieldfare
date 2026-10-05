@@ -124,6 +124,54 @@ void logit_softcap_softmax(
     }
 }
 
+// Keep the original 256 lanes and reduction order across separate groups.
+kernel void logit_softcap_partials(
+    device const half* logits [[buffer(0)]],
+    device float2* partials [[buffer(1)]],
+    constant uint& V [[buffer(2)]],
+    constant float& softcap [[buffer(3)]],
+    uint group [[threadgroup_position_in_grid]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    float m = -INFINITY;
+    float d = 0.0f;
+    for (uint i = group * 32u + lane; i < V; i += 256u) {
+        float z = softcap_value(float(logits[i]), softcap);
+        float mn = max(m, z);
+        float scale = (m == -INFINITY) ? 0.0f : logit_softmax_exp(m - mn);
+        d = d * scale + logit_softmax_exp(z - mn);
+        m = mn;
+    }
+    float maximum = simd_max(m);
+    float sum = simd_sum((m == -INFINITY) ? 0.0f : d * logit_softmax_exp(m - maximum));
+    if (lane == 0) partials[group] = float2(maximum, sum);
+}
+
+kernel void logit_softcap_merge(
+    device const float2* partials [[buffer(0)]],
+    device float2* total [[buffer(1)]],
+    uint lane [[thread_index_in_simdgroup]]
+) {
+    float m = lane < 8u ? partials[lane].x : -INFINITY;
+    float d = lane < 8u ? partials[lane].y : 0.0f;
+    float maximum = simd_max(m);
+    float sum = simd_sum((m == -INFINITY) ? 0.0f : d * logit_softmax_exp(m - maximum));
+    if (lane == 0) total[0] = float2(maximum, 1.0f / sum);
+}
+
+kernel void logit_softcap_normalize(
+    device const half* logits [[buffer(0)]],
+    device half* probs [[buffer(1)]],
+    constant uint& V [[buffer(2)]],
+    constant float& softcap [[buffer(3)]],
+    device const float2* total [[buffer(4)]],
+    uint index [[thread_position_in_grid]]
+) {
+    if (index >= V) return;
+    float z = softcap_value(float(logits[index]), softcap);
+    probs[index] = half(logit_softmax_exp(z - total[0].x) * total[0].y);
+}
+
 // ----------------------------------------------------------------------------
 // K9: sample
 //
@@ -457,30 +505,71 @@ inline bool sample_topk64_better(float lhs_value, uint lhs_index,
 inline void sample_topk64_sort_tile(threadgroup float* values,
                                     threadgroup uint* indices,
                                     uint lid) {
-    for (uint width = 2; width <= 1024; width <<= 1) {
-        for (uint stride = width >> 1; stride > 0; stride >>= 1) {
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint i = lid; i < 1024; i += 256) {
-                uint partner = i ^ stride;
-                if (partner <= i) continue;
-
-                float lhs_value = values[i];
-                uint lhs_index = indices[i];
-                float rhs_value = values[partner];
-                uint rhs_index = indices[partner];
-                bool descending = (i & width) == 0;
-                bool swap = descending
-                    ? sample_topk64_better(rhs_value, rhs_index,
-                                           lhs_value, lhs_index)
-                    : sample_topk64_better(lhs_value, lhs_index,
-                                           rhs_value, rhs_index);
-                if (swap) {
-                    values[i] = rhs_value;
-                    indices[i] = rhs_index;
-                    values[partner] = lhs_value;
-                    indices[partner] = lhs_index;
+    // Sort inside each 32-lane group without shared-memory barriers.
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float localValues[4];
+    uint localIndices[4];
+    for (uint item = 0; item < 4u; ++item) {
+        const uint index = lid + item * 256u;
+        localValues[item] = values[index];
+        localIndices[item] = indices[index];
+    }
+    for (uint width = 2u; width <= 32u; width <<= 1u) {
+        for (uint stride = width >> 1u; stride > 0u; stride >>= 1u) {
+            for (uint item = 0; item < 4u; ++item) {
+                const uint index = lid + item * 256u;
+                const float otherValue = simd_shuffle_xor(localValues[item], stride);
+                const uint otherIndex = simd_shuffle_xor(localIndices[item], stride);
+                const bool keepBetter = ((index & width) == 0u) == ((index & stride) == 0u);
+                const bool otherBetter = sample_topk64_better(otherValue, otherIndex,
+                    localValues[item], localIndices[item]);
+                if (keepBetter == otherBetter) {
+                    localValues[item] = otherValue;
+                    localIndices[item] = otherIndex;
                 }
             }
+        }
+    }
+    for (uint item = 0; item < 4u; ++item) {
+        values[lid + item * 256u] = localValues[item];
+        indices[lid + item * 256u] = localIndices[item];
+    }
+    for (uint width = 64u; width <= 1024u; width <<= 1u) {
+        for (uint stride = width >> 1u; stride >= 32u; stride >>= 1u) {
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint i = lid; i < 1024u; i += 256u) {
+                const uint partner = i ^ stride;
+                if (partner <= i) continue;
+                const float lhsValue = values[i];
+                const uint lhsIndex = indices[i];
+                const float rhsValue = values[partner];
+                const uint rhsIndex = indices[partner];
+                const bool descending = (i & width) == 0u;
+                const bool swap = descending
+                    ? sample_topk64_better(rhsValue, rhsIndex, lhsValue, lhsIndex)
+                    : sample_topk64_better(lhsValue, lhsIndex, rhsValue, rhsIndex);
+                if (swap) {
+                    values[i] = rhsValue;
+                    indices[i] = rhsIndex;
+                    values[partner] = lhsValue;
+                    indices[partner] = lhsIndex;
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint item = 0; item < 4u; ++item) {
+            const uint index = lid + item * 256u;
+            float value = values[index];
+            uint token = indices[index];
+            for (uint stride = 16u; stride > 0u; stride >>= 1u) {
+                const float otherValue = simd_shuffle_xor(value, stride);
+                const uint otherToken = simd_shuffle_xor(token, stride);
+                const bool keepBetter = ((index & width) == 0u) == ((index & stride) == 0u);
+                const bool otherBetter = sample_topk64_better(otherValue, otherToken, value, token);
+                if (keepBetter == otherBetter) { value = otherValue; token = otherToken; }
+            }
+            values[index] = value;
+            indices[index] = token;
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -608,8 +697,8 @@ void sample_topk64_final(
 }
 
 
-// Fused greedy lm-head path. Eight SIMD groups each evaluate one INT4 row;
-// a second dispatch reduces the per-threadgroup argmax summaries.
+// Two groups of 32 threads each compute four rows.
+// A second pass selects the token from the group results.
 constant constexpr uint kLMHeadRowsPerTG = 8;
 constant constexpr uint kLMHeadGroupSize = 64;
 constant constexpr uint kLMHeadRowSummaryStride = 2;
@@ -629,62 +718,76 @@ static inline uint lmhead_fc_v(constant uint& V) {
             is_function_constant_defined(FC_HEAD_V)) ? FC_HEAD_V : V;
 }
 
-inline float lmhead_int4_gemv_row_simd_dev(device const uint8_t*    W,
+inline float4 lmhead_int4_gemv_rows_simd_dev(device const uint8_t*    W,
                                            device const bfloat*     scales,
                                            device const bfloat*     biases,
                                            device const half*       x,
-                                           uint row,
+                                           uint first_row,
+                                           uint V,
                                            uint D,
                                            uint lane) {
+    if (first_row >= V) return float4(-INFINITY);
+    const uint valid_rows = min(4u, V - first_row);
     const uint n_groups  = D / kLMHeadGroupSize;
     const uint row_bytes = D / 2u;
-    device const uint8_t* W_row = W      + uint(row) * row_bytes;
-    device const bfloat*  s_row = scales + uint(row) * n_groups;
-    device const bfloat*  b_row = biases + uint(row) * n_groups;
 
-    float acc = 0.0f;
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const uint full_blocks = n_groups / 4u;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
-        device const ushort* wp = (device const ushort*)(W_row + byte_base);
-        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
         const uint g  = blk * 4u + (lane >> 3);
-        const float s = float(s_row[g]);
-        const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
         const half4 xa = *((device const half4*)(x + elem));
         const half4 xb = *((device const half4*)(x + elem + 4u));
-        const uint b0 =  w4        & 0xFFu;
-        const uint b1 = (w4 >> 8)  & 0xFFu;
-        const uint b2 = (w4 >> 16) & 0xFFu;
-        const uint b3 = (w4 >> 24) & 0xFFu;
         const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
         const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
-        float dot = 0.0f;
-        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
-        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
-        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
-        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
         const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
-        acc = fma(s, dot, acc);
-        acc = fma(b, sum, acc);
+        const float x1 = e1 * 0x1p-4f, x2 = e2 * 0x1p-8f, x3 = e3 * 0x1p-12f;
+        const float x5 = e5 * 0x1p-4f, x6 = e6 * 0x1p-8f, x7 = e7 * 0x1p-12f;
+        #pragma unroll
+        for (uint r = 0; r < 4u; ++r) {
+            if (r >= valid_rows) continue;
+            const uint row = first_row + r;
+            device const ushort* wp = (device const ushort*)(W + row * row_bytes + byte_base);
+            const uint w0 = uint(wp[0]);
+            const uint w1 = uint(wp[1]);
+            const float s = float(scales[row * n_groups + g]);
+            const float b = float(biases[row * n_groups + g]);
+            float dot = 0.0f;
+            dot = fma(float(w0 & 0x000Fu), e0, dot); dot = fma(float(w0 & 0x00F0u), x1, dot);
+            dot = fma(float(w0 & 0x0F00u), x2, dot); dot = fma(float(w0 & 0xF000u), x3, dot);
+            dot = fma(float(w1 & 0x000Fu), e4, dot); dot = fma(float(w1 & 0x00F0u), x5, dot);
+            dot = fma(float(w1 & 0x0F00u), x6, dot); dot = fma(float(w1 & 0xF000u), x7, dot);
+            acc[r] = fma(s, dot, acc[r]);
+            acc[r] = fma(b, sum, acc[r]);
+        }
     }
     for (uint g = full_blocks * 4u; g < n_groups; ++g) {
-        const float s = float(s_row[g]);
-        const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kLMHeadGroupSize / 2) + lane];
         const float x0 = float(x[g * kLMHeadGroupSize + lane * 2u]);
         const float x1 = float(x[g * kLMHeadGroupSize + lane * 2u + 1u]);
-        float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
-        dot = fma(float(uint(byte >> 4)), x1, dot);
         const float sum = x0 + x1;
-        acc = fma(s, dot, acc);
-        acc = fma(b, sum, acc);
+        #pragma unroll
+        for (uint r = 0; r < 4u; ++r) {
+            if (r >= valid_rows) continue;
+            const uint row = first_row + r;
+            const float s = float(scales[row * n_groups + g]);
+            const float b = float(biases[row * n_groups + g]);
+            const uint8_t byte = W[row * row_bytes + g * (kLMHeadGroupSize / 2) + lane];
+            float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+            dot = fma(float(uint(byte >> 4)), x1, dot);
+            acc[r] = fma(s, dot, acc[r]);
+            acc[r] = fma(b, sum, acc[r]);
+        }
     }
-    return simd_sum(acc);
+    float4 result = float4(-INFINITY);
+    #pragma unroll
+    for (uint r = 0; r < 4u; ++r) {
+        if (r < valid_rows) result[r] = simd_sum(acc[r]);
+    }
+    return result;
 }
 
-[[kernel, max_total_threads_per_threadgroup(256)]]
+[[kernel, max_total_threads_per_threadgroup(64)]]
 void lm_head_greedy_int4_rows_chunk_raw(
     device const half*    x_normed     [[buffer(0)]],
     device const uint8_t* W            [[buffer(1)]],
@@ -703,16 +806,21 @@ void lm_head_greedy_int4_rows_chunk_raw(
     const uint DD = lmhead_fc_d(D);
     const uint VV = lmhead_fc_v(V);
 
-    const uint row = tg_idx * kLMHeadRowsPerTG + simd_group_id;
+    const uint first_row = tg_idx * kLMHeadRowsPerTG + simd_group_id * 4u;
+    const float4 values = lmhead_int4_gemv_rows_simd_dev(
+        W, scales, biases, x_normed, first_row, VV, DD, simd_lane_id);
     float best_v = -INFINITY;
     uint best_i = 0xFFFFFFFFu;
 
-    if (row < VV) {
-        float z = lmhead_int4_gemv_row_simd_dev(W, scales, biases,
-                                                x_normed, row, DD, simd_lane_id);
-        if (simd_lane_id == 0 && isfinite(z)) {
-            best_v = z;
-            best_i = row;
+    if (simd_lane_id == 0) {
+        for (uint r = 0; r < 4u; ++r) {
+            const uint row = first_row + r;
+            const float z = values[r];
+            if (row < VV && isfinite(z) &&
+                (z > best_v || (z == best_v && row < best_i))) {
+                best_v = z;
+                best_i = row;
+            }
         }
     }
 

@@ -3,6 +3,49 @@ import Testing
 @testable import TurboFieldfare
 
 @Suite struct SampleTopK64Tests {
+    @Test(arguments: [1, 1_003, 4_099, 262_144])
+    func tileOutputsMatchFullSort(vocab: Int) throws {
+        let context = try MetalContext()
+        let pipeline = try context.pipeline("sample_topk64_stage1")
+        let values = (0..<vocab).map { Float16(Float(($0 * 48_271) % 97) / 97) }
+        let groups = (vocab + 1023) / 1024
+        let input = try #require(context.device.makeBuffer(bytes: values,
+            length: vocab * 2, options: .storageModeShared))
+        let outputValues = try #require(context.device.makeBuffer(length: groups * 64 * 4, options: .storageModeShared))
+        let outputIndices = try #require(context.device.makeBuffer(length: groups * 64 * 4, options: .storageModeShared))
+        let command = try #require(context.queue.makeCommandBuffer())
+        let encoder = try #require(command.makeComputeCommandEncoder())
+        encoder.setComputePipelineState(pipeline)
+        encoder.setBuffer(input, offset: 0, index: 0)
+        encoder.setBuffer(outputValues, offset: 0, index: 1)
+        encoder.setBuffer(outputIndices, offset: 0, index: 2)
+        var count = UInt32(vocab)
+        encoder.setBytes(&count, length: 4, index: 3)
+        encoder.dispatchThreadgroups(MTLSize(width: groups, height: 1, depth: 1),
+            threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        encoder.endEncoding()
+        command.commit()
+        command.waitUntilCompleted()
+        try checkCommandBufferError(command)
+        let actualIndices = outputIndices.contents().assumingMemoryBound(to: UInt32.self)
+        let actualValues = outputValues.contents().assumingMemoryBound(to: Float.self)
+        for group in 0..<groups {
+            let sorted = (group * 1024..<min(vocab, (group + 1) * 1024)).sorted {
+                values[$0] == values[$1] ? $0 < $1 : values[$0] > values[$1]
+            }
+            for slot in 0..<64 {
+                let index = group * 64 + slot
+                if slot < sorted.count {
+                    #expect(actualIndices[index] == UInt32(sorted[slot]))
+                    #expect(actualValues[index] == Float(values[sorted[slot]]))
+                } else {
+                    #expect(actualIndices[index] == UInt32.max)
+                    #expect(actualValues[index] == -Float.infinity)
+                }
+            }
+        }
+    }
+
     @Test func truncationDefaultsDoNotDisableGreedyEligibility() {
         let config = GenerationConfig(temperature: 0, topK: 64, topP: 0.95)
         #expect(config.isPureGreedy)

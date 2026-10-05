@@ -476,6 +476,26 @@ extension Model {
         return UInt64(missCount) * streamer.layout.expertStride
     }
 
+    /// The serial decode owner releases these after GPU completion.
+    func beginGPUExpertReads(startLayer: Int, maxLayers: Int,
+                             byteLimit: Int) -> [PreadExpertStreamer.GPUReadLease] {
+        streamersQueue.sync {
+            var leases: [PreadExpertStreamer.GPUReadLease] = []
+            var bytes = 0
+            let end = min(startLayer + maxLayers, streamersBox.streamers.count)
+            for layer in startLayer..<end {
+                guard let streamer = streamersBox.streamers[layer],
+                      streamer.slotCount <= GPUExpertCache.maxExperts else { break }
+                let layerBytes = Int(streamer.allocatedCacheBytes)
+                guard layerBytes <= byteLimit - bytes,
+                      let lease = streamer.beginGPURead() else { break }
+                leases.append(lease)
+                bytes += layerBytes
+            }
+            return leases
+        }
+    }
+
     public func planRoutedExperts(layer: Int,
                                   experts: [Int],
                                   avoidingSlots: Set<Int> = []) throws -> RoutedExpertFetchPlan? {
@@ -522,6 +542,16 @@ extension Model {
         try ensureLayerOpened(plan.layer)
         let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
         return streamer.adviseExpertCachePlanMisses(plan.cachePlan)
+    }
+
+    func fetchVerificationExperts(plan: RoutedExpertFetchPlan, inlineMisses: Bool) async throws -> [TensorView] {
+        guard inlineMisses, measurementCapture == nil, !plan.cachePlan.misses.isEmpty else {
+            return try await fetchRoutedExperts(plan: plan)
+        }
+        try ensureLayerOpened(plan.layer)
+        let streamer = streamersQueue.sync { streamersBox.streamers[plan.layer]! }
+        let buffers = try streamer.executeExpertCachePlan(plan.cachePlan)
+        return Self.makeExpertViews(buffers, layer: plan.layer, experts: plan.experts)
     }
 
     public func fetchRoutedExperts(plan: RoutedExpertFetchPlan) async throws -> [TensorView] {

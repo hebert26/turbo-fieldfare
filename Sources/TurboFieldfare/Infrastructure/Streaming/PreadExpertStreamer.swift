@@ -66,6 +66,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private let fd: Int32
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
+    private let slotHeap: MTLHeap?
 
     private var nextSlot = 0
     private let cursorLock = NSLock()
@@ -77,6 +78,79 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var successfulPlanHits: UInt64 = 0
     private var successfulPlanMisses: UInt64 = 0
     private let cacheLock = NSLock()
+    private var gpuReadActive = false
+    private var activeLoads = 0
+
+    /// Keeps cache slots fixed until the command buffer finishes.
+    final class GPUReadLease {
+        let buffers: [MTLBuffer]
+        let experts: [Int]
+        let populatedBuffers: [MTLBuffer]
+        let heap: MTLHeap?
+        private let owner: PreadExpertStreamer
+        private var released = false
+        private var recordedHits = false
+
+        fileprivate init(owner: PreadExpertStreamer, experts: [Int]) {
+            self.owner = owner
+            self.heap = owner.slotHeap
+            self.buffers = owner.slotBuffers
+            self.experts = experts
+            self.populatedBuffers = zip(owner.slotBuffers, experts).compactMap { buffer, expert in
+                expert >= 0 && expert < owner.layout.expertsPerLayer ? buffer : nil
+            }
+        }
+
+        func recordCompletedHits(_ selected: [Int]) throws {
+            try recordCompletedHitGroups([selected])
+        }
+
+        func recordCompletedHitGroups(_ groups: [[Int]]) throws {
+            owner.cacheLock.lock()
+            defer { owner.cacheLock.unlock() }
+            guard !released, !recordedHits, owner.gpuReadActive,
+                  (1...5).contains(groups.count), groups.allSatisfy({ selected in
+                      selected.count == 8 && Set(selected).count == 8 && selected.allSatisfy({
+                          $0 >= 0 && $0 < owner.expertUseCount.count && experts.contains($0)
+                      })
+                  }) else {
+                throw StreamerError.cacheInUse
+            }
+            recordedHits = true
+            for selected in groups {
+                owner.useClock += 1
+                for expert in selected {
+                    owner.expertUseCount[expert] &+= 1
+                    if let slot = experts.firstIndex(of: expert) {
+                        owner.slotLastUse[slot] = owner.useClock
+                    }
+                }
+                owner.successfulPlanHits &+= UInt64(selected.count)
+            }
+        }
+
+        /// Call only after GPU completion, or before submitting any work.
+        func release() {
+            owner.cacheLock.lock()
+            defer { owner.cacheLock.unlock() }
+            guard !released else { return }
+            released = true
+            owner.gpuReadActive = false
+        }
+
+        deinit { release() }
+    }
+
+    func beginGPURead() -> GPUReadLease? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard !gpuReadActive, activeLoads == 0,
+              slotExpert.filter({ $0 >= 0 && $0 < layout.expertsPerLayer }).count >= 8 else {
+            return nil
+        }
+        gpuReadActive = true
+        return GPUReadLease(owner: self, experts: slotExpert)
+    }
 
     public convenience init(layout: StreamLayout,
                             device: MTLDevice,
@@ -141,25 +215,32 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
 
-        for _ in 0..<slotCount {
-            var raw: UnsafeMutableRawPointer?
-            let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
-            guard result == 0, let pointer = raw else {
-                unwind()
-                throw StreamerError.allocFailed(errno: result)
+        if let cached = Self.makeHeapCache(device: device, slotCount: slotCount, allocationSize: allocationSize) {
+            self.slotHeap = cached.heap
+            buffers = cached.buffers
+            pointers = buffers.map { $0.contents() }
+        } else {
+            self.slotHeap = nil
+            for _ in 0..<slotCount {
+                var raw: UnsafeMutableRawPointer?
+                let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
+                guard result == 0, let pointer = raw else {
+                    unwind()
+                    throw StreamerError.allocFailed(errno: result)
+                }
+                pointers.append(pointer)
+                nonisolated(unsafe) let capturedPointer = pointer
+                guard let buffer = device.makeBuffer(
+                    bytesNoCopy: pointer,
+                    length: allocationSize,
+                    options: .storageModeShared,
+                    deallocator: { _, _ in free(capturedPointer) })
+                else {
+                    unwind()
+                    throw StreamerError.bufferWrapFailed
+                }
+                buffers.append(buffer)
             }
-            pointers.append(pointer)
-            nonisolated(unsafe) let capturedPointer = pointer
-            guard let buffer = device.makeBuffer(
-                bytesNoCopy: pointer,
-                length: allocationSize,
-                options: .storageModeShared,
-                deallocator: { _, _ in free(capturedPointer) })
-            else {
-                unwind()
-                throw StreamerError.bufferWrapFailed
-            }
-            buffers.append(buffer)
         }
 
         self.slotPointers = pointers
@@ -168,6 +249,29 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
         closeFDOnFailure = false
+    }
+
+    private static func makeHeapCache(device: MTLDevice, slotCount: Int, allocationSize: Int)
+        -> (heap: MTLHeap, buffers: [MTLBuffer])? {
+        guard slotCount == 64, device.hasUnifiedMemory,
+              ProcessInfo.processInfo.physicalMemory >= 32 * 1_024 * 1_024 * 1_024 else { return nil }
+        let size = device.heapBufferSizeAndAlign(length: allocationSize, options: .storageModeShared)
+        guard size.align > 0, size.size <= Int.max - (size.align - 1) else { return nil }
+        let stride = (size.size + size.align - 1) / size.align * size.align
+        let (bytes, overflow) = stride.multipliedReportingOverflow(by: slotCount)
+        guard !overflow else { return nil }
+        let descriptor = MTLHeapDescriptor()
+        descriptor.size = bytes
+        descriptor.storageMode = .shared
+        descriptor.hazardTrackingMode = .tracked
+        guard let heap = device.makeHeap(descriptor: descriptor) else { return nil }
+        heap.label = "Gemma expert cache"
+        var buffers: [MTLBuffer] = []
+        for _ in 0..<slotCount {
+            guard let buffer = heap.makeBuffer(length: allocationSize, options: .storageModeShared) else { return nil }
+            buffers.append(buffer)
+        }
+        return (heap, buffers)
     }
 
     deinit {
@@ -187,6 +291,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
         guard slot >= 0 && slot < slotCount else {
             throw StreamerError.slotOutOfRange(slot)
+        }
+        cacheLock.lock()
+        guard !gpuReadActive else {
+            cacheLock.unlock()
+            throw StreamerError.cacheInUse
+        }
+        activeLoads += 1
+        cacheLock.unlock()
+        defer {
+            cacheLock.lock()
+            activeLoads -= 1
+            cacheLock.unlock()
         }
         let regionOffset = layout.expertOffset(layer: layer, expert: expert)
         guard regionOffset + layout.expertStride <= layout.streamSize else {
@@ -226,6 +342,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
+        guard !gpuReadActive else { return nil }
         let clock = useClock + 1
         var assignedSlots = [Int](repeating: -1, count: experts.count)
         var reserved = [Bool](repeating: false, count: slotCount)

@@ -120,6 +120,7 @@ public func runRawCompletion(producer: any LogitProducer,
     }
     let fusedRunner = producer as? RealForwardRunner
     let fusedGreedy = fusedRunner?.usesFusedGreedyHead == true
+    let draftRunner = multimodalInput == nil && fusedRunner?.usesGemmaDraft == true ? fusedRunner : nil
     guard !fusedGreedy || config.isPureGreedy else {
         throw PrefillError.unsupportedPrefillSeed(
             "the fused-head producer cannot serve this sampling configuration; use a logits head")
@@ -255,65 +256,112 @@ public func runRawCompletion(producer: any LogitProducer,
     var reason: StopReason = .maxTokens
     var uncommittedBoundaryTokenIDs: [Int32] = []
     var trailingInvisibleTokens = 0
+    var verifiedTokens: [Int32] = []
 
-    while true {
-        try Task.checkCancellation()
+    do {
+        while true {
+            try Task.checkCancellation()
 
-        let tokenID: Int32
-        if generated == 0, let seed = prefillSeed {
-            switch seed {
-            case .greedyToken(let token):
-                tokenID = Int32(bitPattern: token)
-            case .logitsWritten:
+            let tokenID: Int32
+            if !verifiedTokens.isEmpty {
+                tokenID = verifiedTokens.removeFirst()
+            } else if generated == 0, let seed = prefillSeed {
+                switch seed {
+                case .greedyToken(let token):
+                    tokenID = Int32(bitPattern: token)
+                case .logitsWritten:
+                    tokenID = try sampleOnce(scratch: scratch, context: context,
+                                             history: history, config: config, position: generated)
+                }
+            } else if fusedGreedy {
+                tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
+            } else {
                 tokenID = try sampleOnce(scratch: scratch, context: context,
                                          history: history, config: config, position: generated)
             }
-        } else if fusedGreedy {
-            tokenID = Int32(bitPattern: fusedRunner!.lastGreedyToken)
-        } else {
-            tokenID = try sampleOnce(scratch: scratch, context: context,
-                                     history: history, config: config, position: generated)
-        }
-        generated += 1
-        uncommittedBoundaryTokenIDs = [tokenID]
+            generated += 1
+            uncommittedBoundaryTokenIDs = [tokenID]
 
-        if tokenizer.stopTokenIDs.contains(tokenID) || config.extraStopTokens.contains(tokenID) {
-            if tokenID == tokenizer.endOfTurnID {
-                reason = .endOfTurn
-            } else if tokenID == tokenizer.toolResponseID {
-                reason = .toolCalls
-            } else {
-                reason = .eos
+            if tokenizer.stopTokenIDs.contains(tokenID) || config.extraStopTokens.contains(tokenID) {
+                if tokenID == tokenizer.endOfTurnID {
+                    reason = .endOfTurn
+                } else if tokenID == tokenizer.toolResponseID {
+                    reason = .toolCalls
+                } else {
+                    reason = .eos
+                }
+                let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
+                if !tail.isEmpty { onProgress(.tail(tail)) }
+                break
             }
-            let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
-            if !tail.isEmpty { onProgress(.tail(tail)) }
-            break
+
+            let delta = detok.push(tokenID)
+            let visible = stopMatcher.push(delta)
+            onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
+
+            // Cancellation is not a stop-string match: reporting it as one made a
+            // user pressing Stop indistinguishable from a configured stop string,
+            // and `stopStringFiltered` is computed from `isStopped` rather than the
+            // reason, so the two disagreed about the same run.
+            let hitStopString = stopMatcher.isStopped
+            let cancelled = !hitStopString && shouldStop()
+            let hitMax = generated >= config.maxNewTokens
+            if hitStopString || cancelled || hitMax {
+                if !visible.isEmpty { trailingInvisibleTokens = 0 }
+                let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
+                if !tail.isEmpty { onProgress(.tail(tail)) }
+                reason = hitStopString ? .stopString : (cancelled ? .cancelled : .maxTokens)
+                break
+            }
+
+            history.append(tokenID)
+            trailingInvisibleTokens = visible.isEmpty ? trailingInvisibleTokens + 1 : 0
+            if verifiedTokens.isEmpty {
+                if let draftRunner, config.maxNewTokens - generated >= 2 {
+                    let proposed = try draftRunner.proposeDraft(after: tokenID, count: 1)
+                    let encodeFirstSample: ((MTLCommandBuffer, MTLBuffer) -> Void)?
+                    if config.repetitionPenalty == 1, case .gemmaSoftcap = config.logitTransform {
+                        // Select the first token before the existing GPU wait.
+                        encodeFirstSample = { command, logits in
+                            scratch.sampler.sample(commandBuffer: command, logits: logits,
+                                probs: scratch.probs, history: [], config: config,
+                                position: generated, outToken: scratch.outToken)
+                        }
+                    } else {
+                        encodeFirstSample = nil
+                    }
+                    let scores = try await draftRunner.verifyDraft(tokens: [tokenID] + proposed,
+                        encodeFirstSample: encodeFirstSample)
+                    var sampleHistory = history
+                    for row in scores.indices {
+                        let sampled: Int32
+                        if row == 0, encodeFirstSample != nil {
+                            sampled = Int32(bitPattern: scratch.outToken.contents().load(as: UInt32.self))
+                        } else {
+                            sampled = try sampleOnce(scratch: scratch, context: context,
+                                history: sampleHistory, config: config, position: generated + row, logits: scores[row])
+                        }
+                        verifiedTokens.append(sampled)
+                        if tokenizer.stopTokenIDs.contains(sampled) || config.extraStopTokens.contains(sampled) { break }
+                        guard row < proposed.count, sampled == proposed[row] else { break }
+                        sampleHistory.append(sampled)
+                    }
+                    try draftRunner.acceptVerifiedPrefix(count: verifiedTokens.count)
+                } else {
+                    try await producer.produce(token: tokenID, position: position, into: scratch.logits)
+                }
+            }
+            position += 1
+            uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
         }
-
-        let delta = detok.push(tokenID)
-        let visible = stopMatcher.push(delta)
-        onProgress(.token(index: generated - 1, id: tokenID, delta: visible))
-
-        // Cancellation is not a stop-string match: reporting it as one made a
-        // user pressing Stop indistinguishable from a configured stop string,
-        // and `stopStringFiltered` is computed from `isStopped` rather than the
-        // reason, so the two disagreed about the same run.
-        let hitStopString = stopMatcher.isStopped
-        let cancelled = !hitStopString && shouldStop()
-        let hitMax = generated >= config.maxNewTokens
-        if hitStopString || cancelled || hitMax {
-            if !visible.isEmpty { trailingInvisibleTokens = 0 }
-            let tail = stopMatcher.push(detok.flush()) + stopMatcher.finish()
-            if !tail.isEmpty { onProgress(.tail(tail)) }
-            reason = hitStopString ? .stopString : (cancelled ? .cancelled : .maxTokens)
-            break
+    } catch {
+        if let draftRunner, draftRunner.continuationPosition > position {
+            try? draftRunner.rewind(to: position)
         }
-
-        history.append(tokenID)
-        trailingInvisibleTokens = visible.isEmpty ? trailingInvisibleTokens + 1 : 0
-        try await producer.produce(token: tokenID, position: position, into: scratch.logits)
-        position += 1
-        uncommittedBoundaryTokenIDs.removeAll(keepingCapacity: true)
+        throw error
+    }
+    if let draftRunner, draftRunner.continuationPosition > position {
+        try draftRunner.rewind(to: position)
     }
 
     return RawDecodeResult(prefillTokens: promptIds.count,
@@ -331,9 +379,10 @@ public func runRawCompletion(producer: any LogitProducer,
 }
 
 private func sampleOnce(scratch: RawCompletionScratch, context: MetalContext,
-                        history: [Int32], config: GenerationConfig, position: Int) throws -> Int32 {
+                        history: [Int32], config: GenerationConfig, position: Int,
+                        logits: MTLBuffer? = nil) throws -> Int32 {
     let cb = context.queue.makeCommandBuffer()!
-    scratch.sampler.sample(commandBuffer: cb, logits: scratch.logits, probs: scratch.probs,
+    scratch.sampler.sample(commandBuffer: cb, logits: logits ?? scratch.logits, probs: scratch.probs,
                            history: history, config: config, position: position,
                            outToken: scratch.outToken)
     cb.commit(); cb.waitUntilCompleted()

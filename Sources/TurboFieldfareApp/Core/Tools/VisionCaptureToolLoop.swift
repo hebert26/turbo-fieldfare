@@ -47,6 +47,7 @@ public enum VisionCaptureAgentError: Error, Equatable, Sendable,
     case skillReadFailed(String)
     case malformedCall(String)
     case navigationUnavailable(String)
+    case proposalCorrectionExhausted(String)
     case identityMismatch
     case returnedIdentityMismatch(fieldPath: String, refusalCode: String?)
     case launchOutcomeUnproven(String)
@@ -68,6 +69,7 @@ public enum VisionCaptureAgentError: Error, Equatable, Sendable,
         case .malformedCall(let message):
             "Gemma returned an invalid navigation proposal: \(message)"
         case .navigationUnavailable(let message): message
+        case .proposalCorrectionExhausted(let message): message
         case .identityMismatch:
             "The configured application or Simulator differs from the locked target."
         case .returnedIdentityMismatch(let fieldPath, let refusalCode):
@@ -539,7 +541,7 @@ actor VisionCaptureToolLoop {
     }
 
     private struct LocalProposalTracker {
-        private static let repeatLimit = 3
+        private static let repeatLimit = 6
         private static let trackedSignatureLimit = 24
 
         private struct ScreenRejection {
@@ -997,6 +999,7 @@ actor VisionCaptureToolLoop {
         } ?? false
         performanceCompactionPolicy.beginConversation(conversationEpoch)
         if resumesRetainedTask {
+            localProposals.reset()
             // The new model context has not observed these private targets.
             // Retire their host capabilities before it can choose another app action.
             invalidateScreenObservation()
@@ -1390,7 +1393,8 @@ actor VisionCaptureToolLoop {
                         screen: currentScreenContentIdentity
                     )
                     if rejection.shouldStop {
-                        throw VisionCaptureAgentError.malformedCall(reason)
+                        throw VisionCaptureAgentError.proposalCorrectionExhausted(
+                            "Agent paused after six rejected proposals without progress. No rejected action was sent. Completed work is retained. You can continue this chat.")
                     }
                     let failure = try Self.proposalFailureResult(
                         error,
@@ -1400,7 +1404,7 @@ actor VisionCaptureToolLoop {
                     let repairPacket = try decisionPacket(
                         from: failure, call: call, configuration: configuration, images: [],
                         excludingTargetID: rejectedTarget, preservingChoiceIDs: true)
-                    content = repairPacket.content
+                    content = try Self.addingProposalCorrection(to: repairPacket.content)
                     if !requiresReadOnlyRecovery, uncertainAlertPress == nil,
                        let repetitionCount = readOnlyNoProgress.activeCorrection(
                            content: try repairPacket.comparison.encoded(),
@@ -6278,6 +6282,31 @@ actor VisionCaptureToolLoop {
         return try JSONValue.object(body).encoded()
     }
 
+    static func addingProposalCorrection(to content: String) throws -> String {
+        guard var packet = try JSONDecoder().decode(JSONValue.self,
+                  from: Data(content.utf8)).objectValue,
+              case .array(let allowed)? = packet["allowed_next"] else {
+            throw VisionCaptureAgentError.malformedCall("Missing allowed actions in the correction.")
+        }
+        let actions = allowed.compactMap { value -> String? in
+            guard case .string(let action) = value else { return nil }
+            return action
+        }.joined(separator: ", ")
+        let reason: String
+        if case .string(let guidance)? = packet["guidance"] {
+            reason = guidance
+        } else {
+            reason = "The proposed action was not sent."
+        }
+        packet["guidance"] = .string(reason
+            + " Return a corrected response. Allowed actions now: [\(actions)]."
+            + " Use an action from this list and a current choice that supports it."
+            + " Do not use an old target ID. Do not request observe or screenshot unless listed."
+            + " If no permitted action can advance the task, explain the blocker in a final answer without a tool call."
+            + " Completed actions remain completed; do not repeat them.")
+        return try JSONValue.object(packet).encoded()
+    }
+
     private static let expiredTargetReason =
         "The target ID is expired, ambiguous, or unavailable. Choose a current choice. Old IDs cannot be restored."
 
@@ -6299,7 +6328,7 @@ actor VisionCaptureToolLoop {
             throw VisionCaptureAgentError.malformedCall("The rejected target correction could not retain its not-sent result.")
         }
         packet["guidance"] = .string(guidance
-            + " This is the second equivalent rejected proposal. Do not reuse rejected_target. Choose a different current choice or a permitted read-only observation. A screenshot cannot renew an old ID or bypass a refusal. A third equivalent rejection stops Agent Mode.")
+            + " This is the second equivalent rejected proposal. Do not reuse rejected_target. Choose a different current choice or a permitted read-only observation. A screenshot cannot renew an old ID or bypass a refusal.")
         return try JSONValue.object(packet).encoded()
     }
 

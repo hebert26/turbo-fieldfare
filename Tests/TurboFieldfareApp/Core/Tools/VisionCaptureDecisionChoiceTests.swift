@@ -5,6 +5,23 @@ import TurboFieldfare
 
 @Suite struct VisionCaptureDecisionChoiceTests {
     @Test
+    func proposalCorrectionPreservesChoicesAndListsOnlyPermittedActions() throws {
+        let packet: JSONValue = .object([
+            "allowed_next": .array([.string("back"), .string("swipe"), .string("tap")]),
+            "choices": .array([.object(["id": .string("c33"), "label": .string("return")])]),
+            "last_action": .object(["action": .string("observe"), "verdict": .string("not_sent")]),
+            "guidance": .string("Observation is not permitted."),
+        ])
+        let corrected = try VisionCaptureToolLoop.addingProposalCorrection(to: packet.encoded())
+        let result = try JSONDecoder().decode(JSONValue.self, from: Data(corrected.utf8))
+        #expect(result.objectValue?["choices"] == packet.objectValue?["choices"])
+        #expect(result.objectValue?["allowed_next"] == packet.objectValue?["allowed_next"])
+        #expect(result.objectValue?["last_action"] == packet.objectValue?["last_action"])
+        #expect(corrected.contains("Allowed actions now: [back, swipe, tap]"))
+        #expect(corrected.contains("without a tool call"))
+    }
+
+    @Test
     func editableFieldAliasesPublishOneIdentifierChoicePerElement() {
         let root: JSONValue = .object([
             "elements": .array([

@@ -578,6 +578,11 @@ public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
     public var rdadviseMegabytesPerToken: Double
     public var rdadviseSkippedPerToken: Double
     public var rdadviseFailures: UInt64
+    public var gpuExpertCacheEligibleForwards: UInt64?
+    public var gpuExpertCacheBatches: UInt64?
+    public var gpuExpertCacheHitExperts: UInt64?
+    public var gpuExpertCacheFirstMisses: UInt64?
+    public var gpuExpertCacheCPUFallbackLayers: UInt64?
 
     public init(cb1MillisecondsPerToken: Double,
                 routerWaitMillisecondsPerToken: Double? = nil,
@@ -589,7 +594,12 @@ public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
                 rdadviseCallsPerToken: Double,
                 rdadviseMegabytesPerToken: Double,
                 rdadviseSkippedPerToken: Double,
-                rdadviseFailures: UInt64) {
+                rdadviseFailures: UInt64,
+                gpuExpertCacheEligibleForwards: UInt64? = nil,
+                gpuExpertCacheBatches: UInt64? = nil,
+                gpuExpertCacheHitExperts: UInt64? = nil,
+                gpuExpertCacheFirstMisses: UInt64? = nil,
+                gpuExpertCacheCPUFallbackLayers: UInt64? = nil) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.routerWaitMillisecondsPerToken = routerWaitMillisecondsPerToken
         self.gpuCompletionTiming = gpuCompletionTiming
@@ -601,6 +611,11 @@ public struct DecodeRunnerDiagnostics: Codable, Sendable, Equatable {
         self.rdadviseMegabytesPerToken = rdadviseMegabytesPerToken
         self.rdadviseSkippedPerToken = rdadviseSkippedPerToken
         self.rdadviseFailures = rdadviseFailures
+        self.gpuExpertCacheEligibleForwards = gpuExpertCacheEligibleForwards
+        self.gpuExpertCacheBatches = gpuExpertCacheBatches
+        self.gpuExpertCacheHitExperts = gpuExpertCacheHitExperts
+        self.gpuExpertCacheFirstMisses = gpuExpertCacheFirstMisses
+        self.gpuExpertCacheCPUFallbackLayers = gpuExpertCacheCPUFallbackLayers
     }
 }
 

@@ -358,6 +358,93 @@ import TurboFieldfareValidationSupport
     }
 
 
+    @Test(arguments: [1, 7, 61, 512, 1187])
+    func swaRegistersKeepExactOutput(length: Int) throws {
+        let ctx = try MetalContext()
+        let reference = try Attention(context: ctx, retainSWAQuery: false, useQueryPair: false)
+        let candidate = try Attention(context: ctx, useQueryPair: false)
+        let capacity = length > 1024 ? 1152 : length
+        var rng = SeedTree(0x527).key("swa-registers-\(length)")
+        let q = (0..<4096).map { _ in Float16(rng.uniform(-0.25, 0.25)) }
+        let k = (0..<(capacity * 2048)).map { _ in Float16(rng.uniform(-0.25, 0.25)) }
+        let v = (0..<(capacity * 2048)).map { _ in Float16(rng.uniform(-0.5, 0.5)) }
+        let qBuffer = try #require(Fp16Buffer.make(ctx.device, halves: q))
+        let kBuffer = try #require(Fp16Buffer.make(ctx.device, halves: k))
+        let vBuffer = try #require(Fp16Buffer.make(ctx.device, halves: v))
+        let outputs = try (0..<2).map { _ in
+            try #require(Fp16Buffer.make(ctx.device, count: 4096))
+        }
+        let command = try #require(ctx.queue.makeCommandBuffer())
+        for (index, kernel) in [reference, candidate].enumerated() {
+            kernel.encodeSWA(commandBuffer: command, q: qBuffer,
+                k: kBuffer, v: vBuffer, out: outputs[index],
+                headDim: 256, numQHeads: 16, numKVHeads: 8,
+                seqLen: UInt32(length), window: 1024, scale: 1,
+                ringCapacity: length > 1024 ? UInt32(capacity) : 0)
+        }
+        command.commit()
+        command.waitUntilCompleted()
+        try checkCommandBufferError(command)
+        let bits = outputs.map {
+            Array(UnsafeBufferPointer(start: $0.contents().assumingMemoryBound(to: UInt16.self), count: 4096))
+        }
+        #expect(bits[0] == bits[1])
+    }
+
+    @Test(arguments: [1, 7, 8, 16, 32, 61, 511, 1023, 1024, 1025, 1152, 1187], [false, true])
+    func pairedAttentionKeepsExactOutput(length: Int, full: Bool) throws {
+        let ctx = try MetalContext()
+        let attention = try Attention(context: ctx)
+        let baseline = try Attention(context: ctx, useQueryPair: false)
+        let hd = full ? 512 : 256
+        let nk = full ? 2 : 8
+        let capacity = !full && length >= 1152 ? 1152 : length + 1
+        let ring = !full && length >= 1152 ? UInt32(capacity) : 0
+        attention.useTokenPairReuse = true
+        var rng = SeedTree(0x638).key("paired-attention-\(length)-\(full)")
+        func input(_ count: Int) throws -> MTLBuffer {
+            let values = (0..<count).map { _ in Float16(rng.uniform(-0.25, 0.25)) }
+            return try #require(Fp16Buffer.make(ctx.device, halves: values))
+        }
+        let queries = try [input(16 * hd), input(16 * hd)]
+        let keys = try input(capacity * nk * hd)
+        let values = try input(capacity * nk * hd)
+        let outputs = try (0..<6).map { _ in
+            try #require(Fp16Buffer.make(ctx.device, count: 16 * hd))
+        }
+        let command = try #require(ctx.queue.makeCommandBuffer())
+        let encoded = try attention.encodePair(commandBuffer: command,
+            queries: queries, keys: keys, values: values, outputs: Array(outputs[2...3]),
+            full: full, firstLength: UInt32(length), window: 1024, ringCapacity: ring)
+        #expect(encoded == (length >= (full ? 16 : 8)))
+        for (kernel, offset) in [(baseline, 0), (attention, 4)] {
+            for row in 0..<2 {
+                if full {
+                    kernel.encodeFull(commandBuffer: command, q: queries[row],
+                        k: keys, v: values, out: outputs[row + offset], headDim: UInt32(hd),
+                        numQHeads: 16, numKVHeads: UInt32(nk), seqLen: UInt32(length + row), scale: 1)
+                } else {
+                    kernel.encodeSWA(commandBuffer: command, q: queries[row],
+                        k: keys, v: values, out: outputs[row + offset], headDim: UInt32(hd),
+                        numQHeads: 16, numKVHeads: UInt32(nk), seqLen: UInt32(length + row),
+                        window: 1024, scale: 1, ringCapacity: ring)
+                }
+            }
+        }
+        command.commit()
+        command.waitUntilCompleted()
+        try checkCommandBufferError(command)
+        for row in 0..<2 {
+            let reference = Data(bytes: outputs[row].contents(), count: 16 * hd * 2)
+            let single = Data(bytes: outputs[row + 4].contents(), count: 16 * hd * 2)
+            #expect(reference == single)
+            if encoded {
+                let paired = Data(bytes: outputs[row + 2].contents(), count: 16 * hd * 2)
+                #expect(reference == paired)
+            }
+        }
+    }
+
     // Full --------------------------------------------------------------------
 
     @Test func attentionFull_smallShape() throws {

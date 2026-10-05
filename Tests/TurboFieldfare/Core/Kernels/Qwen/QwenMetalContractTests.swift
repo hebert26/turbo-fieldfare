@@ -88,8 +88,9 @@ import Testing
 
     @Test func qwenCommonIsDiscoveredOnceAfterExistingProductionModules() throws {
         let existingModules = [
-            "dequant_int4", "dequant_int8", "rmsnorm", "rope", "attention", "moe",
-            "logit", "utility", "fused", "prefill", "vision",
+            "dequant_int4", "gemma_verify_int4", "dequant_int8", "rmsnorm", "rope", "attention", "moe",
+            "gemma_verify_moe",
+            "logit", "utility", "fused", "gemma_verify_fused", "prefill", "vision",
         ]
         #expect(MetalContext.shaderModules == existingModules + [
             "qwen_common", "qwen_bf16", "qwen_full_attention", "qwen_linear_attention", "qwen_moe",
