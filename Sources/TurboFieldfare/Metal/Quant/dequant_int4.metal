@@ -25,6 +25,7 @@ constant uint FC_INT4_QKV_MQ [[function_constant(23)]];
 constant uint FC_INT4_QKV_MKV [[function_constant(24)]];
 constant uint FC_INT4_QKV_N [[function_constant(25)]];
 constant bool FC_INT4_QKV_USE_FC [[function_constant(26)]];
+constant bool FC_INT4_QKV_K_EQUALS_V [[function_constant(27)]];
 
 static inline uint int4_fc_m(constant uint& M) {
     return (is_function_constant_defined(FC_INT4_USE_FC) &&
@@ -91,6 +92,8 @@ static inline void dequant_int4_gemv_simd_body(
     device const bfloat*  biases,
     device const half*    x,
     device half*          y,
+    device half*          duplicate_y,
+    bool                  duplicate_output,
     uint                  M,
     uint                  N,
     uint                  first_row,
@@ -154,7 +157,11 @@ static inline void dequant_int4_gemv_simd_body(
     for (uint r = 0; r < 4u; ++r) {
         if (r >= valid_rows) continue;
         const float value = simd_sum(acc[r]);
-        if (lane == 0) y[first_row + r] = half(value);
+        if (lane == 0) {
+            const half result = half(value);
+            y[first_row + r] = result;
+            if (duplicate_output) duplicate_y[first_row + r] = result;
+        }
     }
 }
 
@@ -174,7 +181,7 @@ void dequant_int4_gemv_simd(
     constexpr uint rows_per_tg = 8;
     const uint MM = int4_fc_m(M);
     const uint NN = int4_fc_n(N);
-    dequant_int4_gemv_simd_body(W, scales, biases, x, y, MM, NN,
+    dequant_int4_gemv_simd_body(W, scales, biases, x, y, y, false, MM, NN,
                                 tg_idx * rows_per_tg + sg_idx * 4u, lane);
 }
 
@@ -206,28 +213,33 @@ void dequant_int4_qkv_gemv_simd(
     const uint NN = int4_qkv_fc_n(N);
     const uint q_groups = QQ / 4u + uint(QQ % 4u != 0u);
     const uint kv_groups = KK / 4u + uint(KK % 4u != 0u);
+    const bool k_equals_v = is_function_constant_defined(FC_INT4_QKV_K_EQUALS_V) &&
+        FC_INT4_QKV_K_EQUALS_V;
     const uint group = tg_idx * 2u + sg_idx;
-    if (group >= q_groups + 2u * kv_groups) return;
+    if (group >= q_groups + (k_equals_v ? kv_groups : 2u * kv_groups)) return;
 
     device const uint8_t* W;
     device const bfloat* scales;
     device const bfloat* biases;
     device half* y;
+    device half* duplicate_y;
+    bool duplicate_output = false;
     uint local_row;
     uint M;
     if (group < q_groups) {
-        W = qW; scales = qScales; biases = qBiases; y = qY;
+        W = qW; scales = qScales; biases = qBiases; y = qY; duplicate_y = qY;
         local_row = group * 4u;
         M = QQ;
     } else if (group < q_groups + kv_groups) {
-        W = kW; scales = kScales; biases = kBiases; y = kY;
+        W = kW; scales = kScales; biases = kBiases; y = kY; duplicate_y = vY;
+        duplicate_output = k_equals_v;
         local_row = (group - q_groups) * 4u;
         M = KK;
     } else {
-        W = vW; scales = vScales; biases = vBiases; y = vY;
+        W = vW; scales = vScales; biases = vBiases; y = vY; duplicate_y = vY;
         local_row = (group - q_groups - kv_groups) * 4u;
         M = KK;
     }
-    dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
+    dequant_int4_gemv_simd_body(W, scales, biases, x, y, duplicate_y, duplicate_output, M, NN,
                                 local_row, lane);
 }

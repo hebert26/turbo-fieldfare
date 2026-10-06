@@ -1765,7 +1765,7 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
                                     vOut: vSlot.buffer, vOutOffset: vSlot.offset,
                                     qRows: qDim,
                                     kvRows: kvDim,
-                                    n: D, conditional: conditional)
+                                    n: D, kEqualsV: isFull, conditional: conditional)
             }
 
             let gQKVEpilogue: (MTLCommandBuffer) -> Void = { [self] cb in
@@ -2628,7 +2628,8 @@ public final class RealForwardRunner: ChunkedPrefillRunner, MultimodalPrefillRun
         try projection.encodeMany(command: command,
             projections: [matrix(q, m: qDim, n: d), matrix(k, m: kvDim, n: d), matrix(v, m: kvDim, n: d)],
             inputs: rows.map { ($0.normed, 0) },
-            outputs: [rows.map { ($0.qScratch, 0) }, keySlots, valueSlots], conditional: conditional)
+            outputs: [rows.map { ($0.qScratch, 0) }, keySlots, valueSlots],
+            kEqualsV: full, conditional: conditional)
         try draftVerifyFusions!.epilogue(command: command, rows: rows, keys: keySlots, values: valueSlots,
             qNorm: qNorm, kNorm: kNorm, headDim: headDim, heads: UInt32(cfg.numHeads), kvHeads: heads,
             position: start, theta: Float(full ? cfg.fullRopeTheta : cfg.ropeTheta),

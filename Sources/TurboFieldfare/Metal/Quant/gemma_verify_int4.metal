@@ -2,6 +2,7 @@
 using namespace metal;
 
 constant uint GEMMA_VERIFY_BATCH [[function_constant(90)]];
+constant bool GEMMA_VERIFY_K_EQUALS_V [[function_constant(92)]];
 
 // Reuse each packed weight across the proposed tokens.
 // Each token keeps the normal decode order of sums and multiply-adds.
@@ -183,7 +184,14 @@ void gemma_verify_int4_many(
     #pragma unroll
     for (uint token = 0; token < GEMMA_VERIFY_BATCH; ++token) {
         const float value = simd_sum(acc[token]);
-        if (lane == 0) outputs[token][row] = half(value);
+        if (lane == 0) {
+            const half result = half(value);
+            outputs[token][row] = result;
+            if (is_function_constant_defined(GEMMA_VERIFY_K_EQUALS_V) &&
+                GEMMA_VERIFY_K_EQUALS_V && group.z == 1u) {
+                allOutputs[10u + token][row] = result;
+            }
+        }
     }
 }
 

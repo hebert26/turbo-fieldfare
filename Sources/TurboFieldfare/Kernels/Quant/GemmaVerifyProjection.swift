@@ -4,6 +4,7 @@ import Metal
 final class GemmaVerifyProjection {
     private let pipelines: [MTLComputePipelineState]
     private let manyPipelines: [MTLComputePipelineState]
+    private let manyKEqualsVPipelines: [MTLComputePipelineState]
     private let wideHead: MTLComputePipelineState
     var useWideHead = false
     private let gelu: MTLComputePipelineState
@@ -23,11 +24,18 @@ final class GemmaVerifyProjection {
                 MetalFunctionConstant(index: 90, value: .uint32(UInt32(count)))
             ], maxTotalThreadsPerThreadgroup: 128)
         }
+        manyKEqualsVPipelines = try (1...5).map { count in
+            try context.pipeline("gemma_verify_int4_many", constants: [
+                MetalFunctionConstant(index: 90, value: .uint32(UInt32(count))),
+                MetalFunctionConstant(index: 92, value: .bool(true)),
+            ], maxTotalThreadsPerThreadgroup: 128)
+        }
     }
 
     func encodeMany(command: MTLCommandBuffer, projections: [SharedExpertProjection],
                     inputs: [(buffer: MTLBuffer, offset: Int)],
                     outputs: [[(buffer: MTLBuffer, offset: Int)]],
+                    kEqualsV: Bool = false,
                     conditional: DecodeDispatch? = nil) throws {
         guard (1...3).contains(projections.count), (1...5).contains(inputs.count),
               outputs.count == projections.count,
@@ -39,9 +47,18 @@ final class GemmaVerifyProjection {
                       $0.offset >= 0 && $0.offset % 2 == 0 &&
                       $0.offset <= $0.buffer.length - Int(projection.rows) * 2
                   }
-              }) else { throw SharedExpertError.dimensionMismatch("Invalid joined verification projection") }
+              }), !kEqualsV || (projections.count == 3 &&
+                  projections[1].weights === projections[2].weights &&
+                  projections[1].scales === projections[2].scales &&
+                  projections[1].biases === projections[2].biases &&
+                  projections[1].weightsOffset == projections[2].weightsOffset &&
+                  projections[1].scalesOffset == projections[2].scalesOffset &&
+                  projections[1].biasesOffset == projections[2].biasesOffset &&
+                  projections[1].rows == projections[2].rows) else {
+            throw SharedExpertError.dimensionMismatch("Invalid joined verification projection")
+        }
         guard let encoder = command.makeComputeCommandEncoder() else { throw MetalError.noQueue }
-        encoder.setComputePipelineState(manyPipelines[inputs.count - 1])
+        encoder.setComputePipelineState((kEqualsV ? manyKEqualsVPipelines : manyPipelines)[inputs.count - 1])
         for index in 0..<3 {
             let matrix = projections[min(index, projections.count - 1)]
             encoder.setBuffer(matrix.weights, offset: matrix.weightsOffset, index: index * 3)
@@ -62,7 +79,8 @@ final class GemmaVerifyProjection {
         encoder.setBytes(&rowCounts, length: 12, index: 29)
         encoder.setBytes(&columns, length: 4, index: 30)
         encoder.dispatchDecode(MTLSize(width: (Int(rowCounts.max()!) + 3) / 4,
-            height: 1, depth: projections.count), threads: MTLSize(width: 128, height: 1, depth: 1),
+            height: 1, depth: kEqualsV ? 2 : projections.count),
+            threads: MTLSize(width: 128, height: 1, depth: 1),
             conditional: conditional)
         encoder.endEncoding()
     }
