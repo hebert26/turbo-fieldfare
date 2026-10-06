@@ -1,4 +1,5 @@
 import TurboFieldfareAppCore
+import TurboFieldfareMacPresentation
 import SwiftUI
 
 struct ModelStatusBadge: View {
@@ -7,13 +8,22 @@ struct ModelStatusBadge: View {
     var body: some View {
         HStack(spacing: 6) {
             statusDot
-            Text("Gemma 4 26B")
+            Text(identity.selectedName)
                 .font(.callout.weight(.semibold))
                 .lineLimit(1)
-                .help(model.installDescriptor.repoID)
-                .accessibilityLabel("Model")
-                .accessibilityValue(model.installDescriptor.repoID)
+                .help(identity.loadedDetail ?? identity.selectedState)
+                .accessibilityLabel("Model status")
+                .accessibilityValue(identity.accessibilityValue)
         }
+    }
+
+    private var identity: AppModelIdentityPresentation {
+        .resolve(
+            selected: model.selectedModelEntry,
+            installationStatus: model.installationStatus,
+            loadState: model.loadState,
+            transition: model.modelSelectionTransition,
+            readiness: model.loadedModelReadiness)
     }
 
     @ViewBuilder

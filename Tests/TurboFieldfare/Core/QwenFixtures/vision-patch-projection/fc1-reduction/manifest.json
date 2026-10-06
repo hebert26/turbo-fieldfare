@@ -1,0 +1,78 @@
+{
+  "kind": "qwen-source-vision-fc1-reduction-synthetic-v1",
+  "shape": [
+    308,
+    4304,
+    1152
+  ],
+  "rows": [
+    0,
+    154,
+    307
+  ],
+  "columns": [
+    0,
+    15,
+    2143,
+    2144,
+    2145,
+    2146,
+    2147,
+    2148,
+    2149,
+    2150,
+    2151,
+    2152,
+    2153,
+    2154,
+    2155,
+    2156,
+    2157,
+    2158,
+    2159,
+    2160,
+    2161,
+    4288,
+    4303
+  ],
+  "inputFile": "input.fp32-le.bin",
+  "weightFile": "weight.bf16-le.bin",
+  "biasFile": "bias.bf16-le.bin",
+  "expectedFile": "expected.fp32-le.bin",
+  "inputShape": [
+    308,
+    1152
+  ],
+  "weightShape": [
+    23,
+    1152
+  ],
+  "biasShape": [
+    23
+  ],
+  "expectedShape": [
+    3,
+    23
+  ],
+  "sourceReceiptSHA256": "eb426f4d7969fd40148f0f1d477b3ea1272f38674d9f2031b9381a75cade02fa",
+  "sourceCase": "m308-n4304-k1152",
+  "oracle": "Main-generated pinned Torch F.linear selected targets and operands; no original model weights",
+  "files": {
+    "input.fp32-le.bin": {
+      "byteCount": 1419264,
+      "sha256": "e3b4469a0579b6220c11cccbabc3f3fb84681b3c8f77302a33c65be44cbe4d75"
+    },
+    "weight.bf16-le.bin": {
+      "byteCount": 52992,
+      "sha256": "efe79170792dc8bf9ac73d55927159bde5aef004abb4fd0248d4808456074522"
+    },
+    "bias.bf16-le.bin": {
+      "byteCount": 46,
+      "sha256": "892b17a41bd224a2097a67e8ca59ec0fc408867c06653548626b8ccc7ce81929"
+    },
+    "expected.fp32-le.bin": {
+      "byteCount": 276,
+      "sha256": "fcd704595f94041ab2094207cbc88cdfd5734c93017a47e8f50da3d627fc3168"
+    }
+  }
+}

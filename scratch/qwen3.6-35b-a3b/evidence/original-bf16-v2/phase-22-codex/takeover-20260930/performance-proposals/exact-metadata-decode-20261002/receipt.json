@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "status": "frozen for source review; not built or run",
+  "commit": "b43390cee318d759fa3415fcc789f8eea3cdb7cf",
+  "exclusiveOwnership": "Only new exact-metadata-decode-20261002 staging folder",
+  "candidatePaths": [
+    "candidate/Package.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactMetadataDecodeProbe.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenMetadataDecodeCapture.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "candidate/Sources/TurboFieldfareExactMetadataDecode/Command.swift",
+    "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceDecodeValidation.swift",
+    "candidate/Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift"
+  ],
+  "flag": {
+    "name": "TURBO_QWEN_DECODE_METADATA_FOUR",
+    "enabledOnlyWhen": "1",
+    "default": "off",
+    "scope": "Trusted-receipt validation inside one normal produce call with an explicit operation-owned latch. No app integration."
+  },
+  "fixedRequest": {
+    "sha256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+    "inputIDs": 1175,
+    "outputsIncludingEOS": 29,
+    "consumedForwards": 28,
+    "contextCapacity": 8192,
+    "slotsPerLayer": 16,
+    "policy": "lfu"
+  },
+  "eligibility": [
+    "The factory completes full serial validation before issuing a private handle/receipt-bound validator.",
+    "Both modes acquire that same kind of serial proof before prompt timing. No arbitrary receipt or unvalidated handle can construct it.",
+    "The runner rejects a supplied diagnostic validator unless hooks.isKnownNone is the private static-none witness. Any supplied closure, even empty, is ineligible.",
+    "One latch is created per produce, retained by the cancellation handler and forwarded through timing wrappers, token execution and MoE.",
+    "Prefill, turn, sampler, no-receipt and no-validator/latch paths remain serial. The original validator signature stays serial."
+  ],
+  "scanChecks": [
+    "Retain validateBinding, receipt identity/inventory checks, requireRoot, full listing and expected subset check.",
+    "Four fixed contiguous index ranges process ascending entries. Each entry preserves original open flags, held fstat, named fstatat, type/link/fingerprint/identity, remember and close sequence.",
+    "Each lane checks the latch before its fresh open and stops at its first indexed error. Already opened work completes and closes.",
+    "All lanes join before selecting the lowest receipt-index observed error. No source error or EMFILE/ENFILE is retried or replaced by success.",
+    "Only after a successful joined scan run original root-after and binding boundaries, then the complete second scan and final binding.",
+    "Post-map validation stays synchronous. No await or scheduling change is inserted between that check and MoE submission. Payload reader checkpoints, LFU demand plans, routes, weights and arithmetic remain unchanged."
+  ],
+  "cancellation": [
+    "onCancel changes only the monotonic mutex-protected Bool. It holds no actor state, FD or task handle.",
+    "Existing caller geometry/reentrancy/initial/final Task checks and rollback remain.",
+    "Cancellation observed before an entry is indexed at that entry. No later entry in that lane opens. Other lanes settle.",
+    "A file already opened finishes its checks and deferred close. No lock covers I/O or joining.",
+    "Late cancellation remains subject to original caller/binding checks. It does not override an already indexed error."
+  ],
+  "counters": {
+    "expectedSuccessfulFullSourceCalls": 2296,
+    "expectedEntryChecks": 179088,
+    "formula": "28 forwards *82 validations *2 scans *39 entries",
+    "requiredAcrossArms": "Full-source count and entry checks equal, zero failures.",
+    "sourceWall": "Caller wall around actual revalidateSource, including immutable full-receipt equality, counters, all root/list/binding checks, dispatch and join.",
+    "addedOverhead": "Full receipt equality and owned entry counters add cost in BOTH arms. Report is not worker-scheduling cost alone.",
+    "entryFDPeak": "Counter increments after each successful entry open and decrements after close. Only entry FDs are counted; retained and root/list helper FDs are separate. Owned entry limit is1 serial and4 parallel.",
+    "processCPU": "getrusage cumulative user/system up to report preparation, plus difference across whole decode. CPU is separate evidence and is not additive interval attribution.",
+    "timing": "Prompt and whole29-output decode separately. Per-forward timing is secondary only. Same passive route/plan recording in both arms."
+  },
+  "gate": {
+    "orders": [
+      "off,on",
+      "on,off"
+    ],
+    "freshModelAndPrefillEachArm": true,
+    "binary": "Same binary for both modes",
+    "firstPairStop": "Any correctness/check/memory failure, ON/OFF whole decode ratio>0.97, or parallel validation mean>1050000ns stops before reverse.",
+    "bothOrdersRequired": "Whole decode ON/OFF ratio<=0.97 AND parallel full-source mean<=1050000ns in BOTH order pairs.",
+    "exactness": "All29 sampled IDs,1120 actual route IDs/weight bit rows,1120 actual LFU demand plans match.",
+    "minimumSystemFreePercent": 30,
+    "ownChildTimeoutSeconds": 420,
+    "noSweepsOrSubsets": true,
+    "limits": "Isolated eligibility only. A representative app trial is still required."
+  },
+  "memory": {
+    "extraQuarantineBytes": 0,
+    "hiddenCaptureBytes": 0,
+    "modelOwnersPerChild": 1,
+    "buffers": "No new model, expert buffers, FP32 router cache or prefetch allocation."
+  },
+  "knownDifferences": [
+    "Up to three extra concurrent entry descriptors can produce EMFILE/ENFILE where serial could succeed. Original unavailable-file failure is preserved. No free-FD check promises reserved capacity.",
+    "Different inter-entry visitation changes the timing of transient observations and may select a different observed error. Same complete fresh checks do not imply temporal equivalence.",
+    "Caller shouldStop remains its existing token-boundary behavior. Dispatch workers receive only the owned cancellation latch.",
+    "The fixed successful request does not exercise cancellation or rollback. It reports terminal runner state and joined entry ownership, not adversarial safety qualification."
+  ],
+  "noExecution": true,
+  "staticVerification": {
+    "commit": "b43390cee318d759fa3415fcc789f8eea3cdb7cf",
+    "rootClean": true,
+    "productionInputsEqualCommit": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+    "app019InputCount": 731,
+    "app019InputsMatch": true,
+    "app019ReceiptSHA256": "ad80270396f15832a763f92af037fe233ad6ecd3729ae4795090184f47d35289",
+    "baselineCopiesMatch": true,
+    "forwardRootApplyCheck": true,
+    "inverseCandidateApplyCheck": true,
+    "pythonASTParse": true,
+    "buildsTestsModelRuns": false
+  },
+  "commands": [
+    "python3 /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/prepare.py",
+    "python3 /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/build.py",
+    "python3 /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/compare.py /Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+  ]
+}

@@ -1,10 +1,12 @@
 import Darwin
 import Foundation
 import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 package final class GTurboModelDirectory {
     package let rootURL: URL
     private let rootFD: Int32
+    private let protectedOfficialSource: OfficialSourceHandle?
 
     package init(rootURL: URL) throws {
         let standardized = rootURL.standardizedFileURL
@@ -14,11 +16,26 @@ package final class GTurboModelDirectory {
         }
         self.rootURL = standardized
         self.rootFD = fd
+        self.protectedOfficialSource = nil
     }
 
-    deinit { close(rootFD) }
+    /// The protected handle owns source-root validation and its file allowlist.
+    /// This route does not admit the source to inference or verify its payload.
+    package init(protectedOfficialSource handle: OfficialSourceHandle) throws {
+        do { try handle.validateBinding() }
+        catch { throw Self.sourceError(error, path: handle.sourceRootURL.path) }
+        self.rootURL = handle.sourceRootURL
+        self.rootFD = -1
+        self.protectedOfficialSource = handle
+    }
+
+    deinit { if rootFD >= 0 { close(rootFD) } }
 
     package func openFile(_ relativePath: String) throws -> Int32 {
+        if let protectedOfficialSource {
+            do { return try protectedOfficialSource.openFile(relativePath) }
+            catch { throw Self.sourceError(error, path: relativePath) }
+        }
         do {
             try GTurboPathValidator.validateRelativePath(relativePath,
                                                          field: "path.\(relativePath)")
@@ -65,6 +82,7 @@ package final class GTurboModelDirectory {
     package func readMetadata(fileDescriptor fd: Int32,
                               relativePath: String,
                               maxBytes: UInt64) throws -> Data {
+        try validateProtectedDescriptor(fd, relativePath: relativePath)
         let size = try fileSize(fileDescriptor: fd, relativePath: relativePath)
         guard size <= maxBytes, size <= UInt64(Int.max) else {
             throw ModelError.indexCorrupt(
@@ -84,6 +102,7 @@ package final class GTurboModelDirectory {
             }
             total += got
         }
+        try validateProtectedDescriptor(fd, relativePath: relativePath)
         return data
     }
 
@@ -95,11 +114,55 @@ package final class GTurboModelDirectory {
 
     package func fileSize(fileDescriptor fd: Int32,
                           relativePath: String) throws -> UInt64 {
+        try validateProtectedDescriptor(fd, relativePath: relativePath)
         var st = stat()
         guard fstat(fd, &st) == 0, st.st_size >= 0 else {
             throw ModelError.posixFailed(call: "fstat(\(relativePath))", errno: errno)
         }
+        try validateProtectedDescriptor(fd, relativePath: relativePath)
         return UInt64(st.st_size)
+    }
+
+    // A package caller may supply a descriptor directly. In source mode, bind
+    // it to the handle's allowlisted named file, both before and after metadata
+    // access; a retained unrelated descriptor must not bypass the source route.
+    private func validateProtectedDescriptor(_ fd: Int32,
+                                             relativePath: String) throws {
+        guard let protectedOfficialSource else { return }
+        do {
+            try protectedOfficialSource.validateBinding()
+            let checked = try protectedOfficialSource.openFile(relativePath)
+            defer { close(checked) }
+            var supplied = stat(), named = stat()
+            guard fstat(fd, &supplied) == 0, fstat(checked, &named) == 0 else {
+                throw ModelError.posixFailed(call: "fstat(\(relativePath))", errno: errno)
+            }
+            guard (supplied.st_mode & S_IFMT) == S_IFREG,
+                  supplied.st_dev == named.st_dev, supplied.st_ino == named.st_ino,
+                  supplied.st_size == named.st_size,
+                  supplied.st_mtimespec.tv_sec == named.st_mtimespec.tv_sec,
+                  supplied.st_mtimespec.tv_nsec == named.st_mtimespec.tv_nsec,
+                  supplied.st_ctimespec.tv_sec == named.st_ctimespec.tv_sec,
+                  supplied.st_ctimespec.tv_nsec == named.st_ctimespec.tv_nsec else {
+                throw ModelError.indexCorrupt(detail: "official source file changed: \(relativePath)")
+            }
+            try protectedOfficialSource.validateBinding()
+        } catch {
+            throw Self.sourceError(error, path: relativePath)
+        }
+    }
+
+    private static func sourceError(_ error: Error, path: String) -> Error {
+        guard let sourceError = error as? OfficialSourceHandleError else { return error }
+        switch sourceError {
+        case .invalidPath(let detail), .notAllowed(let detail),
+             .replaced(let detail), .notRegular(let detail),
+             .invalidTensor(let detail), .range(let detail), .shortRead(let detail):
+            return ModelError.indexCorrupt(detail: "official source \(path): \(detail)")
+        case .io(let failedPath, let code):
+            if code == ENOENT { return ModelError.missingFile(name: path) }
+            return ModelError.posixFailed(call: "official source open(\(failedPath))", errno: code)
+        }
     }
 
     private func openError(relativePath: String, errno: Int32) -> ModelError {
@@ -110,6 +173,14 @@ package final class GTurboModelDirectory {
     }
 
     package func basenames() throws -> Set<String> {
+        if let protectedOfficialSource {
+            do {
+                try protectedOfficialSource.validateBinding()
+                let names = try protectedOfficialSource.basenames()
+                try protectedOfficialSource.validateBinding()
+                return names
+            } catch { throw Self.sourceError(error, path: rootURL.path) }
+        }
         let duplicate = fcntl(rootFD, F_DUPFD_CLOEXEC, 0)
         guard duplicate >= 0 else {
             throw ModelError.posixFailed(call: "fcntl(F_DUPFD_CLOEXEC, model root)", errno: errno)

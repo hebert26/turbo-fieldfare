@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import TurboFieldfare
+import UniformTypeIdentifiers
 
 public struct AppImageAttachment: Sendable, Equatable {
     public let id: UUID
@@ -163,6 +164,10 @@ public struct AppImageAttachmentStore: Sendable {
         guard encodedBytes <= limit else {
             throw VisionImageError.sourceTooLarge(bytes: encodedBytes, limit: limit)
         }
+        if Self.isDeclaredVideo(source) {
+            throw VisionImageError.unsupportedVideo(
+                displayName: source.lastPathComponent)
+        }
 
         return try stage(
             displayName: source.lastPathComponent,
@@ -198,6 +203,21 @@ public struct AppImageAttachmentStore: Sendable {
                 copied += readCount
             }
         }
+    }
+
+    private static func isDeclaredVideo(_ source: URL) -> Bool {
+        if let values = try? source.resourceValues(forKeys: [.contentTypeKey]),
+           let contentType = values.contentType,
+           contentType.conforms(to: .movie) || contentType.conforms(to: .video) {
+            return true
+        }
+        guard !source.pathExtension.isEmpty,
+              let extensionType = UTType(
+                filenameExtension: source.pathExtension.lowercased()) else {
+            return false
+        }
+        return extensionType.conforms(to: .movie)
+            || extensionType.conforms(to: .video)
     }
 
     /// Stages bytes that never existed as a file — an image copied from another

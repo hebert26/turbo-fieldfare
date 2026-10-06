@@ -49,7 +49,75 @@ struct RootView: View {
             }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            StatusHUDView(model: model)
+            VStack(spacing: 0) {
+                StatusHUDView(model: model)
+                modelSelectionBar
+            }
+        }
+    }
+
+    private var modelSelectionBar: some View {
+        let presentation = AppModelIdentityPresentation.resolve(
+            selected: model.selectedModelEntry,
+            installationStatus: model.installationStatus,
+            loadState: model.loadState,
+            transition: model.modelSelectionTransition,
+            readiness: model.loadedModelReadiness)
+        return HStack(spacing: 10) {
+            Picker("Model", selection: modelSelectionBinding) {
+                ForEach(model.modelCatalogEntries) { entry in
+                    Text(entry.displayName)
+                        .tag(entry.id)
+                        .disabled(!model.isModelSelectable(entry.id))
+                }
+            }
+            .pickerStyle(.menu)
+            .fixedSize()
+            .disabled(!model.canSelectModel)
+            .accessibilityIdentifier("model-picker")
+            .accessibilityLabel("Selected model")
+            .accessibilityValue(presentation.accessibilityValue)
+            .accessibilityHint("Choose an installed model or one ready to install")
+
+            Text(presentation.selectedState)
+                .font(.caption)
+                .foregroundStyle(selectionStateColor)
+                .lineLimit(1)
+                .accessibilityIdentifier("model-selection-state")
+
+            Spacer(minLength: 8)
+
+            if case .failed = model.modelSelectionTransition,
+               model.selectedModelID != AppModelCatalog.defaultID {
+                Button("Use Gemma") {
+                    model.selectModel(AppModelCatalog.defaultID)
+                }
+                .buttonStyle(.borderless)
+                .disabled(!model.canSelectModel)
+                .accessibilityHint("Returns to the default Gemma model")
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 7)
+        .background(Color(nsColor: .controlBackgroundColor))
+        .overlay(alignment: .bottom) { Divider() }
+    }
+
+    private var modelSelectionBinding: Binding<AppModelID> {
+        Binding {
+            model.selectedModelID
+        } set: { modelID in
+            model.selectModel(modelID)
+        }
+    }
+
+    private var selectionStateColor: Color {
+        if case .failed = model.modelSelectionTransition { return .red }
+        if model.loadState.isFailed { return .red }
+        if model.loadState.isReady, model.loadedModelReadiness == nil { return .orange }
+        switch model.installationStatus {
+        case .partial: return .orange
+        case .missing, .complete: return .secondary
         }
     }
 

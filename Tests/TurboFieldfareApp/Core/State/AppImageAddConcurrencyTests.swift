@@ -69,6 +69,50 @@ import Testing
         #expect(model.imageAttachmentError != nil, "the failure was not reported")
     }
 
+    /// A movie in a multi-file batch must fail the whole batch. The image that
+    /// staged before it is rejected must be removed, the exact user-facing
+    /// error must survive, and the pending-add counter must be released.
+    @MainActor
+    @Test func aVideoBatchSurfacesTheSpecificErrorAndRemovesPartialStaging() async throws {
+        let directory = try makeVisionReadyModelInstall("image-add-video")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let root = try Self.makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let attachmentDirectory = root.appendingPathComponent(
+            "attachments", isDirectory: true)
+        let model = AppModel(
+            modelDirectory: directory,
+            attachmentStore: AppImageAttachmentStore(directoryURL: attachmentDirectory))
+        model.maxContextTokens = AppContextLengthOption.sixtyFourK.tokens
+        try #require(model.maximumImageAttachments >= 2)
+
+        let image = root.appendingPathComponent("first.png")
+        let imageBytes = Data("synthetic image bytes".utf8)
+        try imageBytes.write(to: image)
+        let video = root.appendingPathComponent("clip.mp4")
+        let videoBytes = Data("synthetic movie bytes".utf8)
+        try videoBytes.write(to: video)
+
+        model.addImages([image, video])
+        #expect(model.isAddingImages)
+        try await Self.untilIdle(model)
+
+        #expect(!model.isAddingImages,
+                "video rejection left the pending-add counter set")
+        #expect(model.imageAttachments.isEmpty,
+                "a partially staged image survived the rejected batch")
+        #expect(model.imageAttachmentError ==
+                "Video input is not supported: clip.mp4")
+        #expect(try Data(contentsOf: image) == imageBytes,
+                "the first source changed while its staged copy was rolled back")
+        #expect(try Data(contentsOf: video) == videoBytes,
+                "video rejection changed the caller-owned source")
+        let stagedEntries = (try? FileManager.default.contentsOfDirectory(
+            at: attachmentDirectory, includingPropertiesForKeys: nil)) ?? []
+        #expect(stagedEntries.isEmpty,
+                "a rejected video batch left a partial staged output")
+    }
+
     /// Interleaving a data paste with a file add exercises the second entry
     /// point into the counter.
     @MainActor

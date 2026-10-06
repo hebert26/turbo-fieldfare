@@ -1,0 +1,275 @@
+{
+  "schema": 1,
+  "runPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967",
+  "exit": 0,
+  "validEvidence": true,
+  "completeCorrectnessResult": true,
+  "speedClaim": false,
+  "errors": [],
+  "limitations": [
+    "The last marker does not prove the active phase at stop.",
+    "Peaks are sampled values. Missing counters remain missing.",
+    "Metal allocated size, process footprint, and system VM are different measures.",
+    "residencyRequestAfter means the call returned. It does not prove physical residency.",
+    "System changes cannot prove which process caused them.",
+    "Decode timing is exploratory. Request timing excludes model load."
+  ],
+  "runReceiptSHA256": "578014746469e29b48f151b86c79673fef6f18fed1146ee1649075f189bb6f44",
+  "memory": {
+    "phaseRecordCount": 48,
+    "lastDurablePhase": {
+      "allocatedCacheBytes": 4026531840,
+      "cachedLayerCount": 40,
+      "currentAllocatedSizeBytes": 9330065408,
+      "layer": null,
+      "phase": "diagnosticsEnd",
+      "pid": 92779,
+      "requestID": "8C783D56-FE53-4687-AAD2-EC2CBA167C0D",
+      "residencyAllocatedSizeBytes": null,
+      "residencyAllocationCount": null,
+      "residencyRegisteredLayers": null,
+      "residencyRequested": null,
+      "schema": 1,
+      "type": "memoryPhase",
+      "uptimeNanoseconds": 2121592997059916
+    },
+    "stopUptimeNanoseconds": 2121593464704625,
+    "peakMetalAllocatedSizeAtMarkersBytes": 9359032320,
+    "processSampleCount": 103,
+    "processCounters": {
+      "ri_phys_footprint": {
+        "first": 2736632,
+        "last": 9214745968,
+        "peakSampled": 9214745968,
+        "change": 9212009336,
+        "firstUptimeNanoseconds": 2121387569492791,
+        "lastUptimeNanoseconds": 2121591579424208
+      },
+      "ri_lifetime_max_phys_footprint": {
+        "first": 2736632,
+        "last": 9215548784,
+        "peakSampled": 9215548784,
+        "change": 9212812152,
+        "firstUptimeNanoseconds": 2121387569492791,
+        "lastUptimeNanoseconds": 2121591579424208
+      },
+      "ri_wired_size": {
+        "first": 0,
+        "last": 0,
+        "peakSampled": 0,
+        "change": 0,
+        "firstUptimeNanoseconds": 2121387569492791,
+        "lastUptimeNanoseconds": 2121591579424208
+      },
+      "ri_resident_size": {
+        "first": 16941056,
+        "last": 1728364544,
+        "peakSampled": 2089451520,
+        "change": 1711423488,
+        "firstUptimeNanoseconds": 2121387569492791,
+        "lastUptimeNanoseconds": 2121591579424208
+      },
+      "ri_diskio_bytesread": {
+        "first": 577536,
+        "last": 91506155520,
+        "peakSampled": 91506155520,
+        "change": 91505577984,
+        "firstUptimeNanoseconds": 2121387569492791,
+        "lastUptimeNanoseconds": 2121591579424208
+      }
+    },
+    "systemSampleCount": 103,
+    "systemVMChanges": {
+      "Pages wired down": {
+        "first": 441160,
+        "last": 711674,
+        "change": 270514,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      },
+      "Pages occupied by compressor": {
+        "first": 121231,
+        "last": 551806,
+        "change": 430575,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      },
+      "Pages stored in compressor": {
+        "first": 2575425,
+        "last": 3425280,
+        "change": 849855,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      },
+      "Compressions": {
+        "first": 5636083730,
+        "last": 5644299292,
+        "change": 8215562,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      },
+      "Decompressions": {
+        "first": 5079738801,
+        "last": 5086762152,
+        "change": 7023351,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      },
+      "Swapins": {
+        "first": 29901998,
+        "last": 29921428,
+        "change": 19430,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      },
+      "Swapouts": {
+        "first": 49693956,
+        "last": 49875532,
+        "change": 181576,
+        "firstUptimeNanoseconds": 2121387569678916,
+        "lastUptimeNanoseconds": 2121591579584666
+      }
+    },
+    "systemPageSizeBytes": 16384,
+    "missingCounters": [],
+    "errors": [
+      "Process sample unavailable: -1"
+    ],
+    "phaseRecordErrors": [],
+    "notes": [],
+    "stopReason": null,
+    "launchFreePercent": 72,
+    "minimumFreePercent": 30,
+    "childExit": 0,
+    "wallSeconds": 205.93585195811465
+  },
+  "correctness": {
+    "cycleCalls": 28,
+    "serialCycles": 28,
+    "pairCycles": 0,
+    "shortProposalSerialCycles": 0,
+    "branchCycles": 0,
+    "rejectedPairCycles": 0,
+    "rejectedBranchCycles": 0,
+    "verifiedInputs": 28,
+    "consumedInputs": 28,
+    "proposedDrafts": 0,
+    "acceptedDrafts": 0,
+    "rejectedVerifiedInputs": 0,
+    "replayedInputs": 0,
+    "recurrentAppendCalls": 0,
+    "recurrentKeptInputs": 0,
+    "fullReplayWallNanoseconds": 0,
+    "recurrentOnlyWallNanoseconds": 0,
+    "maximumSavedInputBytes": 0,
+    "recurrentOnlyKeepCounts": {},
+    "branchSamplerCalls": 28,
+    "prefillSamplerCalls": 1,
+    "reportedCacheHits": 3623,
+    "reportedCacheMisses": 5337,
+    "cycleWallNanoseconds": 30585954998,
+    "settlementWallNanoseconds": 0,
+    "preadCalls": 10674,
+    "preadReturnedBytes": 33577500672,
+    "validationCalls": 49942,
+    "sourceChecks": {
+      "tokenAdmissions": 0,
+      "layerAdmissions": 0,
+      "reusedPairChecks": 0,
+      "preGPUChecks": 0,
+      "sharedChecks": 0,
+      "finalChecks": 0
+    },
+    "settlement": {
+      "liveSavedInputBytesAtEnd": 0,
+      "maximumSavedInputBytes": 0,
+      "recurrentAppendCalls": 0,
+      "recurrentKeptInputs": 0,
+      "rejectedCycles": 0,
+      "replayedInputs": 0,
+      "wallNanoseconds": 0
+    },
+    "settlementKeptInputs": 0,
+    "settlementMilliseconds": 0.0,
+    "settlementMillisecondsPerKeptInput": null,
+    "requestWallNanoseconds": 201664390916,
+    "acceptedRouteCount": 1120,
+    "acceptedRawRowCount": 28,
+    "acceptedRouteSHA256": "95a3771000bbcc77b3848b5dbdaae0fd7b9bee66d5806414af9e58cf0d5019c5",
+    "acceptedRawRowSHA256": "212502f111d598174e971a9c6eddcc6fc09f0129a8f58f7fc5da5332db29705f",
+    "transactions": {
+      "begins": 1,
+      "finishes": 1,
+      "restores": 0
+    },
+    "timingLimits": "Serial memory attribution only; sparse stderr phases added. Decode includes checkpoints, sampling and cycle diagnostics. Final state readback is excluded. Serial owns one turn; legacy/new own per-cycle turns. New replaces only exact4 rejection settlement; short proposals retain charged full replay. Outer conversation integration is not implemented. Not app or native MTP qualification.",
+    "processCPUCountersMicroseconds": {
+      "processCPUUserBeforeMicroseconds": 30186361,
+      "processCPUSystemBeforeMicroseconds": 56544617,
+      "processCPUUserAfterMicroseconds": 33531545,
+      "processCPUSystemAfterMicroseconds": 93746930
+    },
+    "outputCountIncludingEOS": 29,
+    "samplerCallsIncludingPrefill": 29,
+    "terminalEOS": 248046,
+    "terminalEOSConsumed": false,
+    "finalState": {
+      "committedKeysSHA256": "e69a6401e45992a725b6d985252c45fe1d8e44c4e410f44c8070e0417ceb1bd5",
+      "committedValuesSHA256": "06c8326c758b6196cfca720b296db13a78a62c40b3209ffb8fa6bb5f2022ad56",
+      "fullKVPositions": {
+        "3": 1203,
+        "7": 1203,
+        "11": 1203,
+        "15": 1203,
+        "19": 1203,
+        "23": 1203,
+        "27": 1203,
+        "31": 1203,
+        "35": 1203,
+        "39": 1203
+      },
+      "linearPositions": {
+        "0": 1203,
+        "1": 1203,
+        "2": 1203,
+        "4": 1203,
+        "5": 1203,
+        "6": 1203,
+        "8": 1203,
+        "9": 1203,
+        "10": 1203,
+        "12": 1203,
+        "13": 1203,
+        "14": 1203,
+        "16": 1203,
+        "17": 1203,
+        "18": 1203,
+        "20": 1203,
+        "21": 1203,
+        "22": 1203,
+        "24": 1203,
+        "25": 1203,
+        "26": 1203,
+        "28": 1203,
+        "29": 1203,
+        "30": 1203,
+        "32": 1203,
+        "33": 1203,
+        "34": 1203,
+        "36": 1203,
+        "37": 1203,
+        "38": 1203
+      },
+      "linearStateSHA256": "26403c4f9b1a703a717b471270f7de30992789d0628a580adc37ab828c14f3d3",
+      "pendingTokens": 1,
+      "position": 1203,
+      "runnerUsable": true
+    },
+    "promptWallNanoseconds": 170944470833,
+    "decodeWallNanoseconds": 30716851500,
+    "decodeOutsideCyclesNanoseconds": 130896502,
+    "processCPUUserDuringDecodeMicroseconds": 3345184,
+    "processCPUSystemDuringDecodeMicroseconds": 37202313,
+    "targetInputsIncludingReplay": 28
+  }
+}

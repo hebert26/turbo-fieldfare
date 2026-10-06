@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T12:34:39.067085+00:00",
+  "type": "experimental source and execution evidence checkpoint, not installed app change",
+  "productionSourceBase": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "summary": "Exact four-input paired scheduling passes isolated numerical and cost gate. Same-session median1.759168s serial vs1.604579s pair,8.7876percent less wall. Actual rejected draft restores correct state and pending correction.88memory samples,minfree33percent.",
+  "limits": [
+    "One warmed repeated block, not app speed or native MTP.",
+    "EOS not exercised; whole-request economics and20tokens/sec unproven.",
+    "Original installed app/source unchanged.",
+    "Runnable wrappers depend on existing local tool-exact-capture preflight and dependencies. New checkpoint commit will require an explicitly verified preflight anchor update before future model execution."
+  ],
+  "excluded": "Build products, copied overlays, dependency caches, model weights, raw hardware serial/UUID output; originals remain local."
+}

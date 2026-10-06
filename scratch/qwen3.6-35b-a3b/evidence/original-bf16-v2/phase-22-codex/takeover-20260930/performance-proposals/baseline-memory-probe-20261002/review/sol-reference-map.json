@@ -1,0 +1,72 @@
+{
+  "schema": 1,
+  "status": "partial-reference-available",
+  "reference": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/run-20261002T161328.568847Z-1ea5d43faad8453c9627769b9fe8750b/result.json",
+  "referenceSHA256": "01ef209b031e2d8a7e6bc6c0bba4465d83c8f49390c2ce0a2d5f8559c1d3e5f7",
+  "request": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/request.json",
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "captureSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "outputChecks": {
+    "referenceField": "outputIDs",
+    "requestField": "sampledTokenIDs",
+    "count": 29,
+    "lastID": 248046,
+    "exactIDsMatchRequest": true
+  },
+  "routeChecks": {
+    "referenceField": "routes",
+    "count": 1120,
+    "positionRange": [
+      1175,
+      1202
+    ],
+    "layers": [
+      0,
+      39
+    ],
+    "strictFields": [
+      "position",
+      "layer",
+      "experts",
+      "weightBits"
+    ],
+    "MEMFieldNames": {
+      "experts": "ids",
+      "weightBits": "weights"
+    },
+    "encoding": "Per row sorted-key compact JSON mapped to position/layer/ids/weights, then LF newline. Rows sorted position/layer. ASCII numeric data. Matches the inspected Swift JSONEncoder sortedKeys representation.",
+    "expectedAcceptedRouteSHA256": "95a3771000bbcc77b3848b5dbdaae0fd7b9bee66d5806414af9e58cf0d5019c5"
+  },
+  "planChecks": {
+    "referenceField": "plans",
+    "count": 1120,
+    "strictFields": [
+      "position",
+      "layer",
+      "experts",
+      "residents",
+      "assignedSlots",
+      "missIndices"
+    ],
+    "limitation": "MEM emits cycle cache totals, not raw plans. Cannot compare each recorded LFU plan from its current result schema."
+  },
+  "terminal": {
+    "sampledCount": 29,
+    "consumedDecodeForwards": 28,
+    "consumedPosition": 1203,
+    "pendingTokens": 1,
+    "terminalEOS": 248046,
+    "EOSConsumed": false,
+    "meaning": "All 29 sampled IDs include terminal EOS. First 28 sampled IDs are forwarded. EOS remains pending and is not inserted into recurrent or KV state.",
+    "expectedLinearLayers": 30,
+    "expectedFullKVLayers": 10,
+    "eachLayerPosition": 1203
+  },
+  "unavailableStrictReferences": {
+    "fullCommittedState": "No completed full-chain result with linearStateSHA256, committedKeysSHA256 or committedValuesSHA256 was found. Prior causal/recurrent/MEM runs guard-stopped.",
+    "fullRawLogits": "No completed full-chain acceptedRawRowSHA256 or all 28 raw logit rows was found.",
+    "pairResults": "Pair probe/cost artifacts cover selected branch windows and recovered-prefix equality only. They are not a full 29-output final-state reference."
+  },
+  "allowedConclusion": "A completed MEM run can prove exact saved output IDs, accepted route IDs/weight bits and cursor/EOS convention. It cannot independently prove full-chain final-state or all-logit equality against these earlier artifacts. Keep newly produced hashes as a future reference without claiming an old-reference match.",
+  "execution": "Read saved JSON and candidate source only. No model, build or tests."
+}

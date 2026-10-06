@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareBaselineMemoryProbe"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "74131797cb603f9a0b9211de43dbba28df7428431b30e26ac0b895b607a1026b",
+  "binarySHA256": "ce7857fd53fa956edd2079e88ff78cb3a0b3d9f7edf638f8b7a492ffb298bead",
+  "stageHashesSHA256": "cca94dc3e8d3efbfd0b692928c3ac4cb06ffecaa7ae4964b7dfdd38abe9a917d"
+}

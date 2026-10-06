@@ -1,0 +1,52 @@
+{
+  "kind": "qwen-pinned-jpeg-decode-fixtures-v1",
+  "oracle": {
+    "referenceSHA256": "43d3286a83b0ce71ad6f06dc1b1d48671d41bfed7e192aecaec0b6b0df9ab16b",
+    "source": "official-source-vision-reference.py:222-228",
+    "pillow": "10.3.0",
+    "libjpegTurbo": "3.0.2",
+    "torch": "2.10.0",
+    "transformers": "5.18.0.dev0",
+    "rgbLayout": "oriented HWC RGB uint8"
+  },
+  "processing": {
+    "resize": "bicubic antialias, pinned Torch CPU",
+    "resizedWidth": 352,
+    "resizedHeight": 224,
+    "patchLayout": "Qwen C,T,H,W BF16, little-endian"
+  },
+  "cases": [
+    {
+      "id": "natural-exif-1",
+      "imageFile": "natural-exif-1.jpg",
+      "imageSHA256": "50544c966213a137ac1de2c4faebc2a2dd3b6431fb6d1c6162724ac9718fb989",
+      "encodedBytes": 22059,
+      "encodedWidth": 321,
+      "encodedHeight": 193,
+      "orientation": 1,
+      "orientedWidth": 321,
+      "orientedHeight": 193,
+      "rgbFile": "natural-exif-1.pillow.rgb-u8.bin",
+      "rgbByteCount": 185859,
+      "rgbSHA256": "52a11cd4c218830e8f2f1fe66847a2bbd23159060b65b77a2e8799084a19cc84",
+      "resizedRGBSHA256": "be3b05796d75c077962d8a4ff34dad91fb419e3e5672bb7526a049a2373c13e0",
+      "patchSHA256": "9ac851057cb0f7f4901b5b3914b12f8873acd6ec1eb76cc9582b49ded230fe95"
+    },
+    {
+      "id": "natural-exif-6",
+      "imageFile": "natural-exif-6.jpg",
+      "imageSHA256": "25233efe3547a9ae99b96ce210c6dde16223dde47adfa2ca6dd211da9f6cd143",
+      "encodedBytes": 21974,
+      "encodedWidth": 193,
+      "encodedHeight": 321,
+      "orientation": 6,
+      "orientedWidth": 321,
+      "orientedHeight": 193,
+      "rgbFile": "natural-exif-6.pillow.rgb-u8.bin",
+      "rgbByteCount": 185859,
+      "rgbSHA256": "a959845fc0994050fd3ce62e588ee54d410442d27d770f7b5709d50391b5c7d9",
+      "resizedRGBSHA256": "33b4c92b2adaafcabeec09c40a17145f81cdaa795ffb575d8f77438bfe2984f3",
+      "patchSHA256": "2aeecf0f9955bf06de8ea17d4b36b0b3d0621033e8b54d19d89c69653bd5b50f"
+    }
+  ]
+}

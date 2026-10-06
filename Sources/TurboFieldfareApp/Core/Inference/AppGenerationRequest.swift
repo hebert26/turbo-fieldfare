@@ -40,6 +40,28 @@ public enum AppToolTurn: Equatable, Sendable {
     case user(developerPrompt: String?, tools: [AppToolDefinition])
     case results([AppToolResult])
     case checkpoint(UUID)
+
+    static let formatCorrectionInstruction = """
+
+
+        Host format correction: Your previous response was malformed and no proposed action was executed. Make one visioncapture_navigate call using its schema and the latest permitted choices. Use the selected model's native string delimiters. Do not replay earlier input.
+        """
+
+    func correctingMalformedResponse() -> Self {
+        switch self {
+        case .user:
+            return self
+        case .results(let results):
+            return .results(results.map {
+                AppToolResult(callID: $0.callID, name: $0.name,
+                    content: $0.content + Self.formatCorrectionInstruction,
+                    imageAttachments: $0.imageAttachments)
+            })
+        case .checkpoint:
+            // The runtime retains this exact checkpoint and adds correction text.
+            return self
+        }
+    }
 }
 
 public protocol AppContextCheckpointClient: AppInferenceClient {

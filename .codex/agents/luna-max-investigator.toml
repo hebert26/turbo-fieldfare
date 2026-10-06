@@ -21,7 +21,7 @@ Before project work:
 
 1. Read `/Users/dev-machine/Dev/VisionOS/AGENTS.md` completely.
 2. Read `/Users/dev-machine/Dev/VisionOS/CONTEXT.md` completely.
-3. Read the relevant accepted ADRs under `/Users/dev-machine/Dev/VisionOS/Project-files/adr/`.
+3. Read the relevant accepted ADRs under `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/adr/`.
 4. Start with `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.html` when investigating documented product
    behavior, then follow only the relevant links.
 5. Read the nearest module `CONTEXT.md` before making claims about source in that module.

@@ -1,0 +1,20 @@
+{
+  "at": "2026-10-02T12:18:51.611876+00:00",
+  "scope": "Read four changed files against rejected candidate; no runtime acceptance",
+  "hashesMatch": true,
+  "deltaSHA256": "a5ce52c18e5ba95e3fd3c494910ee0ca3f7de3341325d74201ffcd205995a337",
+  "observations": [
+    "Fixed complete pairs and original route rank; ascending expert per-token sum preserved.",
+    "Extra scratch zero-offset rows avoid incorrect shared encoder binding. Tracked encoder order and retained buffers persist through settle.",
+    "Normal branch unchanged except unreachable optional counters and code indentation.",
+    "Probe only adds immutable counters and mandatory schedule checks. Sampling, timing, replay, exactness gates unchanged.",
+    "Existing cost gate remains reject and stop before actual rejection if full-accept grouped timing loses."
+  ],
+  "open": [
+    "Independent scoped delta reviews",
+    "Successful build",
+    "All-row/routes/state bit proof and forced boundaries",
+    "Same-session serial timing and memory guard",
+    "Actual rejection gate only if timing passes"
+  ]
+}

@@ -1,0 +1,1374 @@
+diff --git a/Package.swift b/Package.swift
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,7 +8,6 @@
+         .iOS(.v26),
+     ],
+     products: [
+-        .executable(name: "TurboFieldfareExpertPrefetchOverlap", targets: ["TurboFieldfareExpertPrefetchOverlap"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -27,7 +26,6 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
+-        .executableTarget(name: "TurboFieldfareExpertPrefetchOverlap", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareExpertPrefetchOverlap"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+diff --git a/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift b/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift
+--- a/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift
++++ b/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift
+@@ -482,8 +482,6 @@
+ /// @testable-only deterministic gates around the REAL protected reads. No
+ /// callback supplies bytes, file descriptors, offsets, identities or a token.
+ struct QwenBF16ExpertReadHooks: Sendable {
+-    private let knownNone: Bool
+-    var isKnownNone: Bool { knownNone }
+     enum Stream: Sendable { case gateUp, down }
+     enum Checkpoint: Sendable {
+         case beforeProtectedRead(expert: Int, stream: Stream)
+@@ -493,11 +491,9 @@
+ 
+     let checkpoint: @Sendable (Checkpoint) throws -> Void
+     init(checkpoint: @escaping @Sendable (Checkpoint) throws -> Void = { _ in }) {
+-        knownNone = false
+         self.checkpoint = checkpoint
+     }
+-    private init(provenNone: Void) { knownNone = true; checkpoint = { _ in } }
+-    static let none = Self(provenNone: ())
++    static let none = Self()
+ }
+ 
+ enum QwenBF16ExpertCacheError: Error, Equatable, Sendable {
+@@ -652,14 +648,6 @@
+         self.cachePolicy = cachePolicy
+     }
+ 
+-    func earlyReadOwner(layer: Int, quota: QwenOfficialSourceModel.ExpertCacheReservation) throws -> QwenBF16EarlyReadOwner {
+-        guard (0..<40).contains(layer), quota.bytes >= allocatedCacheBytes else {
+-            throw QwenQuarantineError.identity
+-        }
+-        return QwenBF16EarlyReadOwner(source: source, gate: gateUpRange, down: downRange,
+-                                      cache: self, layer: layer, quota: quota)
+-    }
+-
+     /// Pure plan over ONE validity array. Active slots remain eligible only
+     /// when they already contain the requested expert; misses cannot evict one.
+     func plan(expertIDs: [Int], avoidingSlots: Set<Int>) -> ExpertCachePlan? {
+@@ -699,9 +687,7 @@
+     }
+ 
+     func load(_ plan: ExpertCachePlan, hooks: QwenBF16ExpertReadHooks,
+-              canceled: @Sendable () -> Bool,
+-              quarantine: QwenSettledQuarantineBatch? = nil,
+-              observation: QwenEarlyPrefetchMapContext? = nil) throws -> [Buffers] {
++              canceled: @Sendable () -> Bool) throws -> [Buffers] {
+         guard plan.experts.count == plan.assignedSlots.count,
+               Set(plan.assignedSlots).count == plan.assignedSlots.count,
+               Set(plan.misses).count == plan.misses.count,
+@@ -709,22 +695,6 @@
+               plan.misses.allSatisfy({ plan.experts.indices.contains($0) }) else {
+             throw QwenBF16ExpertCacheError.invalidPlan
+         }
+-        if let quarantine {
+-            guard hooks.isKnownNone, let observation,
+-                  quarantine.owner.matches(cache: self, source: source, gate: gateUpRange,
+-                                           down: downRange, layer: observation.layer) else {
+-                throw QwenQuarantineError.identity
+-            }
+-            try quarantine.epoch.requireValid(position: observation.position, layer: observation.layer)
+-        }
+-        let importedMisses = try Set(plan.misses.filter { index in
+-            guard let quarantine, let observation else { return false }
+-            return try quarantine.contains(plan.experts[index], position: observation.position, layer: observation.layer)
+-        })
+-        func validateMeasured(_ site: QwenEarlyPrefetchCapture.Site) throws {
+-            if let observation { try observation.capture.measure(site) { try validateBoth() } }
+-            else { try validateBoth() }
+-        }
+         let missSet = Set(plan.misses)
+         for index in plan.experts.indices where !missSet.contains(index) {
+             let slot = plan.assignedSlots[index]
+@@ -732,7 +702,7 @@
+                 throw QwenBF16ExpertCacheError.invalidPlan
+             }
+             do {
+-                try validateMeasured(.hitValidation)
++                try validateBoth()
+             } catch {
+                 slotExpert[slot] = -1
+                 throw error
+@@ -748,11 +718,6 @@
+                 // them serially before any worker can overwrite either stream.
+                 slotExpert[plan.assignedSlots[index]] = -1
+             }
+-            for index in batch where importedMisses.contains(index) {
+-                guard let quarantine, let observation else { throw QwenQuarantineError.identity }
+-                try quarantine.epoch.requireValid(position: observation.position, layer: observation.layer)
+-                try validateMeasured(.beforeCopyValidation)
+-            }
+             let failures = ReadFailures(count: pairCount * 2)
+             DispatchQueue.concurrentPerform(iterations: pairCount * 2) { worker in
+                 let index = batch[worker / 2]
+@@ -762,17 +727,12 @@
+                 do {
+                     let kind: QwenBF16ExpertReadHooks.Stream = stream == 0 ? .gateUp : .down
+                     try hooks.checkpoint(.beforeProtectedRead(expert: expert, stream: kind))
+-                    if importedMisses.contains(index) {
+-                        guard let quarantine, let observation else { throw QwenQuarantineError.identity }
+-                        try quarantine.copy(expert: expert, stream: stream,
+-                            into: stream == 0 ? pair.gateUp : pair.down,
+-                            position: observation.position, layer: observation.layer)
+-                    } else if stream == 0 {
++                    if stream == 0 {
+                         try self.read(expert: expert, range: self.gateUpRange,
+-                                      into: pair.gateUp, sliceBytes: self.gateUpBytes, capture: observation?.capture)
++                                      into: pair.gateUp, sliceBytes: self.gateUpBytes)
+                     } else {
+                         try self.read(expert: expert, range: self.downRange,
+-                                      into: pair.down, sliceBytes: self.downBytes, capture: observation?.capture)
++                                      into: pair.down, sliceBytes: self.downBytes)
+                     }
+                     try hooks.checkpoint(.afterProtectedRead(expert: expert, stream: kind))
+                 } catch { failures.record(error, index: worker) }
+@@ -793,10 +753,9 @@
+             if canceled() { throw CancellationError() }
+             // The hook may mutate a retained shard or marker. Revalidate both
+             // tokens after it, immediately before making this pair a cache hit.
+-            try validateMeasured(.publicationValidation)
++            try validateBoth()
+             if canceled() { throw CancellationError() }
+             slotExpert[slot] = expert
+-            if importedMisses.contains(index) { quarantine?.published(expert: expert) }
+         }
+         if canceled() { throw CancellationError() }
+         return plan.assignedSlots.map { buffers[$0] }
+@@ -815,8 +774,7 @@
+     }
+ 
+     private func read(expert: Int, range: OfficialSourceHandle.TensorRange,
+-                      into buffer: MTLBuffer, sliceBytes: Int,
+-                      capture: QwenEarlyPrefetchCapture? = nil) throws {
++                      into buffer: MTLBuffer, sliceBytes: Int) throws {
+         let base = UInt64(expert) * UInt64(sliceBytes) // admitted total shape checked
+         var copied = 0
+         while copied < sliceBytes {
+@@ -824,82 +782,10 @@
+                             Int(OfficialSourceHandle.maximumTensorReadBytes))
+             let destination = UnsafeMutableRawBufferPointer(
+                 start: buffer.contents().advanced(by: copied), count: count)
+-            if let capture {
+-                try capture.measure(.demandProtectedRead, bytes: UInt64(count)) {
+-                    try source.preadTensorRange(range, byteOffset: base + UInt64(copied), byteCount: UInt64(count),
+-                        expectedByteCount: UInt64(count), into: destination)
+-                }
+-            } else {
+-                try source.preadTensorRange(range, byteOffset: base + UInt64(copied), byteCount: UInt64(count),
+-                    expectedByteCount: UInt64(count), into: destination)
+-            }
++            try source.preadTensorRange(
++                range, byteOffset: base + UInt64(copied), byteCount: UInt64(count),
++                expectedByteCount: UInt64(count), into: destination)
+             copied += count
+         }
+     }
+ }
+-
+-// Issued only by the paired cache from its already-admitted ranges.
+-final class QwenBF16EarlyReadOwner: @unchecked Sendable {
+-    private let source: OfficialSourceHandle
+-    private let gate: OfficialSourceHandle.TensorRange
+-    private let down: OfficialSourceHandle.TensorRange
+-    private let cacheOwner: QwenBF16PairedExpertCache
+-    let layer: Int
+-    let expertCount: Int
+-    let gateBytes: Int
+-    let downBytes: Int
+-    // Keep the real cache quota reserved while speculative reads own its tokens.
+-    private let quota: QwenOfficialSourceModel.ExpertCacheReservation
+-    fileprivate init(source: OfficialSourceHandle, gate: OfficialSourceHandle.TensorRange,
+-                     down: OfficialSourceHandle.TensorRange, cache: QwenBF16PairedExpertCache,
+-                     layer: Int, quota: QwenOfficialSourceModel.ExpertCacheReservation) {
+-        self.source = source
+-        self.gate = gate
+-        self.down = down
+-        cacheOwner = cache
+-        self.layer = layer
+-        expertCount = cache.expertCount
+-        gateBytes = cache.gateUpBytes
+-        downBytes = cache.downBytes
+-        self.quota = quota
+-    }
+-    fileprivate func matches(cache: QwenBF16PairedExpertCache, source: OfficialSourceHandle,
+-                             gate: OfficialSourceHandle.TensorRange,
+-                             down: OfficialSourceHandle.TensorRange, layer: Int) -> Bool {
+-        cacheOwner === cache && self.source === source
+-            && self.gate === gate && self.down === down && self.layer == layer
+-    }
+-    func validateBoth() throws {
+-        for range in [gate, down] {
+-            try source.preadTensorRange(range, byteOffset: 0, byteCount: 0, expectedByteCount: 0,
+-                into: UnsafeMutableRawBufferPointer(start: nil, count: 0))
+-        }
+-    }
+-    func read(expert: Int, stream: Int, into buffer: MTLBuffer,
+-              capture: QwenEarlyPrefetchCapture, canceled: () -> Bool) throws {
+-        guard (0..<expertCount).contains(expert), stream == 0 || stream == 1 else {
+-            throw QwenQuarantineError.identity
+-        }
+-        let bytes = stream == 0 ? gateBytes : downBytes
+-        let range = stream == 0 ? gate : down
+-        guard buffer.storageMode == .shared, buffer.length == bytes else {
+-            throw QwenQuarantineError.identity
+-        }
+-        let (base, overflow) = UInt64(expert).multipliedReportingOverflow(by: UInt64(bytes))
+-        guard !overflow, UInt64(bytes) <= range.admittedByteCount,
+-              base <= range.admittedByteCount - UInt64(bytes) else {
+-            throw QwenQuarantineError.identity
+-        }
+-        var copied = 0
+-        while copied < bytes {
+-            if canceled() { throw CancellationError() }
+-            let count = min(bytes - copied, Int(OfficialSourceHandle.maximumTensorReadBytes))
+-            try capture.measure(.speculativeProtectedRead, bytes: UInt64(count)) {
+-                try source.preadTensorRange(range, byteOffset: base + UInt64(copied),
+-                    byteCount: UInt64(count), expectedByteCount: UInt64(count),
+-                    into: UnsafeMutableRawBufferPointer(start: buffer.contents().advanced(by: copied), count: count))
+-            }
+-            copied += count
+-        }
+-    }
+-}
+diff --git a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+--- a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
++++ b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+@@ -796,8 +796,6 @@
+     // Keep the single runner-wide residency set alive for every pending lease.
+     private let cacheResidency: QwenBF16CacheResidency?
+     private let hooks: QwenBF16ExpertReadHooks
+-    private let quotaOwner: QwenOfficialSourceModel.ExpertCacheReservation?
+-    private let admittedLayer: Int
+     private let stateLock = NSLock()
+     private let ioLock = NSLock()
+     private var activeSlots: [Int: ActiveSlot] = [:]
+@@ -809,8 +807,7 @@
+          device: MTLDevice, slotCount: Int, residencyBudget: UInt64,
+          cachePolicy: ExpertCachePolicy = .lru,
+          readHooks: QwenBF16ExpertReadHooks = .none,
+-         cacheResidency: QwenBF16CacheResidency? = nil,
+-         quotaOwner: QwenOfficialSourceModel.ExpertCacheReservation? = nil) throws {
++         cacheResidency: QwenBF16CacheResidency? = nil) throws {
+         guard layer >= 0, UInt32(exactly: layer) != nil else {
+             throw QwenExpertMappingError.invalidLayer(layer)
+         }
+@@ -823,8 +820,6 @@
+             cachePolicy: cachePolicy)
+         try cacheResidency?.register(layer: layer, allocations: cache.residencyAllocations)
+         self.cacheResidency = cacheResidency
+-        self.quotaOwner = quotaOwner
+-        self.admittedLayer = layer
+         self.cache = cache
+         self.slotCount = slotCount
+         expertCount = configuration.expertCount
+@@ -833,18 +828,7 @@
+         hooks = readHooks
+     }
+ 
+-    func earlyReadOwner(predictions: [Int], layer: Int) throws -> (QwenBF16EarlyReadOwner, [Int]) {
+-        guard hooks.isKnownNone, layer == admittedLayer, let quotaOwner else { throw QwenQuarantineError.identity }
+-        ioLock.lock()
+-        defer { ioLock.unlock() }
+-        let residents = Set(cache.measurementSnapshot().expertIDs.filter { $0 >= 0 })
+-        let owner = try cache.earlyReadOwner(layer: layer, quota: quotaOwner)
+-        return (owner, predictions.filter { !residents.contains($0) })
+-    }
+-
+-    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil,
+-             prefetch: QwenProtectedEarlyPrefetch? = nil,
+-             observation: QwenEarlyPrefetchMapContext? = nil) async throws -> QwenBF16ExpertLease {
++    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil) async throws -> QwenBF16ExpertLease {
+         do {
+             guard expertIDs.count <= slotCount else {
+                 throw QwenExpertMappingError.insufficientUnpinnedSlots
+@@ -866,20 +850,13 @@
+             }
+             throw error
+         }
+-        // Join before acquiring either cache lock. Import owns immutable bytes.
+-        let quarantine: QwenSettledQuarantineBatch?
+-        if let prefetch, let observation {
+-            quarantine = try await prefetch.drain(position: observation.position, layer: observation.layer)
+-        } else { quarantine = nil }
+-        defer { quarantine?.finish() }
+         let canceled = CancellationFlag()
+         let handoff = QwenProductionTimingMeasurement.workerHandoff()
+         return try await withTaskCancellationHandler {
+             let outcome: Result<FetchResult, Error> = await withCheckedContinuation { continuation in
+                 DispatchQueue.global(qos: .userInitiated).async { [self] in
+                     let outcome = Result {
+-                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement,
+-                                         quarantine: quarantine, observation: observation)
++                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement)
+                     }
+                     handoff?.completed()
+                     continuation.resume(returning: outcome)
+@@ -918,9 +895,7 @@
+     }
+ 
+     private func performFetch(expertIDs: [Int], canceled: CancellationFlag,
+-                              measurement: QwenCacheMapContext?,
+-                              quarantine: QwenSettledQuarantineBatch?,
+-                              observation: QwenEarlyPrefetchMapContext?) throws -> FetchResult {
++                              measurement: QwenCacheMapContext?) throws -> FetchResult {
+         ioLock.lock()
+         defer { ioLock.unlock() }
+         if canceled.isCanceled() {
+@@ -936,7 +911,6 @@
+                                                        snapshot: cache.measurementSnapshot)
+         }
+         let mapID = measurement.map { $0.capture.beginQwenCacheMap($0) }
+-        let residents = cache.measurementSnapshot().expertIDs
+         let reserved: (UInt64, ExpertCachePlan)
+         do {
+             reserved = try withStateLock {
+@@ -976,14 +950,9 @@
+             }
+             throw error
+         }
+-        if let observation {
+-            observation.capture.plan(position: observation.position, layer: observation.layer,
+-                                     plan: reserved.1, residents: residents)
+-        }
+         do {
+             let buffers = try cache.load(reserved.1, hooks: hooks,
+-                                         canceled: { canceled.isCanceled() },
+-                                         quarantine: quarantine, observation: observation)
++                                         canceled: { canceled.isCanceled() })
+             return FetchResult(identifier: reserved.0, plan: reserved.1, buffers: buffers,
+                                measurementMapID: mapID)
+         } catch {
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenCPUExpertHint.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenCPUExpertHint.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenCPUExpertHint.swift
++++ /dev/null
+@@ -1,70 +0,0 @@
+-import Foundation
+-import Metal
+-
+-// Candidate IDs only. No caller can use this result as a model route or admission.
+-enum QwenCPUExpertHint {
+-    static func candidates(hidden: [Float], postNorm: [Float], weights: QwenBF16Weights,
+-                           routerName: String, experts: Int, columns: Int) throws -> [Int] {
+-        guard experts == 256, columns == 2048, hidden.count == columns else {
+-            throw QwenBF16WeightError.invalidGeometry("CPU hint geometry")
+-        }
+-        try weights.requireShape(routerName, role: .router, rows: experts, columns: columns)
+-        let chunks = weights.inspectedChunks.filter { $0.name == routerName }
+-        guard !chunks.isEmpty else { throw QwenBF16WeightError.missingTensor(routerName) }
+-        var nextRow = 0
+-        for chunk in chunks {
+-            let (elements, elementsOverflow) = chunk.rowCount.multipliedReportingOverflow(by: columns)
+-            let (bytes, bytesOverflow) = elements.multipliedReportingOverflow(by: MemoryLayout<UInt16>.stride)
+-            guard chunk.firstRow == nextRow, chunk.rowCount > 0,
+-                  chunk.rowCount <= experts - nextRow,
+-                  !elementsOverflow, !bytesOverflow,
+-                  chunk.buffer.storageMode == .shared, chunk.buffer.length >= bytes,
+-                  Int(bitPattern: chunk.buffer.contents()) % MemoryLayout<UInt16>.alignment == 0 else {
+-                throw QwenBF16WeightError.invalidGeometry("CPU hint router chunk range")
+-            }
+-            nextRow += chunk.rowCount
+-        }
+-        guard nextRow == experts else {
+-            throw QwenBF16WeightError.invalidGeometry("CPU hint router row coverage")
+-        }
+-        let normalized = try qwenOfficialSourceRMSNorm(hidden, postNorm)
+-        // Scores are temporary hints. No FP32 router copy or model logits are made.
+-        var scores = [Float](repeating: 0, count: experts)
+-        try withExtendedLifetime((weights, chunks)) {
+-            try normalized.withUnsafeBufferPointer { input in
+-                for chunk in chunks {
+-                    let words = UnsafeRawPointer(chunk.buffer.contents()).assumingMemoryBound(to: UInt16.self)
+-                    for row in 0..<chunk.rowCount {
+-                        var accumulator = SIMD8<Float>(repeating: 0)
+-                        for column in stride(from: 0, to: columns, by: 8) {
+-                            let base = row * columns + column
+-                            let router = SIMD8<Float>(
+-                                Float(bitPattern: UInt32(words[base]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 1]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 2]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 3]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 4]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 5]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 6]) << 16),
+-                                Float(bitPattern: UInt32(words[base + 7]) << 16))
+-                            let vector = SIMD8<Float>(input[column], input[column + 1], input[column + 2],
+-                                input[column + 3], input[column + 4], input[column + 5],
+-                                input[column + 6], input[column + 7])
+-                            accumulator += router * vector
+-                        }
+-                        var score: Float = 0
+-                        for lane in 0..<8 { score += accumulator[lane] }
+-                        guard score.isFinite else {
+-                            throw QwenBF16WeightError.invalidGeometry("nonfinite CPU hint score")
+-                        }
+-                        scores[chunk.firstRow + row] = score
+-                    }
+-                }
+-            }
+-        }
+-        // Fixed Top8 with lower expert ID winning a tie. No per-case tuning.
+-        return Array(scores.indices.sorted {
+-            scores[$0] == scores[$1] ? $0 < $1 : scores[$0] > scores[$1]
+-        }.prefix(8))
+-    }
+-}
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenEarlyPrefetchCapture.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenEarlyPrefetchCapture.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenEarlyPrefetchCapture.swift
++++ /dev/null
+@@ -1,97 +0,0 @@
+-import Foundation
+-import Synchronization
+-
+-final class QwenEarlyPrefetchCapture: Sendable {
+-    enum Site: String, Codable, CaseIterable, Sendable {
+-        case fullSource, hitValidation, beforeCopyValidation, copy, publicationValidation
+-        case demandProtectedRead, speculativeProtectedRead, drain, hint, map
+-    }
+-    struct Counter: Codable, Sendable {
+-        var count: UInt64 = 0
+-        var wallNanoseconds: UInt64 = 0
+-        var requestedBytes: UInt64 = 0
+-        var failures: UInt64 = 0
+-    }
+-    struct Key: Hashable, Sendable { let position: Int; let layer: Int }
+-    struct Route: Codable, Sendable {
+-        let position: Int
+-        let layer: Int
+-        let experts: [Int]
+-        let weightBits: [UInt32]
+-    }
+-    struct Plan: Codable, Sendable {
+-        let position: Int
+-        let layer: Int
+-        let experts: [Int]
+-        let assignedSlots: [Int]
+-        let missIndices: [Int]
+-        let residents: [Int]
+-    }
+-    struct State: Sendable {
+-        var active = false
+-        var routes: [Key: Route] = [:]
+-        var plans: [Key: Plan] = [:]
+-        var counters: [Site: Counter] = [:]
+-        var duplicate = false
+-        var speculativePairs: UInt64 = 0
+-        var importedPairs: UInt64 = 0
+-        var unusedPairs: UInt64 = 0
+-    }
+-    private let storage = Mutex(State())
+-    func begin() { storage.withLock { $0.active = true } }
+-    func snapshot() -> State { storage.withLock { $0 } }
+-    func measure<T>(_ site: Site, bytes: UInt64 = 0, _ body: () throws -> T) rethrows -> T {
+-        guard storage.withLock({ $0.active }) else { return try body() }
+-        let start = QwenProductionTimingMeasurement.uptime()
+-        var succeeded = false
+-        defer {
+-            let elapsed = QwenProductionTimingMeasurement.uptime() - start
+-            storage.withLock { value in
+-                value.counters[site, default: Counter()].count += 1
+-                value.counters[site, default: Counter()].wallNanoseconds += elapsed
+-                value.counters[site, default: Counter()].requestedBytes += bytes
+-                if !succeeded { value.counters[site, default: Counter()].failures += 1 }
+-            }
+-        }
+-        let result = try body()
+-        succeeded = true
+-        return result
+-    }
+-    func duration(_ site: Site, start: UInt64) {
+-        let elapsed = QwenProductionTimingMeasurement.uptime() - start
+-        storage.withLock { value in
+-            guard value.active else { return }
+-            value.counters[site, default: Counter()].count += 1
+-            value.counters[site, default: Counter()].wallNanoseconds += elapsed
+-        }
+-    }
+-    func route(position: Int, layer: Int, experts: [Int], weights: [Float]) {
+-        storage.withLock { value in
+-            guard value.active, (1175..<1203).contains(position), (0..<40).contains(layer) else { return }
+-            let key = Key(position: position, layer: layer)
+-            if value.routes[key] != nil { value.duplicate = true }
+-            value.routes[key] = Route(position: position, layer: layer, experts: experts, weightBits: weights.map(\.bitPattern))
+-        }
+-    }
+-    func plan(position: Int, layer: Int, plan: ExpertCachePlan, residents: [Int]) {
+-        storage.withLock { value in
+-            guard value.active, (1175..<1203).contains(position), (0..<40).contains(layer) else { return }
+-            let key = Key(position: position, layer: layer)
+-            if value.plans[key] != nil { value.duplicate = true }
+-            value.plans[key] = Plan(position: position, layer: layer, experts: plan.experts,
+-                assignedSlots: plan.assignedSlots, missIndices: plan.misses, residents: residents)
+-        }
+-    }
+-    func completedBatch(predicted: Int, imported: Int) {
+-        storage.withLock { value in
+-            value.speculativePairs += UInt64(predicted)
+-            value.importedPairs += UInt64(imported)
+-            value.unusedPairs += UInt64(predicted - imported)
+-        }
+-    }
+-}
+-struct QwenEarlyPrefetchMapContext: Sendable {
+-    let capture: QwenEarlyPrefetchCapture
+-    let position: Int
+-    let layer: Int
+-}
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPrefetchOverlapProbe.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPrefetchOverlapProbe.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPrefetchOverlapProbe.swift
++++ /dev/null
+@@ -1,191 +0,0 @@
+-import Foundation
+-import Metal
+-import CryptoKit
+-import TurboFieldfareOfficialQwenSource
+-
+-private struct EarlyPrefetchProbeError: Error { let detail: String }
+-private func requireEarlyPrefetch(_ condition: Bool, _ detail: String) throws {
+-    if !condition { throw EarlyPrefetchProbeError(detail: detail) }
+-}
+-
+-// Source-copy command only. It publishes no parser, tools or conversation state.
+-public enum QwenExpertPrefetchOverlapProbe {
+-    @MainActor public static func run(registrationURL: URL, requestURL: URL, enabled: Bool) async throws -> Data {
+-        let raw = try Data(contentsOf: requestURL)
+-        let digest = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+-        try requireEarlyPrefetch(digest == "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285", "capture hash")
+-        guard let request = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+-              let prefixInts = request["inputTokenIDs"] as? [Int],
+-              let recordedInts = request["sampledTokenIDs"] as? [Int],
+-              let settings = request["settings"] as? [String: Any],
+-              let stops = settings["extraStopTokens"] as? [Int],
+-              let strings = settings["stopStrings"] as? [String],
+-              let temperature = settings["temperature"] as? NSNumber,
+-              let penalty = settings["repetitionPenalty"] as? NSNumber,
+-              let maxNew = settings["maxNewTokens"] as? Int,
+-              let maxContext = request["maximumContext"] as? Int,
+-              let eosInt = request["codecEOS"] as? Int else {
+-            throw EarlyPrefetchProbeError(detail: "capture fields")
+-        }
+-        try requireEarlyPrefetch(prefixInts.count == 1175 && recordedInts.count == 29
+-            && request["complete"] as? Bool == true && request["terminal"] as? String == "committed"
+-            && request["fixtureSamples"] as? Bool == false && request["checkpointResume"] as? Bool == false
+-            && request["preparedPromptPresent"] as? Bool == false && request["visionStorePresent"] as? Bool == false
+-            && maxContext == 8192 && prefixInts.allSatisfy { Int32(exactly: $0) != nil }
+-            && recordedInts.allSatisfy { Int32(exactly: $0) != nil }, "frozen capture geometry")
+-        let prefix = prefixInts.map { Int32($0) }
+-        let recorded = recordedInts.map { Int32($0) }
+-        let eos = Int32(eosInt)
+-        var config = GenerationConfig(maxNewTokens: maxNew,
+-            temperature: Float(temperature.doubleValue), topK: settings["topK"] as? Int,
+-            topP: (settings["topP"] as? NSNumber).map { Float($0.doubleValue) },
+-            repetitionPenalty: Float(penalty.doubleValue), seed: nil,
+-            stopStrings: strings, extraStopTokens: Set(stops.map { Int32($0) }))
+-        config.logitTransform = .raw
+-        try config.validate()
+-        try requireEarlyPrefetch(config.temperature == 0 && config.extraStopTokens.contains(eos)
+-            && recorded.last == eos, "greedy terminal capture")
+-        var minimumFree = try memoryGuard()
+-        let context = try MetalContext()
+-        let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
+-            integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
+-            expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024)
+-        guard let source = model.sourceIdentity else { throw EarlyPrefetchProbeError(detail: "source identity") }
+-        try requireEarlyPrefetch(source.descriptorContentSHA256 == (request["sourceDescriptorSHA256"] as? String)
+-            && source.markerSHA256 == (request["sourceMarkerSHA256"] as? String)
+-            && source.checksumManifestSHA256 == (request["sourceManifestSHA256"] as? String)
+-            && source.shardSetSHA256 == (request["sourceShardSetSHA256"] as? String), "official source mismatch")
+-        try requireEarlyPrefetch(model.architecture.layers == 40 && model.architecture.hiddenSize == 2048 && model.architecture.experts == 256,
+-                              "bounded architecture")
+-        let capture = QwenEarlyPrefetchCapture()
+-        let allocationStart = QwenProductionTimingMeasurement.uptime()
+-        // Both modes allocate and touch the same bounded quarantine footprint.
+-        let pool = try QwenProtectedEarlyPrefetch(model: model, enabled: enabled, capture: capture)
+-        let allocationNanoseconds = QwenProductionTimingMeasurement.uptime() - allocationStart
+-        minimumFree = min(minimumFree, try memoryGuard())
+-        let runner = try QwenOfficialSourceRunner(model: model, maxContext: maxContext,
+-            expertSlotCount: 16, hooks: .none, earlyPrefetch: pool, earlyCapture: capture)
+-        let scratch = try RawCompletionScratch(context: context, vocab: model.architecture.vocabularySize)
+-        let prefillStart = QwenProductionTimingMeasurement.uptime()
+-        var logits = try await runner.prefill(tokenIDs: prefix, position: 0)
+-        let prefillEnd = QwenProductionTimingMeasurement.uptime()
+-        minimumFree = min(minimumFree, try memoryGuard())
+-        capture.begin()
+-        var history = prefix
+-        var generated: [Int32] = []
+-        var forwardTimes: [UInt64] = []
+-        var foundStop = false
+-        let decodeStart = QwenProductionTimingMeasurement.uptime()
+-        do {
+-            // Recorded IDs only check outputs. They never supply decode inputs.
+-            for index in 0..<min(config.maxNewTokens, 64) {
+-                try Task.checkCancellation()
+-                try QwenSourceSamplerBoundary.publishFP32Logits(logits, into: scratch.logits,
+-                    vocabularySize: model.architecture.vocabularySize)
+-                guard let command = context.queue.makeCommandBuffer() else {
+-                    throw EarlyPrefetchProbeError(detail: "sampler command")
+-                }
+-                scratch.sampler.sample(commandBuffer: command, logits: scratch.logits, probs: scratch.probs,
+-                    history: history, config: config, position: index, outToken: scratch.outToken)
+-                try Task.checkCancellation()
+-                command.commit()
+-                await command.completed()
+-                try requireEarlyPrefetch(command.status == .completed && command.error == nil, "sampler GPU error")
+-                let sampled = scratch.outToken.contents().load(as: UInt32.self)
+-                try requireEarlyPrefetch(sampled < UInt32(model.architecture.vocabularySize), "invalid sampled ID")
+-                let token = Int32(sampled)
+-                try requireEarlyPrefetch(index < recorded.count && token == recorded[index], "sample differs at index \(index)")
+-                generated.append(token)
+-                if config.extraStopTokens.contains(token) { foundStop = true; break }
+-                let start = QwenProductionTimingMeasurement.uptime()
+-                logits = try await runner.produce(token: token, position: history.count)
+-                forwardTimes.append(QwenProductionTimingMeasurement.uptime() - start)
+-                history.append(token)
+-            }
+-            try await pool.cancelAndDrain()
+-        } catch {
+-            var failure: any Error = error
+-            do { try await pool.cancelAndDrain() }
+-            catch { failure = QwenProductionAndQuarantineFailure(primary: failure, speculative: error) }
+-            throw failure
+-        }
+-        let decodeEnd = QwenProductionTimingMeasurement.uptime()
+-        try requireEarlyPrefetch(foundStop && generated == recorded && forwardTimes.count == 28,
+-                                 "incomplete frozen generation")
+-        let finalPosition = await runner.position
+-        let usable = !(await runner.isUnusable)
+-        let state = capture.snapshot()
+-        try requireEarlyPrefetch(finalPosition == 1203 && usable && pool.idle(), "terminal runner/quarantine state")
+-        try requireEarlyPrefetch(!state.duplicate && state.routes.count == 1120 && state.plans.count == 1120,
+-                                 "missing or duplicate decode evidence")
+-        for position in 1175..<1203 {
+-            for layer in 0..<40 {
+-                let key = QwenEarlyPrefetchCapture.Key(position: position, layer: layer)
+-                guard let route = state.routes[key], let plan = state.plans[key] else {
+-                    throw EarlyPrefetchProbeError(detail: "missing route/plan")
+-                }
+-                let residents = Set(plan.residents.filter { $0 >= 0 })
+-                try requireEarlyPrefetch(route.experts == plan.experts && route.experts.count == 8
+-                    && route.weightBits.count == 8 && Set(route.experts).count == 8
+-                    && plan.residents.count == 16 && plan.assignedSlots.count == 8
+-                    && Set(plan.assignedSlots).count == 8 && plan.assignedSlots.allSatisfy { (0..<16).contains($0) }
+-                    && plan.residents.allSatisfy { $0 == -1 || (0..<256).contains($0) }
+-                    && residents.count == plan.residents.filter { $0 >= 0 }.count
+-                    && Set(plan.missIndices).count == plan.missIndices.count
+-                    && plan.missIndices.allSatisfy { plan.experts.indices.contains($0) }, "route/plan shape")
+-                try requireEarlyPrefetch(Set(plan.missIndices.map { plan.experts[$0] })
+-                    == Set(plan.experts).subtracting(residents), "actual miss membership")
+-            }
+-        }
+-        let order: (QwenEarlyPrefetchCapture.Key, QwenEarlyPrefetchCapture.Key) -> Bool = {
+-            $0.position == $1.position ? $0.layer < $1.layer : $0.position < $1.position
+-        }
+-        let routes = state.routes.keys.sorted(by: order).map { state.routes[$0]! }
+-        let plans = state.plans.keys.sorted(by: order).map { state.plans[$0]! }
+-        var counters: [String: Any] = [:]
+-        for site in QwenEarlyPrefetchCapture.Site.allCases {
+-            let counter = state.counters[site] ?? .init()
+-            try requireEarlyPrefetch(counter.failures == 0, "failed safety/read counter")
+-            counters[site.rawValue] = try json(counter)
+-        }
+-        let hints = state.counters[.hint]?.count ?? 0
+-        try requireEarlyPrefetch(hints == (enabled ? 1092 : 0), "fixed early hint count")
+-        minimumFree = min(minimumFree, try memoryGuard())
+-        let result: [String: Any] = ["schema": 1, "mode": enabled ? "on" : "off",
+-            "captureSHA256": digest, "outputIDs": generated.map(Int.init), "expectedOutputIDsMatched": true,
+-            "promptWallNanoseconds": prefillEnd - prefillStart,
+-            "decodeWallNanoseconds": decodeEnd - decodeStart, "forwardWallNanoseconds": forwardTimes,
+-            "routes": try json(routes), "plans": plans.map { plan -> [String: Any] in
+-                ["position": plan.position, "layer": plan.layer, "experts": plan.experts,
+-                 "assignedSlots": plan.assignedSlots, "missIndices": plan.missIndices,
+-                 "residents": plan.residents.map { value -> Any in value < 0 ? NSNull() : NSNumber(value: value) }]
+-            }, "counters": counters,
+-            "quarantineBytes": pool.allocatedBytes, "quarantineAllocationTouchNanoseconds": allocationNanoseconds,
+-            "speculativePairs": state.speculativePairs, "importedPairs": state.importedPairs,
+-            "unusedPairs": state.unusedPairs, "unusedBytes": state.unusedPairs * 6 * 1024 * 1024,
+-            "minimumFreePercent": minimumFree,
+-            "safety": ["captureComplete": true, "quarantineIdle": pool.idle(), "runnerUsable": usable,
+-                       "position": finalPosition, "pendingTokens": 1],
+-            "rollbackExercised": false, "terminalEOSLeftPending": true,
+-            "timingLimits": "Decode includes all29 samples and28 forwards. Per-forward timings are secondary. Map includes drain, hits, demand reads and imports. Protected read timings include their source checks. Worker sums overlap and are not critical-path elapsed. Full-source scans are separate. Before-copy and original publication checks are retained. Counters are requested logical bytes, not physical disk bytes.",
+-            "scope": "Isolated source-copy experiment only. Fixed EARLY Top8 hints use existing owned BF16 router buffers. One serial speculative pair queue preserves two streams per pair. Only actual LFU16 misses import owner/epoch-matching bytes. Both modes touch48MiB before comparison. Hooks.none, normal grouped prefill, original demand routing and arithmetic remain. No app gain qualification."]
+-        return try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+-    }
+-    private static func json<T: Encodable>(_ value: T) throws -> Any {
+-        try JSONSerialization.jsonObject(with: JSONEncoder().encode(value))
+-    }
+-    private static func memoryGuard() throws -> Int {
+-        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/memory_pressure")
+-        process.arguments = ["-Q"]
+-        let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+-        try process.run(); process.waitUntilExit()
+-        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+-        let regex = try NSRegularExpression(pattern: "free percentage: ([0-9]+)%")
+-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+-        guard process.terminationStatus == 0, let match = regex.firstMatch(in: text, range: range),
+-              let valueRange = Range(match.range(at: 1), in: text), let value = Int(text[valueRange]), value >= 30 else {
+-            throw EarlyPrefetchProbeError(detail: "system free memory below30% or guard unavailable")
+-        }
+-        return value
+-    }
+-}
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift
+@@ -5,8 +5,6 @@
+ /// path. Synchronous read gates run inside bounded paired-read workers; async
+ /// gates never supply bytes, offsets, buffers, or an admission identity.
+ struct QwenOfficialSourceTransactionHooks: Sendable {
+-    private let knownNone: Bool
+-    var isKnownNone: Bool { knownNone }
+     let beforeProtectedExpertRead:
+         @Sendable (Int, Int, QwenBF16ExpertReadHooks.Stream) throws -> Void
+     let afterActualGPUSubmission: @Sendable (String) async throws -> Void
+@@ -45,7 +43,6 @@
+         observeActivation: (@Sendable (Int, Int, String, [Float]) -> Void)? = nil,
+         observeConsumedInput: (@Sendable (Int, Int32, [Float]?, QwenMRoPEPosition?) -> Void)? = nil
+     ) {
+-        knownNone = false
+         self.beforeProtectedExpertRead = beforeProtectedExpertRead
+         self.afterActualGPUSubmission = afterActualGPUSubmission ?? { _ in }
+         self.afterActualGPUCompletion = afterActualGPUCompletion ?? { _ in }
+@@ -64,24 +61,7 @@
+         self.observeConsumedInput = observeConsumedInput
+     }
+ 
+-    private init(provenNone: Void) {
+-        knownNone = true
+-        beforeProtectedExpertRead = { _, _, _ in }
+-        afterActualGPUSubmission = { _ in }
+-        afterActualGPUCompletion = { _ in }
+-        requiresSeparateGPUStages = false
+-        requiresTokenMajorPrefill = false
+-        requiresOrderedPrefillStages = false
+-        betweenConsumedTokens = { _ in }
+-        beforeTurnCommit = {}
+-        beforeRollbackRestore = {}
+-        observeRoute = { _, _, _, _, _, _ in }
+-        observeRawLogits = { _, _, _ in }
+-        observePublicLogitsAndSample = { _, _, _ in }
+-        observeActivation = nil
+-        observeConsumedInput = nil
+-    }
+-    static let none = Self(provenNone: ())
++    static let none = Self()
+ }
+ 
+ struct QwenOfficialSourceSamplingInput: Sendable {
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift
+@@ -118,15 +118,6 @@
+ 
+     func reserveExpertCache() throws -> ExpertCacheReservation {
+         try expertCacheQuota.reserve(bytes: expertCacheReservationBytes)
+-    }
+-
+-    // Diagnostic quarantine uses the same quota as the real expert cache.
+-    func reserveEarlyReadQuarantine() throws -> ExpertCacheReservation {
+-        let bytes = expertCacheBytesPerLayer / UInt64(expertCacheSlots) * 8
+-        guard bytes > 0, bytes <= 48 * 1024 * 1024 else {
+-            throw QwenBF16ExpertCacheError.invalidGeometry
+-        }
+-        return try expertCacheQuota.reserve(bytes: bytes)
+     }
+ 
+     /// Production admission: verification runs before any weight read or GPU
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -61,8 +61,6 @@
+     private let moeConfiguration: QwenMoEConfiguration
+     private let expertSlotCount: Int
+     private let hooks: QwenOfficialSourceTransactionHooks
+-    private let earlyPrefetch: QwenProtectedEarlyPrefetch?
+-    private let earlyCapture: QwenEarlyPrefetchCapture?
+     private let useGPULinearPreparation: Bool
+     private let useGroupedLinearPrefill: Bool
+     /// Only this actor mutates the dictionary. A GPU lease can independently
+@@ -111,10 +109,7 @@
+     init(model: QwenOfficialSourceModel, maxContext: Int,
+          expertSlotCount: Int,
+          hooks: QwenOfficialSourceTransactionHooks = .none,
+-         useExpertCacheResidency: Bool? = nil,
+-         earlyPrefetch: QwenProtectedEarlyPrefetch? = nil,
+-         earlyCapture: QwenEarlyPrefetchCapture? = nil) throws {
+-        if earlyPrefetch != nil, !hooks.isKnownNone { throw QwenQuarantineError.identity }
++         useExpertCacheResidency: Bool? = nil) throws {
+         let architecture = model.architecture
+         let context = model.context
+         let useGroupedLinearPrefill = ProcessInfo.processInfo.environment[
+@@ -235,8 +230,6 @@
+         self.model = model
+         self.context = context
+         self.hooks = hooks
+-        self.earlyPrefetch = earlyPrefetch
+-        self.earlyCapture = earlyCapture
+         // Internal trial only, fixed for this runner's lifetime. Legacy
+         // diagnostic hooks still select the linear step's separated fallback.
+         useGPULinearPreparation = ProcessInfo.processInfo.environment[
+@@ -300,11 +293,6 @@
+                                       mropePosition: mropePosition, withinPrefill: false)
+     }
+ 
+-    private func revalidateObservedSource() throws {
+-        if let earlyCapture { try earlyCapture.measure(.fullSource) { try model.revalidateSource() } }
+-        else { try model.revalidateSource() }
+-    }
+-
+     private func produceToken(token: Int32, position: Int,
+                               featureRow: [Float]?, mropePosition: QwenMRoPEPosition?,
+                               withinPrefill: Bool) async throws -> [Float] {
+@@ -330,7 +318,7 @@
+         inFlight = true
+         defer { inFlight = false }
+         try Task.checkCancellation()
+-        try revalidateObservedSource()
++        try model.revalidateSource()
+         let linearCheckpoint = try linearState.retainCheckpoint()
+         let fullSnapshot = try fullKV.snapshot()
+         do {
+@@ -360,7 +348,7 @@
+                 hooks.observeActivation?(position, layer, "residual-after-mixer", hidden)
+                 let post = try qwenOfficialSourceRMSNorm(hidden, weights.postNorm)
+                 hooks.observeActivation?(position, layer, "post-norm", post)
+-                let routed = try await moeStep(input: post, layer: layer, earlyHidden: withinPrefill ? nil : hidden)
++                let routed = try await moeStep(input: post, layer: layer)
+                 guard routed.count == width else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                 hidden = zip(hidden, routed).map(+)
+                 guard hidden.allSatisfy(\.isFinite) else {
+@@ -375,7 +363,7 @@
+                 model.entryWeights, model.headName, input: final,
+                 outputCount: model.architecture.vocabularySize, timingStage: .head)
+             try Task.checkCancellation()
+-            try revalidateObservedSource()
++            try model.revalidateSource()
+             guard logits.count == model.architecture.vocabularySize,
+                   logits.allSatisfy(\.isFinite) else {
+                 throw QwenTextRunnerError.execution(detail: "nonfinite source logits")
+@@ -385,9 +373,6 @@
+             hooks.observeConsumedInput?(position, token, featureRow, mropePosition)
+             return logits
+         } catch {
+-            var failure: any Error = error
+-            do { try await earlyPrefetch?.cancelAndDrain() }
+-            catch { failure = QwenProductionAndQuarantineFailure(primary: failure, speculative: error) }
+             // All lower-level methods await submitted GPU work before throwing.
+             // If restoration itself fails, permanently close this runner.
+             await linearState.waitUntilIdle()
+@@ -409,9 +394,9 @@
+             } catch let rollbackError {
+                 unusable = true
+                 throw QwenTextRunnerError.execution(
+-                    detail: "source token failed: \(failure); rollback failed: \(rollbackError)")
+-            }
+-            throw failure
++                    detail: "source token failed: \(error); rollback failed: \(rollbackError)")
++            }
++            throw error
+         }
+     }
+ 
+@@ -518,7 +503,7 @@
+         defer { inFlight = false }
+         do {
+             try Task.checkCancellation()
+-            try revalidateObservedSource()
++            try model.revalidateSource()
+             let residualRows = try buffer(elements: rowElements,
+                 stride: MemoryLayout<Float>.stride, label: "source prefill residual rows")
+             let inputRows = try buffer(elements: rowElements,
+@@ -683,7 +668,7 @@
+                         // Load the complete group once. Subsequent chunks can map
+                         // their current subset as hits without evicting this group.
+                         let requested = workStart == 0 ? groupIDs : Array(Set(work.map(\.expertID))).sorted()
+-                        try revalidateObservedSource()
++                        try model.revalidateSource()
+                         let measurement = QwenCacheMapMeasurement.capture.map {
+                             QwenCacheMapContext(capture: $0, layer: layer,
+                                                 position: position, tokenCount: tokenIDs.count)
+@@ -696,7 +681,7 @@
+                         lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
+                         lastRoutedExpertCount = topK
+                         do {
+-                            try revalidateObservedSource()
++                            try model.revalidateSource()
+                             try await moe.submitGroupedExpertsBF16(
+                                 hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
+                                 routingWeights: routingWeights, outputRows: outputRows,
+@@ -752,7 +737,7 @@
+                                                   tokenIDs[tokenIDs.count - 1], logits)
+             await onProgress(tokenIDs.count, tokenIDs.count)
+             try Task.checkCancellation()
+-            try revalidateObservedSource()
++            try model.revalidateSource()
+             let expected = position + tokenIDs.count
+             let full = try fullKV.snapshot()
+             let linearPositionsMatch = try linearSteps.keys.allSatisfy {
+@@ -798,7 +783,7 @@
+         guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint == nil else {
+             throw QwenTextRunnerError.operationInProgress
+         }
+-        try revalidateObservedSource()
++        try model.revalidateSource()
+         let linear = try linearState.clone()
+         let full = try fullKV.snapshot()
+         guard full.position == committedPosition,
+@@ -847,7 +832,7 @@
+         guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint != nil else {
+             throw QwenTextRunnerError.invalidTransaction
+         }
+-        try revalidateObservedSource()
++        try model.revalidateSource()
+         try validateCompanion()
+         fullKV.discardReplacementCheckpoint()
+         turnCheckpoint = nil
+@@ -864,7 +849,7 @@
+               var checkpoint = turnCheckpoint, checkpoint.replacementFull == nil else {
+             throw QwenTextRunnerError.invalidTransaction
+         }
+-        try revalidateObservedSource()
++        try model.revalidateSource()
+         checkpoint.replacementFull = try fullKV.retainReplacementCheckpoint()
+         turnCheckpoint = checkpoint
+         try linearState.reset()
+@@ -876,7 +861,7 @@
+         guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint == nil else {
+             throw QwenTextRunnerError.operationInProgress
+         }
+-        try revalidateObservedSource()
++        try model.revalidateSource()
+         do {
+             try linearState.reset()
+             try fullKV.reset()
+@@ -952,10 +937,10 @@
+         return read(outputBuffer, count: outputCount)
+     }
+ 
+-    private func moeStep(input: [Float], layer: Int, earlyHidden: [Float]? = nil) async throws -> [Float] {
++    private func moeStep(input: [Float], layer: Int) async throws -> [Float] {
+         if let location = QwenProductionTimingMeasurement.location, location.layer != layer {
+             return try await QwenProductionTimingMeasurement.$location.withValue(location.atLayer(layer)) {
+-                try await moeStep(input: input, layer: layer, earlyHidden: earlyHidden)
++                try await moeStep(input: input, layer: layer)
+             }
+         }
+         let row = model.layers[layer]
+@@ -978,10 +963,9 @@
+             ? routeLogits[ranked[model.architecture.expertsPerToken - 1]]
+                 - routeLogits[ranked[model.architecture.expertsPerToken]]
+             : 0
+-        earlyCapture?.route(position: committedPosition, layer: layer, experts: experts, weights: routeWeights)
+         hooks.observeRoute(committedPosition, layer, routeLogits,
+                            experts, routeWeights, cutoff)
+-        try revalidateObservedSource()
++        try model.revalidateSource()
+         let coordinator = try expertCoordinator(layer: layer)
+         lastRoutedExpertCount = experts.count
+         let measurement = QwenCacheMapMeasurement.capture.map {
+@@ -989,36 +973,20 @@
+         }
+         let mapSpan = QwenProductionTimingMeasurement.span(.expertMap)
+         let lease: QwenBF16ExpertLease
+-        let observation = earlyCapture.map { QwenEarlyPrefetchMapContext(capture: $0, position: committedPosition, layer: layer) }
+-        let mapStart = QwenProductionTimingMeasurement.uptime()
+-        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement,
+-                                               prefetch: earlyHidden == nil ? nil : earlyPrefetch,
+-                                               observation: observation) }
++        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement) }
+         catch { mapSpan?.finish(); throw error }
+         mapSpan?.finish()
+-        earlyCapture?.duration(.map, start: mapStart)
+         // Mapping has succeeded. Later GPU failure/cancellation cannot undo
+         // these completed cache reads, even when the token is rolled back.
+         successfulCacheHits += UInt64(lease.diagnostics.hits)
+         successfulCacheMisses += UInt64(lease.diagnostics.misses)
+         publishCacheSummary()
+         do {
+-            if let earlyHidden, let earlyPrefetch, earlyPrefetch.enabled, layer + 1 < model.layers.count,
+-               let earlyCapture {
+-                let next = model.layers[layer + 1]
+-                let (owner, hints) = try earlyCapture.measure(.hint) {
+-                    let predictions = try QwenCPUExpertHint.candidates(hidden: earlyHidden, postNorm: next.postNorm,
+-                        weights: next.weights, routerName: next.routerName,
+-                        experts: model.architecture.experts, columns: model.architecture.hiddenSize)
+-                    return try expertCoordinator(layer: layer + 1).earlyReadOwner(predictions: predictions, layer: layer + 1)
+-                }
+-                try earlyPrefetch.start(owner: owner, experts: hints, position: committedPosition, layer: layer + 1)
+-            }
+             // Protected reads validate their retained shard before and after
+             // every slice. Recheck the complete source once after mapping so
+             // changes to other receipt files reject this layer before GPU use.
+             // Keep this inside the lease cleanup scope if validation throws.
+-            try revalidateObservedSource()
++            try model.revalidateSource()
+             let hiddenBuffer = try floats(input, label: "source MoE input")
+             let routingBuffer = try floats(routeWeights, label: "source MoE routing")
+             let output = try buffer(elements: model.architecture.hiddenSize,
+@@ -1050,26 +1018,19 @@
+         }
+         let hooks = self.hooks
+         let reservation = expertCacheStorage.reservation
+-        let readHooks: QwenBF16ExpertReadHooks
+-        if earlyPrefetch?.enabled == true {
+-            guard hooks.isKnownNone else { throw QwenQuarantineError.identity }
+-            readHooks = .none
+-        } else {
+-            readHooks = QwenBF16ExpertReadHooks { checkpoint in
++        let coordinator = try QwenBF16ExpertMappingCoordinator(
++            source: model.source, names: model.layers[layer].routedNames, layer: layer,
++            configuration: moeConfiguration, device: context.device,
++            slotCount: expertSlotCount, residencyBudget: bytes,
++            cachePolicy: model.expertCachePolicy,
++            readHooks: QwenBF16ExpertReadHooks { checkpoint in
+                 // A submitted lease can outlive the runner. Retain its full
+                 // quota until this coordinator's last owner releases it.
+                 try withExtendedLifetime(reservation) {
+                     guard case let .beforeProtectedRead(expert, stream) = checkpoint else { return }
+                     try hooks.beforeProtectedExpertRead(layer, expert, stream)
+                 }
+-            }
+-        }
+-        let coordinator = try QwenBF16ExpertMappingCoordinator(
+-            source: model.source, names: model.layers[layer].routedNames, layer: layer,
+-            configuration: moeConfiguration, device: context.device,
+-            slotCount: expertSlotCount, residencyBudget: bytes,
+-            cachePolicy: model.expertCachePolicy, readHooks: readHooks,
+-            cacheResidency: expertCacheStorage.residency, quotaOwner: reservation)
++            }, cacheResidency: expertCacheStorage.residency)
+         guard coordinator.allocatedCacheBytes == bytes else {
+             throw QwenBF16ExpertCacheError.invalidGeometry
+         }
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenProtectedEarlyPrefetch.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenProtectedEarlyPrefetch.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenProtectedEarlyPrefetch.swift
++++ /dev/null
+@@ -1,278 +0,0 @@
+-import Foundation
+-import Metal
+-import Synchronization
+-
+-enum QwenQuarantineError: Error {
+-    case identity, busy, incomplete
+-}
+-struct QwenQuarantineReadFailure: Error, CustomStringConvertible {
+-    let errors: [any Error]
+-    var description: String { "quarantine read failures: " + errors.map { String(describing: $0) }.joined(separator: " | ") }
+-}
+-struct QwenProductionAndQuarantineFailure: Error, CustomStringConvertible {
+-    let primary: any Error
+-    let speculative: any Error
+-    var description: String { "production: \(primary); quarantine: \(speculative)" }
+-}
+-final class QwenQuarantineEpoch: Sendable {
+-    let position: Int
+-    let layer: Int
+-    let ordinal: UInt64
+-    private struct State { var valid = true; var reusable = false; var canceled = false }
+-    private let state = Mutex(State())
+-    let importFinished = DispatchGroup()
+-    init(position: Int, layer: Int, ordinal: UInt64) {
+-        self.position = position; self.layer = layer; self.ordinal = ordinal
+-        importFinished.enter()
+-    }
+-    func cancel() { state.withLock { $0.canceled = true } }
+-    func isCanceled() -> Bool { state.withLock { $0.canceled } }
+-    func requireValid(position: Int, layer: Int) throws {
+-        guard self.position == position, self.layer == layer,
+-              state.withLock({ $0.valid && !$0.canceled && !$0.reusable }) else {
+-            throw QwenQuarantineError.identity
+-        }
+-    }
+-    func finish() {
+-        let first = state.withLock { value -> Bool in
+-            if value.reusable { return false }
+-            value.reusable = true
+-            return true
+-        }
+-        if first { importFinished.leave() }
+-    }
+-    func canReuse() -> Bool { state.withLock { $0.reusable } }
+-    func invalidate() { state.withLock { $0.valid = false } }
+-}
+-
+-// Buffer references are fixed. Streams have disjoint writers until the join.
+-// A sealed batch is read-only until its import lease finishes and epoch expires.
+-struct QwenQuarantineBuffers: @unchecked Sendable {
+-    let gateUp: MTLBuffer
+-    let down: MTLBuffer
+-}
+-final class QwenSettledQuarantineBatch: @unchecked Sendable {
+-    let owner: QwenBF16EarlyReadOwner
+-    let epoch: QwenQuarantineEpoch
+-    private let experts: [Int]
+-    private let pairs: [QwenQuarantineBuffers]
+-    private let quota: QwenOfficialSourceModel.ExpertCacheReservation
+-    private let capture: QwenEarlyPrefetchCapture
+-    private struct Usage { var copied = Set<Int>(); var finished = false }
+-    private let usage = Mutex(Usage())
+-    fileprivate init(owner: QwenBF16EarlyReadOwner, epoch: QwenQuarantineEpoch,
+-                     experts: [Int], pairs: [QwenQuarantineBuffers],
+-                     quota: QwenOfficialSourceModel.ExpertCacheReservation,
+-                     capture: QwenEarlyPrefetchCapture) {
+-        self.owner = owner; self.epoch = epoch; self.experts = experts; self.pairs = pairs
+-        self.quota = quota; self.capture = capture
+-    }
+-    func contains(_ expert: Int, position: Int, layer: Int) throws -> Bool {
+-        try epoch.requireValid(position: position, layer: layer)
+-        return experts.contains(expert)
+-    }
+-    func copy(expert: Int, stream: Int, into destination: MTLBuffer, position: Int, layer: Int) throws {
+-        try epoch.requireValid(position: position, layer: layer)
+-        guard let index = experts.firstIndex(of: expert), stream == 0 || stream == 1 else {
+-            throw QwenQuarantineError.identity
+-        }
+-        let source = stream == 0 ? pairs[index].gateUp : pairs[index].down
+-        let bytes = stream == 0 ? owner.gateBytes : owner.downBytes
+-        guard source.length == bytes, destination.length == bytes,
+-              source.storageMode == .shared, destination.storageMode == .shared,
+-              source.device === destination.device, source !== destination else {
+-            throw QwenQuarantineError.identity
+-        }
+-        capture.measure(.copy, bytes: UInt64(bytes)) {
+-            _ = memcpy(destination.contents(), source.contents(), bytes)
+-        }
+-    }
+-    func published(expert: Int) { usage.withLock { $0.copied.insert(expert) } }
+-    func finish() {
+-        let imported = usage.withLock { value -> Int? in
+-            if value.finished { return nil }
+-            value.finished = true
+-            return value.copied.count
+-        }
+-        if let imported { capture.completedBatch(predicted: experts.count, imported: imported); epoch.finish() }
+-    }
+-    deinit { finish() }
+-}
+-
+-private final class QwenQuarantineReadBatch: @unchecked Sendable {
+-    let group = DispatchGroup()
+-    let settlement = DispatchGroup()
+-    let owner: QwenBF16EarlyReadOwner
+-    let epoch: QwenQuarantineEpoch
+-    private let experts: [Int]
+-    private let pairs: [QwenQuarantineBuffers]
+-    private let quota: QwenOfficialSourceModel.ExpertCacheReservation
+-    private let capture: QwenEarlyPrefetchCapture
+-    private let results: Mutex<[Result<Void, any Error>?]>
+-    init(owner: QwenBF16EarlyReadOwner, epoch: QwenQuarantineEpoch, experts: [Int],
+-         pairs: [QwenQuarantineBuffers], quota: QwenOfficialSourceModel.ExpertCacheReservation,
+-         capture: QwenEarlyPrefetchCapture) {
+-        self.owner = owner; self.epoch = epoch; self.experts = experts; self.pairs = pairs
+-        self.quota = quota; self.capture = capture
+-        results = Mutex(Array(repeating: nil, count: experts.count * 2))
+-        // Account for launch before the pool can publish this batch.
+-        group.enter()
+-    }
+-    func launch() {
+-        DispatchQueue.global(qos: .userInitiated).async { [self] in
+-            defer { group.leave() }
+-            // Pairs are serial. The two original streams settle together.
+-            for index in experts.indices {
+-                if epoch.isCanceled() { break }
+-                DispatchQueue.concurrentPerform(iterations: 2) { stream in
+-                    let outcome = Result {
+-                        let pair = pairs[index]
+-                        try owner.read(expert: experts[index], stream: stream,
+-                            into: stream == 0 ? pair.gateUp : pair.down,
+-                            capture: capture, canceled: epoch.isCanceled)
+-                    }
+-                    results.withLock { $0[index * 2 + stream] = outcome }
+-                }
+-            }
+-        }
+-    }
+-    func readFailure() -> (any Error)? {
+-        let errors = results.withLock { values in
+-            values.compactMap { value -> (any Error)? in
+-                guard let value else { return nil }
+-                if case let .failure(error) = value { return error }
+-                return nil
+-            }
+-        }
+-        guard !errors.isEmpty else { return nil }
+-        if errors.allSatisfy({ $0 is CancellationError }) { return CancellationError() }
+-        return QwenQuarantineReadFailure(errors: errors)
+-    }
+-    // Caller joins first. Every launched stream settles even after a sibling error.
+-    func settled() throws -> QwenSettledQuarantineBatch {
+-        let values = results.withLock { $0 }
+-        if let error = readFailure() { epoch.finish(); throw error }
+-        if epoch.isCanceled() { epoch.finish(); throw CancellationError() }
+-        guard values.allSatisfy({ $0 != nil }) else { epoch.finish(); throw QwenQuarantineError.incomplete }
+-        return QwenSettledQuarantineBatch(owner: owner, epoch: epoch, experts: experts,
+-            pairs: pairs, quota: quota, capture: capture)
+-    }
+-}
+-
+-// One pool per isolated request. No buffer enters a GPU or actual cache plan.
+-final class QwenProtectedEarlyPrefetch: @unchecked Sendable {
+-    let enabled: Bool
+-    let allocatedBytes: UInt64
+-    private let pairs: [QwenQuarantineBuffers]
+-    private let quota: QwenOfficialSourceModel.ExpertCacheReservation
+-    private let capture: QwenEarlyPrefetchCapture
+-    private struct State {
+-        var batch: QwenQuarantineReadBatch?
+-        var draining = false
+-        var epoch: QwenQuarantineEpoch?
+-        var ordinal: UInt64 = 0
+-    }
+-    private let state = Mutex(State())
+-    init(model: QwenOfficialSourceModel, enabled: Bool, capture: QwenEarlyPrefetchCapture) throws {
+-        let quota = try model.reserveEarlyReadQuarantine()
+-        let width = model.architecture.hiddenSize
+-        let intermediate = model.architecture.routedIntermediateSize
+-        guard width == 2048, intermediate == 512, model.architecture.layers == 40 else {
+-            throw QwenQuarantineError.identity
+-        }
+-        let gateBytes = width * intermediate * 4
+-        let downBytes = width * intermediate * 2
+-        guard quota.bytes == UInt64((gateBytes + downBytes) * 8) else { throw QwenQuarantineError.identity }
+-        var pairs: [QwenQuarantineBuffers] = []
+-        for _ in 0..<8 {
+-            guard let gate = model.context.device.makeBuffer(length: gateBytes, options: .storageModeShared),
+-                  let down = model.context.device.makeBuffer(length: downBytes, options: .storageModeShared) else {
+-                throw QwenBF16ExpertCacheError.allocationFailed
+-            }
+-            memset(gate.contents(), 0, gateBytes)
+-            memset(down.contents(), 0, downBytes)
+-            pairs.append(QwenQuarantineBuffers(gateUp: gate, down: down))
+-        }
+-        self.quota = quota; self.pairs = pairs; self.enabled = enabled
+-        self.capture = capture; allocatedBytes = quota.bytes
+-    }
+-    func start(owner: QwenBF16EarlyReadOwner, experts: [Int], position: Int, layer: Int) throws {
+-        guard enabled, owner.layer == layer, (0..<40).contains(layer), position >= 0,
+-              experts.count <= 8, Set(experts).count == experts.count,
+-              experts.allSatisfy({ (0..<owner.expertCount).contains($0) }) else { throw QwenQuarantineError.identity }
+-        let batch = try state.withLock { value -> QwenQuarantineReadBatch in
+-            guard value.batch == nil, value.epoch?.canReuse() ?? true, value.ordinal < UInt64.max else {
+-                throw QwenQuarantineError.busy
+-            }
+-            value.epoch?.invalidate()
+-            value.ordinal += 1
+-            let epoch = QwenQuarantineEpoch(position: position, layer: layer, ordinal: value.ordinal)
+-            let batch = QwenQuarantineReadBatch(owner: owner, epoch: epoch, experts: experts,
+-                pairs: Array(pairs.prefix(experts.count)), quota: quota, capture: capture)
+-            value.epoch = epoch; value.batch = batch
+-            return batch
+-        }
+-        batch.launch()
+-    }
+-    private func join(_ group: DispatchGroup) async {
+-        await withCheckedContinuation { continuation in
+-            group.notify(queue: .global(qos: .userInitiated)) { continuation.resume() }
+-        }
+-    }
+-    func drain(position: Int, layer: Int) async throws -> QwenSettledQuarantineBatch? {
+-        let batch = try state.withLock { value -> QwenQuarantineReadBatch? in
+-            guard !value.draining else { throw QwenQuarantineError.busy }
+-            guard let batch = value.batch else { return nil }
+-            batch.settlement.enter()
+-            value.draining = true
+-            return batch
+-        }
+-        guard let batch else { return nil }
+-        let start = QwenProductionTimingMeasurement.uptime()
+-        defer {
+-            state.withLock { value in
+-                if value.batch === batch { value.batch = nil; value.draining = false }
+-            }
+-            batch.settlement.leave()
+-            capture.duration(.drain, start: start)
+-        }
+-        return try await withTaskCancellationHandler {
+-            await join(batch.group)
+-            let settled = try batch.settled()
+-            do {
+-                try Task.checkCancellation()
+-                try settled.epoch.requireValid(position: position, layer: layer)
+-                return settled
+-            } catch { settled.finish(); throw error }
+-        } onCancel: { batch.epoch.cancel() }
+-    }
+-    func cancelAndDrain() async throws {
+-        let snapshot = state.withLock { ($0.batch, $0.epoch) }
+-        guard let epoch = snapshot.1 else { return }
+-        epoch.cancel()
+-        var failure: (any Error)?
+-        if let pending = snapshot.0 {
+-            await join(pending.group)
+-            failure = pending.readFailure()
+-            let drainOwns = state.withLock { value -> Bool in
+-                guard value.batch === pending else { return false }
+-                if value.draining { return true }
+-                value.batch = nil
+-                epoch.finish()
+-                return false
+-            }
+-            if drainOwns { await join(pending.settlement) }
+-        }
+-        // A returned import lease still owns these buffers until its jobs settle.
+-        await join(epoch.importFinished)
+-        epoch.invalidate()
+-        if let failure, !(failure is CancellationError) { throw failure }
+-    }
+-    func idle() -> Bool { state.withLock { $0.batch == nil && ($0.epoch?.canReuse() ?? true) } }
+-    deinit {
+-        let pending = state.withLock { $0.batch }
+-        pending?.epoch.cancel()
+-        pending?.group.wait()
+-        pending?.epoch.invalidate()
+-    }
+-}
+diff --git a/Sources/TurboFieldfareExpertPrefetchOverlap/Command.swift b/Sources/TurboFieldfareExpertPrefetchOverlap/Command.swift
+deleted file mode 100644
+--- a/Sources/TurboFieldfareExpertPrefetchOverlap/Command.swift
++++ /dev/null
+@@ -1,32 +0,0 @@
+-import Foundation
+-import Darwin
+-import TurboFieldfare
+-
+-@main struct ExpertPrefetchOverlapCommand {
+-    @MainActor static func main() async {
+-        guard CommandLine.arguments.count == 4 else {
+-            FileHandle.standardError.write(Data("usage: TurboFieldfareExpertPrefetchOverlap registration.json request.json report.json\n".utf8))
+-            exit(2)
+-        }
+-        let output = URL(fileURLWithPath: CommandLine.arguments[3])
+-        do {
+-            guard !FileManager.default.fileExists(atPath: output.path) else {
+-                throw CocoaError(.fileWriteFileExists)
+-            }
+-            let data = try await QwenExpertPrefetchOverlapProbe.run(
+-                registrationURL: URL(fileURLWithPath: CommandLine.arguments[1]),
+-                requestURL: URL(fileURLWithPath: CommandLine.arguments[2]),
+-                enabled: ProcessInfo.processInfo.environment["TURBO_QWEN_EXPERT_PREFETCH_OVERLAP"] == "1")
+-            try data.write(to: output, options: .atomic)
+-            print(String(decoding: data, as: UTF8.self))
+-        } catch {
+-            let failure = ["passed": false, "error": String(describing: error)] as [String: Any]
+-            do {
+-                let data = try JSONSerialization.data(withJSONObject: failure, options: [.sortedKeys])
+-                if !FileManager.default.fileExists(atPath: output.path) { try data.write(to: output, options: .atomic) }
+-            } catch { FileHandle.standardError.write(Data("failure receipt write: \(error)\n".utf8)) }
+-            FileHandle.standardError.write(Data("expert prefetch overlap probe failed: \(error)\n".utf8))
+-            exit(1)
+-        }
+-    }
+-}

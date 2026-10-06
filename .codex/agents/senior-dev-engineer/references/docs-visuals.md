@@ -5,17 +5,14 @@ Use this for durable docs, plans, visual explainers, diagrams, dashboards, slide
 ## Durable Docs
 
 - Plans, specs, architecture notes, and durable docs belong under:
-  `/Users/dev-machine/Dev/VisionOS/Project-files/`
+  `/Users/dev-machine/dev/personal-project-documents/VisionCapture/Project-files/`
 - Use the active work folder when the task belongs to a current initiative.
 - Keep docs grounded in real VisionCapture files, modules, actors, and data flow.
 - Do not create durable project docs outside `Project-files/` unless the user explicitly asks.
 
 ## Knowledge Lookup
 
-Start from:
-
-- `/Users/dev-machine/Dev/VisionOS/Project-files/knowledge/index.md`
-- fallback: `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.md`
+Start from `/Users/dev-machine/Dev/VisionOS/docs/knowledge/index.html`.
 
 Do not bulk-read the knowledge base. Use the index to find the specific doc needed.
 

@@ -1,0 +1,114 @@
+{
+  "status": "MEASURED_METADATA_ONLY_NO_NEW_VALIDATOR",
+  "commit": "2adb70c2251f98af73bc349a58db7a75564ee751",
+  "run": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002/run-20261002T132705Z-be3088ae",
+  "exit": 0,
+  "childExit": 0,
+  "wrapperWallSeconds": 0.6161875422112644,
+  "receiptFileCount": 39,
+  "steadyCalls": 192,
+  "warmCalls": 3,
+  "batches": [
+    {
+      "mode": "baseline",
+      "calls": 32,
+      "wallMilliseconds": 46.970334,
+      "userCPUMilliseconds": 4.462,
+      "systemCPUMilliseconds": 42.449
+    },
+    {
+      "mode": "clockOff",
+      "calls": 32,
+      "wallMilliseconds": 39.862084,
+      "userCPUMilliseconds": 3.836,
+      "systemCPUMilliseconds": 35.948
+    },
+    {
+      "mode": "clockOn",
+      "calls": 32,
+      "wallMilliseconds": 36.515417,
+      "userCPUMilliseconds": 3.716,
+      "systemCPUMilliseconds": 32.771,
+      "microsecondsPerCall": {
+        "binding": 159.66675,
+        "fileCheckAndRemember": 120.44359375,
+        "fileClose": 21.768625,
+        "fileOpen": 703.72628125,
+        "heldStat": 26.850125,
+        "listing": 76.923125,
+        "namedStat": 76.47471875,
+        "receiptNames": 4.90759375,
+        "root": 41.9663125,
+        "total": 1141.0664375
+      },
+      "openFraction": 0.6167268251196811,
+      "countsPerCall": {
+        "binding": 3.0,
+        "fileCheckAndRemember": 78.0,
+        "fileClose": 78.0,
+        "fileOpen": 78.0,
+        "heldStat": 78.0,
+        "listing": 2.0,
+        "namedStat": 78.0,
+        "receiptNames": 1.0,
+        "root": 4.0,
+        "total": 1.0
+      }
+    },
+    {
+      "mode": "clockOn",
+      "calls": 32,
+      "wallMilliseconds": 35.70975,
+      "userCPUMilliseconds": 3.536,
+      "systemCPUMilliseconds": 32.174,
+      "microsecondsPerCall": {
+        "binding": 155.23171875,
+        "fileCheckAndRemember": 117.58971875,
+        "fileClose": 21.34190625,
+        "fileOpen": 694.591625,
+        "heldStat": 26.7575625,
+        "listing": 73.6421875,
+        "namedStat": 75.25028125,
+        "receiptNames": 4.520875,
+        "root": 38.9936875,
+        "total": 1115.8985
+      },
+      "openFraction": 0.6224505409766211,
+      "countsPerCall": {
+        "binding": 3.0,
+        "fileCheckAndRemember": 78.0,
+        "fileClose": 78.0,
+        "fileOpen": 78.0,
+        "heldStat": 78.0,
+        "listing": 2.0,
+        "namedStat": 78.0,
+        "receiptNames": 1.0,
+        "root": 4.0,
+        "total": 1.0
+      }
+    },
+    {
+      "mode": "clockOff",
+      "calls": 32,
+      "wallMilliseconds": 35.889916,
+      "userCPUMilliseconds": 3.323,
+      "systemCPUMilliseconds": 32.568
+    },
+    {
+      "mode": "baseline",
+      "calls": 32,
+      "wallMilliseconds": 37.497583,
+      "userCPUMilliseconds": 3.423,
+      "systemCPUMilliseconds": 34.038
+    }
+  ],
+  "finding": "Fresh read-only file opens take about62% of measured full-validation elapsed time. They must remain fresh read-open observations.",
+  "limitations": [
+    "Nil baseline uses new compiled wrappers with no collector; not previous binary.",
+    "Short warm batches and clocks are diagnostic; not app speed qualification.",
+    "fileCheckAndRemember includes heldStat/namedStat; do not sum them again.",
+    "No payload IO by audited fixed-policy call path; not system syscall tracing.",
+    "The app and model arithmetic are unchanged. No hardware ceiling established."
+  ],
+  "nextCandidateQuestion": "Can bounded parallel independent entry checks retain fresh open/stat/close, two full scans and all rejection/cancellation guarantees? Independent scope review pending."
+}

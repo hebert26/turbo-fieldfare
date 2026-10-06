@@ -1,8 +1,31 @@
+import Darwin
 import Foundation
+import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 public enum ModelIntegrityPolicy: Sendable, Equatable {
     case fullSha256
     case sizeCheckTrustedReceipt
+
+    /// Observable package-only mapping used by the public source bridge.
+    /// A missing-directory failure alone cannot demonstrate distinct policy
+    /// dispatch. This value cannot mint a receipt or bypass official pins.
+    package var officialSourcePolicy: OfficialSourceTrustPolicy {
+        switch self {
+        case .fullSha256: .fullSha256
+        case .sizeCheckTrustedReceipt: .sizeCheckTrustedReceipt
+        }
+    }
+
+    /// Explicit source-only policy bridge. This does not alter packed/Gemma
+    /// receipts or make a classified source loadable by ModelFamilyRuntime.
+    public func verifyOfficialSource(
+        at logicalModelURL: URL,
+        progress: @escaping (UInt64, UInt64) -> Void = { _, _ in }
+    ) throws -> OfficialSourceTrustReceipt {
+        try OfficialSourceTrust.verify(
+            at: logicalModelURL, policy: officialSourcePolicy, progress: progress)
+    }
 }
 
 public struct VerifiedInstallReceipt: Codable, Equatable, Sendable {
@@ -120,9 +143,32 @@ public enum VerifiedInstallReceiptReader {
             throw ModelError.trustedReceiptInvalid(detail: "manifest SHA mismatch")
         }
 
-        let actualPath = directoryURL.standardizedFileURL.path
-        guard receipt.modelDirectoryPath == actualPath else {
+        let matchesDirectory: Bool
+        if receipt.sourceRepoID == GTurboFormatV2.qwenRepository,
+           receipt.sourceRevision == GTurboFormatV2.qwenRevision {
+            let receiptPath = try canonicalPhysicalPath(receipt.modelDirectoryPath)
+            let actualPath = try canonicalPhysicalPath(
+                directoryURL.standardizedFileURL.path)
+            matchesDirectory = receiptPath == actualPath
+        } else {
+            matchesDirectory = receipt.modelDirectoryPath
+                == directoryURL.standardizedFileURL.path
+        }
+        guard matchesDirectory else {
             throw ModelError.trustedReceiptInvalid(detail: "model directory mismatch")
         }
+    }
+
+    private static func canonicalPhysicalPath(_ path: String) throws -> String {
+        guard path.hasPrefix("/"), !path.contains("\0") else {
+            throw ModelError.trustedReceiptInvalid(
+                detail: "model directory path is invalid")
+        }
+        guard let resolved = realpath(path, nil) else {
+            throw ModelError.trustedReceiptInvalid(
+                detail: "model directory path cannot be resolved")
+        }
+        defer { free(resolved) }
+        return String(cString: resolved)
     }
 }

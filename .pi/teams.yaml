@@ -3,31 +3,40 @@ teams:
   mac-engineering:
     mode: implementation
     members:
-      - agent: mac-implement
+      - agent: mac-implementer
         duties: [implementation, lead]
-      - agent: mac-review
-        duties: [plan_review, initial_review, verification]
-      - agent: mac-test
+      - agent: mac-worker-luna
+        duties: []
+      - agent: mac-plan-review
+        duties: [plan_review]
+      - agent: mac-test-terra
         duties: [unit_test]
-  turbo-high:
+      - agent: mac-review
+        duties: [initial_review, verification]
+  mac-engineering-complex:
     mode: implementation
     members:
-      # implementation owns the production change; lead owns coordination and task accountability.
-      # The lead duty is optional, never an approval duty, and never mandatory in a preset.
-      - agent: senior-dev-engineer
+      - agent: mac-implementer
         duties: [implementation, lead]
-      # Own the plan review and the Luna initial review.
-      # Can cover implementation (which cascades the review duties to terra-general) and verification.
-      - agent: deepseek-pair-navigator
-        duties: [plan_review, initial_review]
-        can_cover: [implementation, verification]
-      # Own the Terra initial review and the single verification.
-      # The implementation owner never holds an approval duty.
-      - agent: deepseek-evaluator
+      - agent: mac-plan-review
+        duties: [plan_review, verification]
+      - agent: mac-test-terra
+        duties: [unit_test]
+      - agent: mac-review
         duties: [initial_review, verification]
-        can_cover: [plan_review]
-      # Unit-test contributor. A contributor duty, not an approval duty: it takes test work from
-      # the owner's split and works during the implementation stage only.
+  codex-budget:
+    mode: implementation
+    # Documentation remains a separate assignment for an existing Luna xhigh worker;
+    # this preset does not auto-launch documentation work.
+    # Add the separate pair-escalation Terra high reviewer only when escalation is required;
+    # it is not a permanent member of this preset.
+    members:
+      - agent: mac-implementer
+        duties: [implementation, lead]
+      - agent: mac-plan-review
+        duties: [plan_review, verification]
+      - agent: codex-review-luna
+        duties: [initial_review, verification]
       - agent: luna-test-engineer
         duties: [unit_test]
   smoke-test:
@@ -39,20 +48,19 @@ teams:
         duties: [plan_review, initial_review]
       - agent: smoke-luna
         duties: [verification]
-  observability:
+  turbo-openai-high:
     mode: implementation
-    # Team work location. Profiles and this preset stay in this project's .pi/; the agents run here.
-    workdir: /Users/dev-machine/dev/Observability
+    # Main (Astra) is outside this roster for final review and acceptance.
+    # A separate escalation owner is added only when needed.
+    # The unit-test contributor never approves its own work.
     members:
-      - agent: obs-lead
+      - agent: senior-dev-engineer
         duties: [implementation, lead]
-      - agent: obs-explorer
-        duties: [plan_review, initial_review]
-        can_cover: [verification]
-      - agent: obs-verifier
+      - agent: mac-plan-review
+        duties: [plan_review]
+      - agent: terra-high-review
         duties: [initial_review, verification]
-        can_cover: [plan_review]
-      - agent: obs-tester
+      - agent: codex-review-luna
+        duties: [verification]
+      - agent: luna-test-engineer
         duties: [unit_test]
-      - agent: obs-visual-reviewer
-        duties: [initial_review]

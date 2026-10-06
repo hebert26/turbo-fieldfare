@@ -1,0 +1,310 @@
+{
+  "baseGeneratorSeed": "0x903efaf1",
+  "cases": [
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "d09048eb035524df61c27bbe3957ea4efc274367f39079df7e1d4838ad9015e2",
+      "outputFile": "r8192-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "b63c42b4494b0b44e871ed16426995d459b7824f692fc5ed682e97d114b76c07",
+      "rows": 8192,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "face7bd49ca2b839518e4a7ccd3b81746b95e06e0cc540998fcdfcd7e891890f",
+      "outputFile": "r4096-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "a8eef1d63ec763affd66e98255cc930e4b35d97e4c86fdc1bafc83197a7ab542",
+      "rows": 4096,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "b33c13a582bb846bfed1287777573a4412fe903c0a8219515b3a692c3ad2047e",
+      "outputFile": "r1024-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "a88936f9a8b97f0fe4c548f47e2a7b1209760f124ff9c780e130a47379554f89",
+      "rows": 1024,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "fa17c37c6d3062dd296cc5ef57ae41b99bb24250a769d79fe8b5bc96fdc47230",
+      "outputFile": "r512-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "bda356fee18804347b6f3cd924654a0ac825d326ad22e8713b707d0fe37b9795",
+      "rows": 512,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "8bb39906a59e80618e8917c3343659b672a5c5cf1584dbfe24478f6353a10aeb",
+      "outputFile": "r256-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "11c382dec84883d6d66831930dbe182034447a38d17764f6b3fedd1ce82438ed",
+      "rows": 256,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 512,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "926072a4f122650272599fcf13e59f2ef70201c3ed0b67ca8c103b23ca8d66b7",
+      "inputShape": [
+        1,
+        1,
+        512
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "65dd9d7e369a76934c33fb444467f4fd6f20da6287a190ff299b6ec062098a77",
+      "outputFile": "r2048-c512-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "1937cc6928ae08542ecb19d55b6e25902199bfd1ddc68d0c086af1c504d2fa87",
+      "rows": 2048,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "9adb704e2ffc89c5db0e711f927b8493742602c1049734cec71ec03821fe23bd",
+      "outputFile": "r2048-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "e570d9b3eef31a846709313343df453d9523f32e531bc30e74698ca93281bbb5",
+      "rows": 2048,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 4096,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "f57679c6ad1fb9325b1a15cf466b0c199f13d2108b0690d6ad705a94409378fc",
+      "inputShape": [
+        1,
+        1,
+        4096
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "6291a9e7a3aba7a168dc6f3892e50fc983ff3e6e3e569f56c4fd73ccbe2aaeaa",
+      "outputFile": "r2048-c4096-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "8c8094d60d8436696d03f95ec2fe4f97da34a3789aed8696c38a8f225d677d7c",
+      "rows": 2048,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "2ece01b57f9e905dfc36d8ac7d67399bd84272c1fcd2ee61e9184cb08d1b8dad",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "31c52b5bc277ae3eba13f9f1cdfffc06cf9c6218fdf2684658b739ca3edc8cb8",
+      "outputFile": "r32-c2048-seed903efaf1.torch210.fp32-le.bin",
+      "outputSHA256": "597ca89a44a9503a65c560d6641cbb5fd87b2fd5ff5c972b5256e87d353d9c96",
+      "rows": 32,
+      "seed": "0x903efaf1"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "0b75e00004ee703a7978bdf8bb77582e5dc6db13492a5f3d0b32cd5ac4b319e1",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "4bd0f75df66afd415e57235ce85b500e95a9a4eef9511b7013e9f6a6a7984e38",
+      "outputFile": "r32-c2048-seed903ffaf2.torch210.fp32-le.bin",
+      "outputSHA256": "e65af85f8e8414be26931d654707a53b774b53fae411123897590208c340f9d7",
+      "rows": 32,
+      "seed": "0x903ffaf2"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "3196d9124e136e1c7b165311216bb5e9aeeca34809d1e71958ddd6d300001a2e",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "7d20c364f04aa12918199386fe25f77d66697132b22b88c1455e59f2d05d7014",
+      "outputFile": "r32-c2048-seed9040faf3.torch210.fp32-le.bin",
+      "outputSHA256": "fabc0683b57ca82c9cb999b42bd6fe483abaf93549f199563274d530350f433c",
+      "rows": 32,
+      "seed": "0x9040faf3"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "4d5f5e233765536c12fedb9a71ef21d1219c88fd0bf2366b15043a9fa32fb5eb",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "e83aff04b6c48fed3bd27d01d729c4e637ed0a9b2abc68d9c9b89a2f3ab33ac7",
+      "outputFile": "r32-c2048-seed9041faf4.torch210.fp32-le.bin",
+      "outputSHA256": "99b40103e0c08e6b447cee31676fd09272117b2565ed5b8b25ca03d1c6276f09",
+      "rows": 32,
+      "seed": "0x9041faf4"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "33777c835ffa416b9d7ed8065b39d924c8ff529b10715daa8ad963ce0a2e7e6a",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "caa91a2ebdb2b867e506e16dbd1bb27fb6c2912f669ea7e073e96ffa86d9c60b",
+      "outputFile": "r32-c2048-seed9042faf5.torch210.fp32-le.bin",
+      "outputSHA256": "749e55ab3336140b3059a475ad252a17f50b56bba76eb8eb6690961725364043",
+      "rows": 32,
+      "seed": "0x9042faf5"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "da27144c9be8a92a80d576fb4647c27f76614e590ff1afe3aa8e626fed23d908",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "6e3deab400f92bb01eca4c5c9eaf6d645b4339872fbc170351418a234e928005",
+      "outputFile": "r32-c2048-seed9043faf6.torch210.fp32-le.bin",
+      "outputSHA256": "8256bcda2d9172252457540130fd85a8c0e4c58bafe3373d26de7b3e44cce93a",
+      "rows": 32,
+      "seed": "0x9043faf6"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "1bb84e3b4f49ad7f5eaa5d9149432070eb13bf17343da5645e2fa237b98a6f85",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "8cdf73c08fb597055987a66eb0ba9d9b3bfff9a29539553df14971e9a4e3e03e",
+      "outputFile": "r32-c2048-seed9044faf7.torch210.fp32-le.bin",
+      "outputSHA256": "8e41a93fd32005dd5e4234f048b1a972805cf40982fc452ddd804aa788ea4c6b",
+      "rows": 32,
+      "seed": "0x9044faf7"
+    },
+    {
+      "columns": 2048,
+      "inputAddressModulo64": 0,
+      "inputSHA256": "343548376b48e4f512ff98dfcda7d2ffa89466778437ac0f84b2ae49273d64f1",
+      "inputShape": [
+        1,
+        1,
+        2048
+      ],
+      "matrixAddressModulo64": 0,
+      "matrixFP32SHA256": "47641f7422e4f45a84c8a8cc729525d64a9d91707f468b578062bc912fe6bb14",
+      "outputFile": "r32-c2048-seed9045faf8.torch210.fp32-le.bin",
+      "outputSHA256": "1361f59a2b8b55448f442d4208b52b6364a38d349f8d69cda9221d327d52261f",
+      "rows": 32,
+      "seed": "0x9045faf8"
+    }
+  ],
+  "device": "cpu",
+  "inputGenerator": "xorshift32; 0x3d000000 + (rng & 0x02ffffff) + (rng & 0x80000000)",
+  "oracle": "torch.nn.functional.linear on CPU FP32 weights and input",
+  "qualificationProofs": [
+    {
+      "geometry": "512x2048",
+      "path": "../blas-order/torch-fixture.json",
+      "sha256": "eab5868cce66b937cd1311dbdb521f88979efb6c07a66cc6b8bd62402f89e8db"
+    },
+    {
+      "geometry": "32x2048",
+      "path": "../blas-order/torch-small32.json",
+      "sha256": "ca479ceb595903bb88ff6b5ff1b0edf480d23c8a6e7939c9325dc682dbd92c89"
+    }
+  ],
+  "schemaVersion": 1,
+  "scope": "synthetic BF16-to-FP32 projection vectors; no model/source weights",
+  "singleRowProofs": [
+    {
+      "dataset": "original",
+      "expectedFile": "single-row-original-69.torch210.fp32-le.bin",
+      "expectedSHA256": "19eeff39c789f9baeac8c281a6aa9c5b551dfd71401ead78a13cae424b040b5b",
+      "proofPath": "../single-row-diagnosis/synthetic-run-001",
+      "receiptFile": "single-row-original-69.torch210.receipt.json",
+      "receiptSHA256": "8cd7e7e9cedd958c35a7b94145b5b430bf550f158e44d906076ec3a96809db61"
+    },
+    {
+      "dataset": "fresh",
+      "expectedFile": "single-row-fresh-69.torch210.fp32-le.bin",
+      "expectedSHA256": "4465d944c3ebb5c247b9c7d23b91c641f66477c6809fa85db9a5a6df2529ae55",
+      "proofPath": "../single-row-diagnosis/synthetic-run-002",
+      "receiptFile": "single-row-fresh-69.torch210.receipt.json",
+      "receiptSHA256": "e8439d105b6b6238ad1c35cbfc873ecd6c807d009151993a4fd4168028065b35"
+    }
+  ],
+  "small32Seeds": [
+    "0x903efaf1",
+    "0x903ffaf2",
+    "0x9040faf3",
+    "0x9041faf4",
+    "0x9042faf5",
+    "0x9043faf6",
+    "0x9044faf7",
+    "0x9045faf8"
+  ],
+  "torchGit": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+  "torchThreads": 1,
+  "torchVersion": "2.10.0",
+  "weightGenerator": "BF16 0x3a00 + (rng % 1536) + (rng & 0x8000), converted exactly to FP32"
+}

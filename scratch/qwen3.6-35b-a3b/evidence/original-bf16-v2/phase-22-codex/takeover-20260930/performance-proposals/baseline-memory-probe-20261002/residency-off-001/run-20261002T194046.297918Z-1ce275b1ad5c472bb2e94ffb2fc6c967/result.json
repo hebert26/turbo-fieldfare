@@ -1,0 +1,3878 @@
+{
+  "acceptedRawRowCount" : 28,
+  "acceptedRawRowSHA256" : "212502f111d598174e971a9c6eddcc6fc09f0129a8f58f7fc5da5332db29705f",
+  "acceptedRouteCount" : 1120,
+  "acceptedRouteSHA256" : "95a3771000bbcc77b3848b5dbdaae0fd7b9bee66d5806414af9e58cf0d5019c5",
+  "cycles" : [
+    {
+      "consumedInputs" : 1,
+      "hits" : 22,
+      "index" : 0,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1874853888,
+            "count" : 596,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          596
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 596,
+            "errors" : 0
+          },
+          {
+            "count" : 596,
+            "errors" : 0
+          },
+          {
+            "count" : 596,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 298,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 248058,
+      "position" : 1175,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        198
+      ],
+      "rawRowSHA256" : "4f46146a3975eff79500d987f91652b40daa1d739afa79c4da0306d5a7342b7e",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "a54fe006d6b0b48168de63a1f292f316ec3311d03a3402709efda50c8920ae15",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 2852381000
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 141,
+      "index" : 1,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1126170624,
+            "count" : 358,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          358
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 358,
+            "errors" : 0
+          },
+          {
+            "count" : 358,
+            "errors" : 0
+          },
+          {
+            "count" : 358,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 179,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 198,
+      "position" : 1176,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        27
+      ],
+      "rawRowSHA256" : "4fcafee50aef5b1a282b7ca443b9c48bcf222af8e10a819ac807419e9277a5d4",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "38cd2897b684f0bc7f3c6053ef81b0bb6478cb3f0c0a0e3ab959393c30bb3606",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1678943250
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 152,
+      "index" : 2,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1056964608,
+            "count" : 336,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          336
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 336,
+            "errors" : 0
+          },
+          {
+            "count" : 336,
+            "errors" : 0
+          },
+          {
+            "count" : 336,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 168,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 27,
+      "position" : 1177,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        1628
+      ],
+      "rawRowSHA256" : "9a7f9a02d0b4f73ad15eafb562a5484a41afdfdcfd213d2c4d09ef0342e88c8d",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "c21fabfc2507682971c1d3c6de26c4690125210fbe83c9e7d7a1157d23250b6c",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1157710250
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 89,
+      "index" : 3,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1453326336,
+            "count" : 462,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          462
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 462,
+            "errors" : 0
+          },
+          {
+            "count" : 462,
+            "errors" : 0
+          },
+          {
+            "count" : 462,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 231,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 1628,
+      "position" : 1178,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        28
+      ],
+      "rawRowSHA256" : "59b6f24ce35eb81c674bb5cd8fdae095bb5bd327331e808f3c075b829264392a",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "410e1d496525fbe6aeabea537002c696dba1f524246614df214c29fb7e222a85",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1048813708
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 119,
+      "index" : 4,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1264582656,
+            "count" : 402,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          402
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 402,
+            "errors" : 0
+          },
+          {
+            "count" : 402,
+            "errors" : 0
+          },
+          {
+            "count" : 402,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 201,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 28,
+      "position" : 1179,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        12640
+      ],
+      "rawRowSHA256" : "16d4f67cf0caa6799f938c6c6531ac2dfec4235d0fa0ac5dfc598538eb5c086b",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "3870ca75aa74d4f93af446598ba86062a22d544aedbb280df28122fcc6baad33",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 944559708
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 108,
+      "index" : 5,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1333788672,
+            "count" : 424,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          424
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 424,
+            "errors" : 0
+          },
+          {
+            "count" : 424,
+            "errors" : 0
+          },
+          {
+            "count" : 424,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 212,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 12640,
+      "position" : 1180,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        43565
+      ],
+      "rawRowSHA256" : "27488a5d3c12ece454fe4148cecf7cc2062b9400e2356d4d381f2d8fb32ef7c8",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "5c3007ded5c61c125bfaa8ebdeaa39acb798b0f4b3ac3368a4cdbce78cf8b2b2",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 893167833
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 132,
+      "index" : 6,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1182793728,
+            "count" : 376,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          376
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 376,
+            "errors" : 0
+          },
+          {
+            "count" : 376,
+            "errors" : 0
+          },
+          {
+            "count" : 376,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 188,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 43565,
+      "position" : 1181,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        1054
+      ],
+      "rawRowSHA256" : "ca2e4f138ef81918e57a9459ad2ab6de9772902511e868cd5a0eb26f632068e1",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "12eb666149fd7d95eebf79c59b3b9809482f967e456f214e6a6e33453554f0e5",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 854597125
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 129,
+      "index" : 7,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1201668096,
+            "count" : 382,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          382
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 382,
+            "errors" : 0
+          },
+          {
+            "count" : 382,
+            "errors" : 0
+          },
+          {
+            "count" : 382,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 191,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 1054,
+      "position" : 1182,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        10070
+      ],
+      "rawRowSHA256" : "c9a2c59c03d5fd6f4693f96671bb1e0c5877b83797230e48ec1e972211f097f4",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "80e34c46b8a9586f85e970ff45f10bb5286b4ee4283f516c5ba524622829ebd5",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 765244458
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 177,
+      "index" : 8,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 899678208,
+            "count" : 286,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          286
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 286,
+            "errors" : 0
+          },
+          {
+            "count" : 286,
+            "errors" : 0
+          },
+          {
+            "count" : 286,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 143,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 10070,
+      "position" : 1183,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        29
+      ],
+      "rawRowSHA256" : "028ed2446937b4b6e89526295935c3a20468b9c83adcd81db8970a555293c0ea",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "2ca5879dcf0005e97fe9f4efe73098113e213a001062f30a5243315f204dabdc",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 701728250
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 176,
+      "index" : 9,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 905969664,
+            "count" : 288,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          288
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 288,
+            "errors" : 0
+          },
+          {
+            "count" : 288,
+            "errors" : 0
+          },
+          {
+            "count" : 288,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 144,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 29,
+      "position" : 1184,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        198
+      ],
+      "rawRowSHA256" : "e9a491b3947903ce71f832c5dcdc1fe2a888172f7dfee7ea645c73a7cbc052a2",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "9c202d24603104d4a640b4a5662185d767e9a5d51e6be1be781ab2bd7d5a1328",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 804829041
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 147,
+      "index" : 10,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1088421888,
+            "count" : 346,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          346
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 346,
+            "errors" : 0
+          },
+          {
+            "count" : 346,
+            "errors" : 0
+          },
+          {
+            "count" : 346,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 173,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 198,
+      "position" : 1185,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        27
+      ],
+      "rawRowSHA256" : "bffd6d9ab02c2352493e062220c39c800b119e36464deb7ba190532f34bf4274",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "995c8aba578bb96c1e6484dcef306e3c390d36d7f3fc5ab55f855540f2d90800",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 887650000
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 103,
+      "index" : 11,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1365245952,
+            "count" : 434,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          434
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 434,
+            "errors" : 0
+          },
+          {
+            "count" : 434,
+            "errors" : 0
+          },
+          {
+            "count" : 434,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 217,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 27,
+      "position" : 1186,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        15704
+      ],
+      "rawRowSHA256" : "d0ee7b7c0703f3aa585594d6bc00934e6975b4eb89e25e465ce3cd96bb54c1e3",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "11912f5faa5c3cfd370e43ad9631705d46566046b3e528cb3fa7dbf2bfd49036",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1034800250
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 103,
+      "index" : 12,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1365245952,
+            "count" : 434,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          434
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 434,
+            "errors" : 0
+          },
+          {
+            "count" : 434,
+            "errors" : 0
+          },
+          {
+            "count" : 434,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 217,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 15704,
+      "position" : 1187,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        28
+      ],
+      "rawRowSHA256" : "5af0a83815536f357e2ebda22bc775a02d52488158290babc223d095ef8c4bdc",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "aef48278c70e56d8d55836b62e098d073b2d299a91f92c7b2b5a28c1b625500b",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 944503542
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 140,
+      "index" : 13,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1132462080,
+            "count" : 360,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          360
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 360,
+            "errors" : 0
+          },
+          {
+            "count" : 360,
+            "errors" : 0
+          },
+          {
+            "count" : 360,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 180,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 28,
+      "position" : 1188,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        1265
+      ],
+      "rawRowSHA256" : "5fd5d80bd90f739dd24b19b6de46750538ed85c578e4d0f3e6bea48ea0d1e45d",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "0834c7c4ddb40f3a3f7d5b76adffbfe0e75a07203eeeeb38141488729d1d096d",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 967384000
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 141,
+      "index" : 14,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1126170624,
+            "count" : 358,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          358
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 358,
+            "errors" : 0
+          },
+          {
+            "count" : 358,
+            "errors" : 0
+          },
+          {
+            "count" : 358,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 179,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 1265,
+      "position" : 1189,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        29
+      ],
+      "rawRowSHA256" : "f0eea216164f7ec953b29170395841c5886d1349ce6634cbd3b2f4b8def2a104",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "e75cfbc149b1a1139620c35ac9ce32fdc29089497d66a901bb68033d203fc60c",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1151313417
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 150,
+      "index" : 15,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1069547520,
+            "count" : 340,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          340
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 340,
+            "errors" : 0
+          },
+          {
+            "count" : 340,
+            "errors" : 0
+          },
+          {
+            "count" : 340,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 170,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 29,
+      "position" : 1190,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        198
+      ],
+      "rawRowSHA256" : "6afba31c60845d014b8c2f5486fcab4ef88e8bfbfd77fd130bb4289351f72dac",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "fcdebdb45c7f34a8d8299e3aeeabde3ddb0a05a47ba7914fca48e900cf0fa037",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 899096292
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 183,
+      "index" : 16,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 861929472,
+            "count" : 274,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          274
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 274,
+            "errors" : 0
+          },
+          {
+            "count" : 274,
+            "errors" : 0
+          },
+          {
+            "count" : 274,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 137,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 198,
+      "position" : 1191,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        46431
+      ],
+      "rawRowSHA256" : "1c3f94620ddd6e7ff1dd8517b46de6256a64a611ac082f3802d97511f89d8d22",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "5437e8417b0c1e275869f44d426d683b0c4636de73848be65e488b28f26fda0f",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 796902416
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 129,
+      "index" : 17,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1201668096,
+            "count" : 382,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          382
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 382,
+            "errors" : 0
+          },
+          {
+            "count" : 382,
+            "errors" : 0
+          },
+          {
+            "count" : 382,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 191,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 46431,
+      "position" : 1192,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        198
+      ],
+      "rawRowSHA256" : "a15dab0c0ebcec952163659018e92e45c4e49270fbc18324f3d6cef8fe6a852c",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "ff0cd7d4dd309367d808575f4579fbcd8a615d2bb4d418ef92c3182ef58757f8",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1002767916
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 165,
+      "index" : 18,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 975175680,
+            "count" : 310,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          310
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 310,
+            "errors" : 0
+          },
+          {
+            "count" : 310,
+            "errors" : 0
+          },
+          {
+            "count" : 310,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 155,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 198,
+      "position" : 1193,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        510
+      ],
+      "rawRowSHA256" : "26da46aa38ed0569793410eda87573a939451aa8793934c835fd4a6534381b4a",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "45be80e173951059441f66e2b098b8edc9c0e1ffeecb840ebcb058407dbb1fe1",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 803540542
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 134,
+      "index" : 19,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1170210816,
+            "count" : 372,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          372
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 372,
+            "errors" : 0
+          },
+          {
+            "count" : 372,
+            "errors" : 0
+          },
+          {
+            "count" : 372,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 186,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 510,
+      "position" : 1194,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        15704
+      ],
+      "rawRowSHA256" : "23d2432cede89a595b3aef0b86451b1a61e0b65e609fb560feb60ad16b00cb0a",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "284589a2c62cca90421695d5d00ca3937a7f7d936587a32e32db7215c1dc0ac3",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 947855167
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 97,
+      "index" : 20,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1402994688,
+            "count" : 446,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          446
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 446,
+            "errors" : 0
+          },
+          {
+            "count" : 446,
+            "errors" : 0
+          },
+          {
+            "count" : 446,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 223,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 15704,
+      "position" : 1195,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        29
+      ],
+      "rawRowSHA256" : "fd9c11144e34b4cd34c1be78f59ba92348ed7f750d4ae3360ecd6fbf0a37035d",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "a03ecaf94e7ce552f4bdc49bb765b1759847ff4850c59db83245c075436e5782",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1009072833
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 90,
+      "index" : 21,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1447034880,
+            "count" : 460,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          460
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 460,
+            "errors" : 0
+          },
+          {
+            "count" : 460,
+            "errors" : 0
+          },
+          {
+            "count" : 460,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 230,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 29,
+      "position" : 1196,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        198
+      ],
+      "rawRowSHA256" : "6f03e32d6f47e043c66da1191f83db881831c30e73d4a163d5fd21cb98969165",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "a603bee94b4f22216b8ce71c5a3667ca4dad14858990bc0f2e0f6ca53550d575",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 950444958
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 164,
+      "index" : 22,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 981467136,
+            "count" : 312,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          312
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 312,
+            "errors" : 0
+          },
+          {
+            "count" : 312,
+            "errors" : 0
+          },
+          {
+            "count" : 312,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 156,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 198,
+      "position" : 1197,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        510
+      ],
+      "rawRowSHA256" : "de57d7e1227afceb6b31fcd97d585434127eaa200b9133125aacf81b6ae73dbe",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "d50969fc8ada7c092f4be103d0e696bbb46fe8c1bcd5f8487880d7843607196f",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 800226333
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 150,
+      "index" : 23,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1069547520,
+            "count" : 340,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          340
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 340,
+            "errors" : 0
+          },
+          {
+            "count" : 340,
+            "errors" : 0
+          },
+          {
+            "count" : 340,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 170,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 510,
+      "position" : 1198,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        1628
+      ],
+      "rawRowSHA256" : "9e6a1ed145152e5f0b4e6c00ff7d2c0fb80d16bd515a75e93bd8a2e81523dfce",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "1bca0243ea455599fa67b7c651c1c2668f722297ad883681c4df0507784adef1",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 875357792
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 112,
+      "index" : 24,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1308622848,
+            "count" : 416,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          416
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 416,
+            "errors" : 0
+          },
+          {
+            "count" : 416,
+            "errors" : 0
+          },
+          {
+            "count" : 416,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 208,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 1628,
+      "position" : 1199,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        29
+      ],
+      "rawRowSHA256" : "05dac97984def76d9afb1cebe8c33fea37fc79b296b6475ad410a1accddad0c9",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "cbd4ba84309ca5eb28447099f1cefd1a4b264f238e02fac9d310846433dfd217",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1421634625
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 166,
+      "index" : 25,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 968884224,
+            "count" : 308,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          308
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 308,
+            "errors" : 0
+          },
+          {
+            "count" : 308,
+            "errors" : 0
+          },
+          {
+            "count" : 308,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 154,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 29,
+      "position" : 1200,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        198
+      ],
+      "rawRowSHA256" : "0d73592aea883877208343f942bfb05780ed6765045387cd0da3fc8a33a74908",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "45f43869b4b5d1b0a4a7ae0dae6aa5b35ef85c42c02b83152aaefd56755d721d",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1494319834
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 110,
+      "index" : 26,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1321205760,
+            "count" : 420,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          420
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 420,
+            "errors" : 0
+          },
+          {
+            "count" : 420,
+            "errors" : 0
+          },
+          {
+            "count" : 420,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 210,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 198,
+      "position" : 1201,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        248059
+      ],
+      "rawRowSHA256" : "6d460e835124d38a5fe74c02bc9dded6dac6a5be53c45b8b18cb251fe59ee391",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "e502afcf57375cddffa4d63e98fe0d68e608e93239d9ffd7e734bb0122e73bae",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1802884333
+    },
+    {
+      "consumedInputs" : 1,
+      "hits" : 94,
+      "index" : 27,
+      "io" : {
+        "failedReads" : [
+          0,
+          0,
+          0,
+          0
+        ],
+        "preads" : [
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 0,
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "bytes" : 1421869056,
+            "count" : 452,
+            "errors" : 0
+          }
+        ],
+        "reads" : [
+          0,
+          0,
+          640,
+          452
+        ],
+        "validations" : [
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 640,
+            "errors" : 0
+          },
+          {
+            "count" : 0,
+            "errors" : 0
+          },
+          {
+            "count" : 452,
+            "errors" : 0
+          },
+          {
+            "count" : 452,
+            "errors" : 0
+          },
+          {
+            "count" : 452,
+            "errors" : 0
+          }
+        ]
+      },
+      "matchedDrafts" : 0,
+      "misses" : 226,
+      "normalizedInputBytes" : 0,
+      "pendingInput" : 248059,
+      "position" : 1202,
+      "proposalIDs" : [
+
+      ],
+      "provisionalIDs" : [
+        248046
+      ],
+      "rawRowSHA256" : "b1671a9328776571f7a21bb65ad7531f7ab82a96f7f42d7a4375879d2e74a707",
+      "recoveryKind" : "none",
+      "recurrentAppendCalls" : 0,
+      "recurrentKeptInputs" : 0,
+      "restoreReplayNanoseconds" : 0,
+      "routeSHA256" : "8447f0146752ad60fa16b66417ca3f7b8b674b7f450815ef0286e0bd813ff1c5",
+      "sourceChecks" : {
+        "finalChecks" : 0,
+        "layerAdmissions" : 0,
+        "preGPUChecks" : 0,
+        "reusedPairChecks" : 0,
+        "sharedChecks" : 0,
+        "tokenAdmissions" : 0
+      },
+      "verifiedInputs" : 1,
+      "wallNanoseconds" : 1094226125
+    }
+  ],
+  "decodeWallNanoseconds" : 30716851500,
+  "diagnosticOnly" : true,
+  "expectedOutputIDsMatched" : true,
+  "expertCachePolicy" : "lfu",
+  "expertSlots" : 16,
+  "finalState" : {
+    "committedKeysSHA256" : "e69a6401e45992a725b6d985252c45fe1d8e44c4e410f44c8070e0417ceb1bd5",
+    "committedValuesSHA256" : "06c8326c758b6196cfca720b296db13a78a62c40b3209ffb8fa6bb5f2022ad56",
+    "fullKVPositions" : {
+      "3" : 1203,
+      "7" : 1203,
+      "11" : 1203,
+      "15" : 1203,
+      "19" : 1203,
+      "23" : 1203,
+      "27" : 1203,
+      "31" : 1203,
+      "35" : 1203,
+      "39" : 1203
+    },
+    "linearPositions" : {
+      "0" : 1203,
+      "1" : 1203,
+      "2" : 1203,
+      "4" : 1203,
+      "5" : 1203,
+      "6" : 1203,
+      "8" : 1203,
+      "9" : 1203,
+      "10" : 1203,
+      "12" : 1203,
+      "13" : 1203,
+      "14" : 1203,
+      "16" : 1203,
+      "17" : 1203,
+      "18" : 1203,
+      "20" : 1203,
+      "21" : 1203,
+      "22" : 1203,
+      "24" : 1203,
+      "25" : 1203,
+      "26" : 1203,
+      "28" : 1203,
+      "29" : 1203,
+      "30" : 1203,
+      "32" : 1203,
+      "33" : 1203,
+      "34" : 1203,
+      "36" : 1203,
+      "37" : 1203,
+      "38" : 1203
+    },
+    "linearStateSHA256" : "26403c4f9b1a703a717b471270f7de30992789d0628a580adc37ab828c14f3d3",
+    "pendingTokens" : 1,
+    "position" : 1203,
+    "runnerUsable" : true
+  },
+  "maximumContext" : 8192,
+  "maximumOutputs" : 29,
+  "minimumFreePercent" : 31,
+  "mode" : "serial",
+  "outputIDs" : [
+    248058,
+    198,
+    27,
+    1628,
+    28,
+    12640,
+    43565,
+    1054,
+    10070,
+    29,
+    198,
+    27,
+    15704,
+    28,
+    1265,
+    29,
+    198,
+    46431,
+    198,
+    510,
+    15704,
+    29,
+    198,
+    510,
+    1628,
+    29,
+    198,
+    248059,
+    248046
+  ],
+  "prefixTokens" : 1175,
+  "processCPUSystemAfterMicroseconds" : 93746930,
+  "processCPUSystemBeforeMicroseconds" : 56544617,
+  "processCPUUserAfterMicroseconds" : 33531545,
+  "processCPUUserBeforeMicroseconds" : 30186361,
+  "promptWallNanoseconds" : 170944470833,
+  "requestSHA256" : "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "requestWallNanoseconds" : 201664390916,
+  "schema" : 1,
+  "settlement" : {
+    "liveSavedInputBytesAtEnd" : 0,
+    "maximumSavedInputBytes" : 0,
+    "recurrentAppendCalls" : 0,
+    "recurrentKeptInputs" : 0,
+    "rejectedCycles" : 0,
+    "replayedInputs" : 0,
+    "wallNanoseconds" : 0
+  },
+  "sourceDescriptorSHA256" : "c1ac463726b716e7db3a9fbe5db4cb690f95be7e5779aea02e49c2020bca7a7a",
+  "terminal" : "sampled EOS remains pending and unconsumed",
+  "timingLimits" : "Serial memory attribution only; sparse stderr phases added. Decode includes checkpoints, sampling and cycle diagnostics. Final state readback is excluded. Serial owns one turn; legacy\/new own per-cycle turns. New replaces only exact4 rejection settlement; short proposals retain charged full replay. Outer conversation integration is not implemented. Not app or native MTP qualification.",
+  "transactions" : {
+    "begins" : 1,
+    "finishes" : 1,
+    "restores" : 0
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "date": "2026-10-02T15:41:18.465521+00:00",
+  "decision": "Reject current protected EARLY Top8 prefetch for production integration.",
+  "build": {
+    "exit": 0,
+    "seconds": 133.09,
+    "sourceStable": true
+  },
+  "comparison": {
+    "exit": 2,
+    "reason": "Fixed whole-decode speed gate failed; both model children exited0.",
+    "ordersExecuted": [
+      "off,on"
+    ],
+    "reverseNotRun": "Preset stop rule after first pair failed.",
+    "offSeconds": 19.955851667,
+    "onSeconds": 22.023224875,
+    "ratio": 1.1035973428996124,
+    "outputsIncludingEOS": 29,
+    "consumedForwards": 28,
+    "exactRouteAndPlanCases": 1120,
+    "minimumFreePercent": [
+      30,
+      32
+    ]
+  },
+  "findings": [
+    "All outputs, route weights and actual LFU cache plans matched.",
+    "Map wall fell by2.486952333s; full-source validation wall rose by2.92591672s.",
+    "Hint computation took0.341580389s. Other decode costs also rose. Counters do not establish a full causal breakdown.",
+    "1897 unused speculative pairs added11934892032 requested logical bytes.",
+    "No runtime or installed-app change accepted. Last accepted real-app result remains1.529820 tokens/s."
+  ],
+  "reviews": [
+    "review/astra-final-source-review.md",
+    "review/astra-result-review.md",
+    "review/main-wrapper-static-review.json"
+  ],
+  "next": "Read-only Opus and Grok result investigations pending. No new experiment selected. Commit this verified rejected result before new implementation.",
+  "limits": [
+    "Diagnostic fixed8192-capacity/1175-input capture. Not sustained app qualification.",
+    "No hardware ceiling proved.",
+    "20tokens/s target not achieved."
+  ]
+}

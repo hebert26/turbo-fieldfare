@@ -1,7 +1,7 @@
 import Metal
 
 /// MLX-affine INT4 matrix-vector multiplication.
-/// Eight SIMD groups process eight output rows per threadgroup.
+/// Each group of 32 GPU threads shares input values across four rows.
 final class DequantInt4GEMV {
     private struct Shape: Hashable {
         var m: UInt32
@@ -9,6 +9,7 @@ final class DequantInt4GEMV {
     }
 
     private static let rowsPerThreadgroup = 8
+    private static let threadsPerThreadgroup = 64
     private static let realDecodeShapes: [Shape] = [
         Shape(m: 4096, n: 2816),
         Shape(m: 2048, n: 2816),
@@ -25,7 +26,7 @@ final class DequantInt4GEMV {
         self.pipeline = try context.pipeline(
             "dequant_int4_gemv_simd",
             constants: [],
-            maxTotalThreadsPerThreadgroup: 512)
+            maxTotalThreadsPerThreadgroup: Self.threadsPerThreadgroup)
 
         var specializedPipelines: [Shape: MTLComputePipelineState] = [:]
         for shape in Self.realDecodeShapes {
@@ -36,7 +37,7 @@ final class DequantInt4GEMV {
                     MetalFunctionConstant(index: 21, value: .uint32(shape.n)),
                     MetalFunctionConstant(index: 22, value: .bool(true)),
                 ],
-                maxTotalThreadsPerThreadgroup: 512)
+                maxTotalThreadsPerThreadgroup: Self.threadsPerThreadgroup)
         }
         self.specializedPipelines = specializedPipelines
     }
@@ -53,7 +54,8 @@ final class DequantInt4GEMV {
                 y: MTLBuffer,
                 yOffset: Int = 0,
                 m: UInt32,
-                n: UInt32) {
+                n: UInt32,
+                conditional: DecodeDispatch? = nil) {
         precondition(n % UInt32(Quantization.groupSize) == 0,
                      "N must be a multiple of \(Quantization.groupSize)")
         // The kernel reads packed weights through a `ushort*`; the repacker
@@ -74,15 +76,15 @@ final class DequantInt4GEMV {
         encoder.setBytes(&nValue, length: MemoryLayout<UInt32>.size, index: 6)
 
         let threadgroupSize = MTLSize(
-            width: 32 * Self.rowsPerThreadgroup,
+            width: Self.threadsPerThreadgroup,
             height: 1,
             depth: 1)
         let threadgroupCount = MTLSize(
             width: (Int(m) + Self.rowsPerThreadgroup - 1) / Self.rowsPerThreadgroup,
             height: 1,
             depth: 1)
-        encoder.dispatchThreadgroups(threadgroupCount,
-                                     threadsPerThreadgroup: threadgroupSize)
+        encoder.dispatchDecode(threadgroupCount, threads: threadgroupSize,
+                               conditional: conditional)
         encoder.endEncoding()
     }
 }

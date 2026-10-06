@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "product": "TurboFieldfareRecurrentPrefixRecovery",
+  "modes": [
+    "serial",
+    "legacy",
+    "new"
+  ],
+  "baseReport": "same causal-lookup schema; canonical1120routes/28rawrows and final state hashes",
+  "addedTopFields": {
+    "requestWallNanoseconds": "promptStart through decode finish",
+    "settlement": [
+      "wallNanoseconds",
+      "rejectedCycles",
+      "replayedInputs",
+      "recurrentAppendCalls",
+      "recurrentKeptInputs",
+      "maximumSavedInputBytes",
+      "liveSavedInputBytesAtEnd"
+    ]
+  },
+  "addedCycleFields": [
+    "recoveryKind",
+    "recurrentAppendCalls",
+    "recurrentKeptInputs",
+    "normalizedInputBytes"
+  ],
+  "recoveryKinds": [
+    "none",
+    "fullReplay",
+    "recurrentOnly"
+  ],
+  "counterMeaning": {
+    "recurrentAppendCalls": "30*keep forrecurrentOnly",
+    "recurrentKeptInputs": "keep forrecurrentOnly",
+    "normalizedInputBytes": "983040newexact4evenfullaccepted;0otherwise",
+    "restores": "fullReplay only; recurrentOnly has its own settlement counts",
+    "liveSavedInputBytesAtEnd": 0
+  },
+  "golden": "assertion only after29actualsamples includingEOS; neverproposalinput",
+  "clock": "monotonicUInt64 nanoseconds",
+  "countsCompared": "acceptedchain equal; totalworkIO/cachecounts may differ because replay removed"
+}

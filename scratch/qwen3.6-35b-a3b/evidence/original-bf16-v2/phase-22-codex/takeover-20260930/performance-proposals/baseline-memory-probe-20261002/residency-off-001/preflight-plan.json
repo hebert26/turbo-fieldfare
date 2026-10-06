@@ -1,0 +1,25 @@
+{
+  "head": "e7efc113fe94a507cabf41698cad7f7fbcb17756",
+  "installed": {
+    "TurboFieldfareDecodeService": {
+      "path": "/Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareDecodeService",
+      "sha256": "083e80a7155db7993af86d391ef84cf634cc2785b62289d79758c8e04f81a046"
+    },
+    "TurboFieldfareMac": {
+      "path": "/Applications/TurboFieldfare.app/Contents/MacOS/TurboFieldfareMac",
+      "sha256": "4985b79913c6cd289f5de7b9ac4c6d284dda404d79a9916a96741a9dcc94fe28"
+    }
+  },
+  "product": "TurboFieldfareBaselineMemoryProbe",
+  "mode": "serial",
+  "admissionMinimumFreePercent": 50,
+  "liveMinimumFreePercent": 30,
+  "wholeRunTimeoutSeconds": 420,
+  "mainOnly": true,
+  "oneChild": true,
+  "originalBuildCommit": "82a1266a005b0602ec368201c9f3d27a970d6c92",
+  "environment": {
+    "TURBO_QWEN_EXPERT_CACHE_RESIDENCY": "0"
+  },
+  "rebuild": false
+}

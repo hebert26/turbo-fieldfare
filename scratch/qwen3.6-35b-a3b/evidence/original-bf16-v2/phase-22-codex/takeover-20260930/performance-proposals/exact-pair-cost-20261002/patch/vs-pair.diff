@@ -1,0 +1,565 @@
+diff --git a/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift b/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
+--- a/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
++++ b/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift
+@@ -1224,6 +1224,7 @@
+             // All diagnostic consumer checks finish before a command is encoded.
+             // No await, callback or payload read occurs between these checks and commit.
+             try exactBlockAdmission?.validate(submittedLease: lease, submittedWork: work)
++            let submitStart = exactBlockAdmission?.capture.timingStart()
+             try lease.submit(on: queue, timing: timing) { command in
+                 submittedCommand = command
+                 command.label = "qwen.moe.grouped-bf16"
+@@ -1306,6 +1307,7 @@
+                 }
+                 try Task.checkCancellation()
+             }
++            exactBlockAdmission?.capture.timingEnd(submitStart, site: .moeSubmit)
+         } catch {
+             if let command = submittedCommand {
+                 // Await cleanup but preserve the original encoding error. If
+@@ -1320,12 +1322,14 @@
+         guard let command = submittedCommand else {
+             throw MetalError.commandBufferFailed("grouped lease submitted without a captured command")
+         }
++        let settleStart = exactBlockAdmission?.capture.timingStart()
+         try await Self.settleGroupedCommand(command, lease: lease, buffers: retainedBuffers, timing: timing)
+         try checkCommandBufferError(command)
+         try Task.checkCancellation()
+         guard lease.snapshot().succeeded == true else {
+             throw QwenExpertMappingError.canceled
+         }
++        exactBlockAdmission?.capture.timingEnd(settleStart, site: .moeSettle)
+     }
+ 
+     private static func settleGroupedCommand(
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+@@ -123,9 +123,13 @@
+         var baselineLogits = try await runner.prefill(tokenIDs: prefix, position: 0)
+         try memoryGuard()
+ 
+-        func sample(_ logits: [Float], history: [Int32], position: Int) async throws -> Int32 {
++        func sample(_ logits: [Float], history: [Int32], position: Int,
++                    capture: QwenExactBlockCapture? = nil) async throws -> Int32 {
++            let samplerStart = capture?.timingStart()
++            defer { capture?.timingEnd(samplerStart, site: .sampler) }
+             try Task.checkCancellation()
+-            try model.revalidateSource()
++            if let capture { try capture.revalidateSource(model, site: .sourceSampler) }
++            else { try model.revalidateSource() }
+             try QwenSourceSamplerBoundary.publishFP32Logits(logits, into: scratch.logits,
+                 vocabularySize: model.architecture.vocabularySize)
+             guard let command = context.queue.makeCommandBuffer() else { throw ExactProbeError(detail: "sampler command") }
+@@ -144,6 +148,8 @@
+         try probeRequire(initialPending == firstInputs[0], "actual pending token differs from captured observed token")
+ 
+         struct Captured: Sendable {
++            let measuresTimings: Bool
++            let timings: QwenExactBlockTimingTotals
+             let logits: [[Float]]
+             let routes: [QwenExactBlockRoute]
+             let tokenAdmissions: Int
+@@ -157,6 +163,8 @@
+             let sharedChecks: Int
+             let finalChecks: Int
+             init(_ capture: QwenExactBlockCapture) {
++                measuresTimings = capture.measuresTimings
++                timings = capture.timings
+                 logits = capture.logits
+                 routes = capture.routes
+                 tokenAdmissions = capture.tokenAdmissions
+@@ -183,20 +191,29 @@
+             let io: OfficialSourceIOMeasurement.Snapshot
+         }
+         func ioJSON(_ snapshot: OfficialSourceIOMeasurement.Snapshot) -> [String: Any] {
+-            ["reads": snapshot.reads, "failedReads": snapshot.failedReads,
+-             "preads": snapshot.preads.map { ["count": $0.count, "bytes": $0.bytes, "errors": $0.errors] },
+-             "validations": snapshot.validations.map { ["count": $0.count, "errors": $0.errors] }]
++            func counter(_ value: OfficialSourceIOMeasurement.Counter) -> [String: Any] {
++                ["count": value.count, "bytes": value.bytes, "errors": value.errors,
++                 "wallNanoseconds": value.wallNanoseconds,
++                 "threadCPUNanoseconds": value.threadCPUNanoseconds,
++                 "unavailableCPU": value.unavailableCPU, "interruptions": value.interruptions]
++            }
++            return ["reads": snapshot.reads, "failedReads": snapshot.failedReads,
++                    "preads": snapshot.preads.map(counter),
++                    "validations": snapshot.validations.map(counter),
++                    "durationMeaning": "Raw worker sums. They may overlap and are not critical-path elapsed time."]
+         }
+         func arm(grouped: Bool, inputs: [Int32], history: [Int32], sampleBase: Int,
+-                 keep: Int = 4, serialPrefixOnly: Bool = false) async throws -> Arm {
++                 keep: Int = 4, serialPrefixOnly: Bool = false, measuresTimings: Bool = true) async throws -> Arm {
+             try memoryGuard()
+-            let capture = QwenExactBlockCapture()
++            let capture = QwenExactBlockCapture(measuresTimings: measuresTimings)
+             let io = OfficialSourceIOMeasurement(); io.setPhase(.decode)
+             try probeRequire(model.source.installIOMeasurement(io), "IO measurement already installed")
+             defer { model.source.removeIOMeasurement(io) }
+             let before = await runner.routedExpertCacheSummary()
+             let start = ProcessInfo.processInfo.systemUptime
+-            try await runner.beginTurn()
++            let turnStart = capture.timingStart()
++            try await runner.beginTurn(exactBlock: capture)
++            capture.timingEnd(turnStart, site: .turn)
+             activeTurn = true
+             do {
+                 var next = baselineLogits
+@@ -212,7 +229,7 @@
+                 if !serialPrefixOnly {
+                     for index in capture.logits.indices {
+                         let token = try await sample(capture.logits[index],
+-                            history: history + Array(inputs.prefix(index + 1)), position: sampleBase + index)
++                            history: history + Array(inputs.prefix(index + 1)), position: sampleBase + index, capture: capture)
+                         samples.append(token)
+                         if config.extraStopTokens.contains(token) { break }
+                         if index < inputs.count - 1 {
+@@ -224,11 +241,16 @@
+                 }
+                 let replayStart = ProcessInfo.processInfo.systemUptime
+                 if grouped && keep < inputs.count {
++                    let recoveryStart = capture.timingStart()
++                    let recoveryCapture = QwenExactBlockCapture(measuresTimings: measuresTimings, collectsValues: false)
+                     try await runner.restoreTurnBaseline()
+                     next = baselineLogits
+                     for index in 0..<keep {
+-                        next = try await runner.produce(token: inputs[index], position: history.count + index)
++                        next = try await runner.produce(token: inputs[index], position: history.count + index,
++                            exactBlock: recoveryCapture)
+                     }
++                    capture.timings.merge(recoveryCapture.timings)
++                    capture.timingEnd(recoveryStart, site: .restoreReplay)
+                 }
+                 let end = ProcessInfo.processInfo.systemUptime
+                 let after = await runner.routedExpertCacheSummary()
+@@ -247,6 +269,13 @@
+              "matchedDrafts": value.matched, "targetSamples": value.samples,
+              "routeSHA256": probeSHA(try JSONEncoder().encode(probeRoutes(value.capture.routes))),
+              "rawRowSHA256": probeRowSHA(value.capture.logits),
++             "measuresTimings": value.capture.measuresTimings,
++             "timingIntervals": try JSONSerialization.jsonObject(with: JSONEncoder().encode(value.capture.timings)),
++             "fullSourceWallNanoseconds": value.capture.timings.fullSourceWallNanoseconds,
++             "remainingWallUpperBoundNanoseconds": max(0, Int64(value.wall * 1_000_000_000)
++                - Int64(value.capture.timings.fullSourceWallNanoseconds)),
++             "zeroTimingMeaning": "No timed occurrence. Zero is not proof that a source check or stage is absent.",
++             "remainingWallMeaning": "Wall minus direct full-source checks. Includes protected IO and other required work. Not all shareable.",
+              "commands": ["pairMaps": value.capture.pairMaps,
+                           "pairMappedExperts": value.capture.pairMappedExperts,
+                           "pairMoE": value.capture.pairMoECommands,
+@@ -317,6 +346,17 @@
+             _ = try await arm(grouped: grouped, inputs: firstInputs, history: prefix, sampleBase: 1)
+             try await rollback()
+         }
++        var timerControls: [[String: Any]] = []
++        // Same warm arms. This is a small perturbation check, not a speed gate.
++        for (grouped, enabled) in [(false, false), (true, true), (true, false), (false, true)] {
++            let value = try await arm(grouped: grouped, inputs: firstInputs, history: prefix,
++                sampleBase: 1, measuresTimings: enabled)
++            try probeRequire(value.matched == 3 && value.samples.count == 4, "timer control input changed")
++            timerControls.append(try metrics(value, label: grouped ? "pair timer control" : "serial timer control"))
++            try await rollback()
++        }
++        report["timerControls"] = timerControls
++        report["timerQualification"] = "New timers change diagnostics. Controls are single warm arms and cache-dependent. No speed qualification."
+         var times: [[String: Any]] = [], serialTimes: [Double] = [], groupedTimes: [Double] = []
+         for grouped in [false, true, true, false, true, false, false, true] {
+             let value = try await arm(grouped: grouped, inputs: firstInputs, history: prefix, sampleBase: 1)
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
+@@ -9,6 +9,25 @@
+ 
+ // Owned by one isolated, sequential diagnostic runner invocation. No callbacks.
+ final class QwenExactBlockCapture: @unchecked Sendable {
++    let collectsValues: Bool
++    let measuresTimings: Bool
++    var timings = QwenExactBlockTimingTotals()
++    init(measuresTimings: Bool = true, collectsValues: Bool = true) {
++        self.measuresTimings = measuresTimings
++        self.collectsValues = collectsValues
++    }
++    func timingStart() -> UInt64? {
++        measuresTimings ? DispatchTime.now().uptimeNanoseconds : nil
++    }
++    func timingEnd(_ start: UInt64?, site: QwenExactBlockInterval) {
++        guard let start else { return }
++        timings.add(site, nanoseconds: DispatchTime.now().uptimeNanoseconds - start)
++    }
++    func revalidateSource(_ model: QwenOfficialSourceModel, site: QwenExactBlockInterval) throws {
++        let start = timingStart()
++        defer { timingEnd(start, site: site) }
++        try model.revalidateSource()
++    }
+     var logits: [[Float]] = []
+     var routes: [QwenExactBlockRoute] = []
+     var tokenAdmissions = 0
+@@ -39,15 +58,109 @@
+         var firstUses = Set<Int>()
+         for item in submittedWork {
+             if !firstUses.insert(item.expertID).inserted {
++                let start = capture.timingStart()
+                 try lease.validateExactBlockConsumer(expert: item.expertID)
++                capture.timingEnd(start, site: .reuseChecks)
+                 capture.reusedPairChecks += 1
+             }
+         }
+         // Last filesystem observations before encoding/submission. Each token
+         // touching this command has its own fresh full-source check.
+         for _ in logicalTokens {
+-            try model.revalidateSource()
++            try capture.revalidateSource(model, site: .sourcePairPreGPU)
+             capture.preGPUChecks += 1
+         }
+     }
+ }
++
++// These intervals overlap. The receipt names each overlap.
++enum QwenExactBlockInterval {
++    case reuseChecks, sourceSerialStart, sourceSerialEnd, sourceSerialPreMap, sourceSerialPostMap, sourcePairStart, sourcePairToken, sourcePairPreMap, sourcePairPreGPU, sourcePairFinal, sourcePairEnd, sourceTurn, sourceSampler, map, moe, moeSubmit, moeSettle, mixer, router, head, sampler, turn, restoreReplay
++}
++
++struct QwenExactBlockWallCounter: Codable, Sendable {
++    var count: UInt64 = 0
++    var wallNanoseconds: UInt64 = 0
++    mutating func add(_ value: UInt64) { count += 1; wallNanoseconds += value }
++}
++
++struct QwenExactBlockTimingTotals: Codable, Sendable {
++    var reuseChecks = QwenExactBlockWallCounter()
++    var sourceSerialStart = QwenExactBlockWallCounter()
++    var sourceSerialEnd = QwenExactBlockWallCounter()
++    var sourceSerialPreMap = QwenExactBlockWallCounter()
++    var sourceSerialPostMap = QwenExactBlockWallCounter()
++    var sourcePairStart = QwenExactBlockWallCounter()
++    var sourcePairToken = QwenExactBlockWallCounter()
++    var sourcePairPreMap = QwenExactBlockWallCounter()
++    var sourcePairPreGPU = QwenExactBlockWallCounter()
++    var sourcePairFinal = QwenExactBlockWallCounter()
++    var sourcePairEnd = QwenExactBlockWallCounter()
++    var sourceTurn = QwenExactBlockWallCounter()
++    var sourceSampler = QwenExactBlockWallCounter()
++    var map = QwenExactBlockWallCounter()
++    var moe = QwenExactBlockWallCounter()
++    var moeSubmit = QwenExactBlockWallCounter()
++    var moeSettle = QwenExactBlockWallCounter()
++    var mixer = QwenExactBlockWallCounter()
++    var router = QwenExactBlockWallCounter()
++    var head = QwenExactBlockWallCounter()
++    var sampler = QwenExactBlockWallCounter()
++    var turn = QwenExactBlockWallCounter()
++    var restoreReplay = QwenExactBlockWallCounter()
++    mutating func add(_ site: QwenExactBlockInterval, nanoseconds: UInt64) {
++        switch site {
++        case .reuseChecks: reuseChecks.add(nanoseconds)
++        case .sourceSerialStart: sourceSerialStart.add(nanoseconds)
++        case .sourceSerialEnd: sourceSerialEnd.add(nanoseconds)
++        case .sourceSerialPreMap: sourceSerialPreMap.add(nanoseconds)
++        case .sourceSerialPostMap: sourceSerialPostMap.add(nanoseconds)
++        case .sourcePairStart: sourcePairStart.add(nanoseconds)
++        case .sourcePairToken: sourcePairToken.add(nanoseconds)
++        case .sourcePairPreMap: sourcePairPreMap.add(nanoseconds)
++        case .sourcePairPreGPU: sourcePairPreGPU.add(nanoseconds)
++        case .sourcePairFinal: sourcePairFinal.add(nanoseconds)
++        case .sourcePairEnd: sourcePairEnd.add(nanoseconds)
++        case .sourceTurn: sourceTurn.add(nanoseconds)
++        case .sourceSampler: sourceSampler.add(nanoseconds)
++        case .map: map.add(nanoseconds)
++        case .moe: moe.add(nanoseconds)
++        case .moeSubmit: moeSubmit.add(nanoseconds)
++        case .moeSettle: moeSettle.add(nanoseconds)
++        case .mixer: mixer.add(nanoseconds)
++        case .router: router.add(nanoseconds)
++        case .head: head.add(nanoseconds)
++        case .sampler: sampler.add(nanoseconds)
++        case .turn: turn.add(nanoseconds)
++        case .restoreReplay: restoreReplay.add(nanoseconds)
++        }
++    }
++    mutating func merge(_ other: Self) {
++        reuseChecks.count += other.reuseChecks.count; reuseChecks.wallNanoseconds += other.reuseChecks.wallNanoseconds
++        sourceSerialStart.count += other.sourceSerialStart.count; sourceSerialStart.wallNanoseconds += other.sourceSerialStart.wallNanoseconds
++        sourceSerialEnd.count += other.sourceSerialEnd.count; sourceSerialEnd.wallNanoseconds += other.sourceSerialEnd.wallNanoseconds
++        sourceSerialPreMap.count += other.sourceSerialPreMap.count; sourceSerialPreMap.wallNanoseconds += other.sourceSerialPreMap.wallNanoseconds
++        sourceSerialPostMap.count += other.sourceSerialPostMap.count; sourceSerialPostMap.wallNanoseconds += other.sourceSerialPostMap.wallNanoseconds
++        sourcePairStart.count += other.sourcePairStart.count; sourcePairStart.wallNanoseconds += other.sourcePairStart.wallNanoseconds
++        sourcePairToken.count += other.sourcePairToken.count; sourcePairToken.wallNanoseconds += other.sourcePairToken.wallNanoseconds
++        sourcePairPreMap.count += other.sourcePairPreMap.count; sourcePairPreMap.wallNanoseconds += other.sourcePairPreMap.wallNanoseconds
++        sourcePairPreGPU.count += other.sourcePairPreGPU.count; sourcePairPreGPU.wallNanoseconds += other.sourcePairPreGPU.wallNanoseconds
++        sourcePairFinal.count += other.sourcePairFinal.count; sourcePairFinal.wallNanoseconds += other.sourcePairFinal.wallNanoseconds
++        sourcePairEnd.count += other.sourcePairEnd.count; sourcePairEnd.wallNanoseconds += other.sourcePairEnd.wallNanoseconds
++        sourceTurn.count += other.sourceTurn.count; sourceTurn.wallNanoseconds += other.sourceTurn.wallNanoseconds
++        sourceSampler.count += other.sourceSampler.count; sourceSampler.wallNanoseconds += other.sourceSampler.wallNanoseconds
++        map.count += other.map.count; map.wallNanoseconds += other.map.wallNanoseconds
++        moe.count += other.moe.count; moe.wallNanoseconds += other.moe.wallNanoseconds
++        moeSubmit.count += other.moeSubmit.count; moeSubmit.wallNanoseconds += other.moeSubmit.wallNanoseconds
++        moeSettle.count += other.moeSettle.count; moeSettle.wallNanoseconds += other.moeSettle.wallNanoseconds
++        mixer.count += other.mixer.count; mixer.wallNanoseconds += other.mixer.wallNanoseconds
++        router.count += other.router.count; router.wallNanoseconds += other.router.wallNanoseconds
++        head.count += other.head.count; head.wallNanoseconds += other.head.wallNanoseconds
++        sampler.count += other.sampler.count; sampler.wallNanoseconds += other.sampler.wallNanoseconds
++        turn.count += other.turn.count; turn.wallNanoseconds += other.turn.wallNanoseconds
++        restoreReplay.count += other.restoreReplay.count; restoreReplay.wallNanoseconds += other.restoreReplay.wallNanoseconds
++    }
++    var fullSourceWallNanoseconds: UInt64 {
++        sourceSerialStart.wallNanoseconds + sourceSerialEnd.wallNanoseconds + sourceSerialPreMap.wallNanoseconds + sourceSerialPostMap.wallNanoseconds + sourcePairStart.wallNanoseconds + sourcePairToken.wallNanoseconds + sourcePairPreMap.wallNanoseconds + sourcePairPreGPU.wallNanoseconds + sourcePairFinal.wallNanoseconds + sourcePairEnd.wallNanoseconds + sourceTurn.wallNanoseconds + sourceSampler.wallNanoseconds
++    }
++}
+diff --git a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -323,7 +323,8 @@
+         inFlight = true
+         defer { inFlight = false }
+         try Task.checkCancellation()
+-        try model.revalidateSource()
++        if let exactBlock { try exactBlock.revalidateSource(model, site: .sourceSerialStart) }
++        else { try model.revalidateSource() }
+         let linearCheckpoint = try linearState.retainCheckpoint()
+         let fullSnapshot = try fullKV.snapshot()
+         do {
+@@ -336,6 +337,7 @@
+             for layer in model.layers.indices {
+                 try Task.checkCancellation()
+                 let weights = model.layers[layer]
++                let mixerStart = exactBlock?.timingStart()
+                 let normalized = try qwenOfficialSourceRMSNorm(hidden, weights.inputNorm)
+                 hooks.observeActivation?(position, layer, "input-norm", normalized)
+                 let mixer: [Float]
+@@ -347,6 +349,7 @@
+                     mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1,
+                         useGPUPreparation: useGPULinearPreparation)
+                 } else { throw QwenTextRunnerError.stateArchitectureMismatch }
++                exactBlock?.timingEnd(mixerStart, site: .mixer)
+                 guard mixer.count == width else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                 hooks.observeActivation?(position, layer, "mixer", mixer)
+                 hidden = zip(hidden, mixer).map(+)
+@@ -362,19 +365,22 @@
+                 hooks.observeActivation?(position, layer, "residual-after-moe", hidden)
+             }
+             hooks.observeActivation?(position, -1, "final-hidden", hidden)
++            let headStart = exactBlock?.timingStart()
+             let final = try qwenOfficialSourceRMSNorm(hidden, model.finalNorm)
+             hooks.observeActivation?(position, -1, "final-norm", final)
+             let logits = try await projection(
+                 model.entryWeights, model.headName, input: final,
+                 outputCount: model.architecture.vocabularySize, timingStage: .head)
++            exactBlock?.timingEnd(headStart, site: .head)
+             try Task.checkCancellation()
+-            try model.revalidateSource()
++            if let exactBlock { try exactBlock.revalidateSource(model, site: .sourceSerialEnd) }
++            else { try model.revalidateSource() }
+             guard logits.count == model.architecture.vocabularySize,
+                   logits.allSatisfy(\.isFinite) else {
+                 throw QwenTextRunnerError.execution(detail: "nonfinite source logits")
+             }
+             hooks.observeRawLogits(position, token, logits)
+-            exactBlock?.logits.append(logits)
++            if exactBlock?.collectsValues == true { exactBlock?.logits.append(logits) }
+             committedPosition += 1
+             hooks.observeConsumedInput?(position, token, featureRow, mropePosition)
+             return logits
+@@ -521,7 +527,8 @@
+         defer { inFlight = false }
+         do {
+             try Task.checkCancellation()
+-            try model.revalidateSource()
++            if let exactBlock { try exactBlock.revalidateSource(model, site: .sourcePairStart) }
++            else { try model.revalidateSource() }
+             let residualRows = try buffer(elements: rowElements,
+                 stride: MemoryLayout<Float>.stride, label: "source prefill residual rows")
+             let inputRows = try buffer(elements: rowElements,
+@@ -537,7 +544,7 @@
+             for (index, token) in tokenIDs.enumerated() {
+                 try Task.checkCancellation()
+                 if let exactBlock {
+-                    try model.revalidateSource()
++                    try exactBlock.revalidateSource(model, site: .sourcePairToken)
+                     exactBlock.tokenAdmissions += 1
+                 }
+                 let feature = try featureRowAt?(index)
+@@ -570,6 +577,7 @@
+                     try Task.checkCancellation()
+                     let hidden = Array(UnsafeBufferPointer(
+                         start: residual.advanced(by: index * width), count: width))
++                    let mixerStart = exactBlock?.timingStart()
+                     let mixer: [Float]
+                     if useGroupedLinearPrefill, !hooks.requiresOrderedPrefillStages,
+                        let linear = linearSteps[layer] {
+@@ -620,6 +628,7 @@
+                                 useGPUPreparation: useGPULinearPreparation)
+                         } else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                     }
++                    exactBlock?.timingEnd(mixerStart, site: .mixer)
+                     guard mixer.count == width else {
+                         throw QwenTextRunnerError.stateArchitectureMismatch
+                     }
+@@ -629,6 +638,7 @@
+                         residual[index * width + column] = afterMixer[column]
+                         inputs[index * width + column] = post[column]
+                     }
++                    let routerStart = exactBlock?.timingStart()
+                     let logits = try await projection(row.weights, row.routerName,
+                         input: post, outputCount: model.architecture.experts)
+                     let routing = try QwenMoE.route(logits: logits,
+@@ -649,8 +659,11 @@
+                         ? logits[ranked[topK - 1]] - logits[ranked[topK]] : 0
+                     hooks.observeRoute(position + index, layer, logits, ids, weights, cutoff)
+                     groupedCapture?.observeRoute?(position + index, layer, logits, ids, weights, cutoff)
+-                    exactBlock?.routes.append(QwenExactBlockRoute(position: position + index,
+-                        layer: layer, ids: ids, weights: weights.map(\.bitPattern)))
++                    if exactBlock?.collectsValues == true {
++                        exactBlock?.routes.append(QwenExactBlockRoute(position: position + index,
++                            layer: layer, ids: ids, weights: weights.map(\.bitPattern)))
++                    }
++                    exactBlock?.timingEnd(routerStart, site: .router)
+                     for rank in 0..<topK {
+                         routingExpertIDs[index * topK + rank] = ids[rank]
+                         routeValues[index * topK + rank] = weights[rank]
+@@ -693,14 +706,16 @@
+                             throw QwenTextRunnerError.invalidState(detail: "incomplete exact pair")
+                         }
+                         for _ in pairTokens {
+-                            try model.revalidateSource()
++                            try exactBlock.revalidateSource(model, site: .sourcePairPreMap)
+                             exactBlock.layerAdmissions += 1
+                         }
+                         let measurement = QwenCacheMapMeasurement.capture.map {
+                             QwenCacheMapContext(capture: $0, layer: layer,
+                                                 position: position, tokenCount: tokenIDs.count)
+                         }
++                        let mapStart = exactBlock.timingStart()
+                         let lease = try await coordinator.map(expertIDs: requested, measurement: measurement)
++                        exactBlock.timingEnd(mapStart, site: .map)
+                         exactBlock.pairMaps += 1
+                         exactBlock.pairMappedExperts += lease.experts.count
+                         successfulCacheHits += UInt64(lease.diagnostics.hits)
+@@ -710,6 +725,7 @@
+                         lastPrefillDiagnostics?.mappingMisses += UInt64(lease.diagnostics.misses)
+                         lastRoutedExpertCount = topK
+                         do {
++                            let moeStart = exactBlock.timingStart()
+                             try await moe.submitGroupedExpertsBF16(
+                                 hiddenRows: inputRows, routingExpertIDs: routingExpertIDs,
+                                 routingWeights: routingWeights, outputRows: outputRows,
+@@ -719,6 +735,7 @@
+                                 exactBlockAdmission: QwenExactBlockConsumerAdmission(
+                                     model: model, lease: lease, capture: exactBlock),
+                                 exactPairSharedNames: row.sharedNames)
++                            exactBlock.timingEnd(moeStart, site: .moe)
+                             exactBlock.pairMoECommands += 1
+                         } catch {
+                             try? lease.cancel()
+@@ -825,25 +842,28 @@
+             for index in finalIndices {
+                 let finalHidden = Array(UnsafeBufferPointer(
+                     start: residual.advanced(by: index * width), count: width))
++                let headStart = exactBlock?.timingStart()
+                 let final = try qwenOfficialSourceRMSNorm(finalHidden, model.finalNorm)
+                 logits = try await projection(model.entryWeights, model.headName,
+                     input: final, outputCount: model.architecture.vocabularySize)
++                exactBlock?.timingEnd(headStart, site: .head)
+                 guard logits.count == model.architecture.vocabularySize,
+                       logits.allSatisfy(\.isFinite) else {
+                     throw QwenTextRunnerError.execution(detail: "nonfinite source prefill logits")
+                 }
+                 if let exactBlock {
+                     try Task.checkCancellation()
+-                    try model.revalidateSource()
++                    try exactBlock.revalidateSource(model, site: .sourcePairFinal)
+                     exactBlock.finalChecks += 1
+-                    exactBlock.logits.append(logits)
++                    if exactBlock.collectsValues { exactBlock.logits.append(logits) }
+                 }
+             }
+             groupedCapture?.observeFinalRawLogits?(position + tokenIDs.count - 1,
+                                                   tokenIDs[tokenIDs.count - 1], logits)
+             await onProgress(tokenIDs.count, tokenIDs.count)
+             try Task.checkCancellation()
+-            try model.revalidateSource()
++            if let exactBlock { try exactBlock.revalidateSource(model, site: .sourcePairEnd) }
++            else { try model.revalidateSource() }
+             let expected = position + tokenIDs.count
+             let full = try fullKV.snapshot()
+             let linearPositionsMatch = try linearSteps.keys.allSatisfy {
+@@ -885,11 +905,14 @@
+ 
+     /// Exactly one turn baseline; full KV's owner/lineage stays opaque here.
+     /// Individual tokens still have their own existing atomic failure recovery.
+-    func beginTurn() throws {
++    func beginTurn(exactBlock: QwenExactBlockCapture? = nil) throws {
+         guard !inFlight, !unusable, !prefillInFlight, turnCheckpoint == nil else {
+             throw QwenTextRunnerError.operationInProgress
+         }
+-        try model.revalidateSource()
++        if let exactBlock {
++            guard hooks.isKnownNone else { throw QwenTextRunnerError.invalidTransaction }
++            try exactBlock.revalidateSource(model, site: .sourceTurn)
++        } else { try model.revalidateSource() }
+         let linear = try linearState.clone()
+         let full = try fullKV.snapshot()
+         guard full.position == committedPosition,
+@@ -1051,6 +1074,7 @@
+             }
+         }
+         let row = model.layers[layer]
++        let routerStart = exactBlock?.timingStart()
+         let routeLogits = try await projection(row.weights, row.routerName,
+             input: input, outputCount: model.architecture.experts)
+         let routing = try QwenMoE.route(logits: routeLogits,
+@@ -1072,19 +1096,25 @@
+             : 0
+         hooks.observeRoute(committedPosition, layer, routeLogits,
+                            experts, routeWeights, cutoff)
+-        exactBlock?.routes.append(QwenExactBlockRoute(position: committedPosition,
+-            layer: layer, ids: experts, weights: routeWeights.map(\.bitPattern)))
+-        try model.revalidateSource()
++        if exactBlock?.collectsValues == true {
++            exactBlock?.routes.append(QwenExactBlockRoute(position: committedPosition,
++                layer: layer, ids: experts, weights: routeWeights.map(\.bitPattern)))
++        }
++        exactBlock?.timingEnd(routerStart, site: .router)
++        if let exactBlock { try exactBlock.revalidateSource(model, site: .sourceSerialPreMap) }
++        else { try model.revalidateSource() }
+         let coordinator = try expertCoordinator(layer: layer)
+         lastRoutedExpertCount = experts.count
+         let measurement = QwenCacheMapMeasurement.capture.map {
+             QwenCacheMapContext(capture: $0, layer: layer, position: committedPosition, tokenCount: 1)
+         }
+         let mapSpan = QwenProductionTimingMeasurement.span(.expertMap)
++        let mapStart = exactBlock?.timingStart()
+         let lease: QwenBF16ExpertLease
+         do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement) }
+         catch { mapSpan?.finish(); throw error }
+         mapSpan?.finish()
++        exactBlock?.timingEnd(mapStart, site: .map)
+         // Mapping has succeeded. Later GPU failure/cancellation cannot undo
+         // these completed cache reads, even when the token is rolled back.
+         successfulCacheHits += UInt64(lease.diagnostics.hits)
+@@ -1095,7 +1125,9 @@
+             // every slice. Recheck the complete source once after mapping so
+             // changes to other receipt files reject this layer before GPU use.
+             // Keep this inside the lease cleanup scope if validation throws.
+-            try model.revalidateSource()
++            if let exactBlock { try exactBlock.revalidateSource(model, site: .sourceSerialPostMap) }
++            else { try model.revalidateSource() }
++            let moeStart = exactBlock?.timingStart()
+             let hiddenBuffer = try floats(input, label: "source MoE input")
+             let routingBuffer = try floats(routeWeights, label: "source MoE routing")
+             let output = try buffer(elements: model.architecture.hiddenSize,
+@@ -1103,11 +1135,16 @@
+                                     label: "source MoE output")
+             let scratch = try moe.makeScratch()
+             let timing = QwenProductionTimingMeasurement.command(.moe)
++            let submitStart = exactBlock?.timingStart()
+             let command = try moe.submitExpertsBF16(
+                 hidden: hiddenBuffer, lease: lease, routingWeights: routingBuffer,
+                 sharedWeights: row.weights, sharedNames: row.sharedNames,
+                 scratch: scratch, output: output, timing: timing)
++            exactBlock?.timingEnd(submitStart, site: .moeSubmit)
++            let settleStart = exactBlock?.timingStart()
+             try await settleSubmitted(command, stage: "source.moe", timing: timing)
++            exactBlock?.timingEnd(settleStart, site: .moeSettle)
++            exactBlock?.timingEnd(moeStart, site: .moe)
+             return read(output, count: model.architecture.hiddenSize)
+         } catch {
+             try? lease.cancel()

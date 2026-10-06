@@ -1,0 +1,11 @@
+{
+  "at": "2026-10-02T12:27:33.070498+00:00",
+  "commit": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "gitStatus": "",
+  "stageHashesMatch": true,
+  "testedSourceInputsMatch": true,
+  "testedInputCount": 5295,
+  "binaryMatchesBuildAndRun": true,
+  "processGuardExit": 1,
+  "processGuardOutput": ""
+}

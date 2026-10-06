@@ -1,0 +1,47 @@
+{
+  "at": "2026-10-02T16:22:42.677152+00:00",
+  "decision": "Reject frozen four-lane metadata candidate for production integration under its fixed gate.",
+  "metrics": {
+    "offDecodeSeconds": 20.402703417,
+    "onDecodeSeconds": 19.366123042,
+    "onOffRatio": 0.949193969357203,
+    "onMeanValidationNs": 1134995.3789198606,
+    "offTokensPerSecond": 1.4213802655111154,
+    "onTokensPerSecond": 1.4974602782966249,
+    "decodeCPUIncreaseRatio": 1.121409806278956
+  },
+  "reason": "Mean parallel full-source validation 1134995.3789ns exceeds fixed1050000ns. Reverse pair correctly not run.",
+  "evidence": {
+    "comparison": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/comparison-20261002T161328.527135Z-09aab4c889434a49bfa35331789a4a27/receipt.json",
+    "comparisonSHA256": "82cc96f79f47f394938004b4b4ad9159f8a05e029725570b959534734cf3d04f",
+    "audit": "post-run-audit-001.json",
+    "review": "review/astra-result-review.md",
+    "buildExit": 0,
+    "modelChildExits": [
+      0,
+      0
+    ],
+    "comparisonExit": 2,
+    "exactOutputCount": 29,
+    "exactRouteAndPlanRows": 1120,
+    "sourceValidationCallsPerRun": 2296,
+    "entryChecksPerRun": 179088,
+    "wrapperMinimumFreePercent": [
+      31,
+      31
+    ],
+    "internalMinimumFreePercent": [
+      31,
+      32
+    ]
+  },
+  "limits": [
+    "First-order 5.08% full decode improvement is not repeated representative app evidence.",
+    "CPU rose12.14%.",
+    "No safety checks removed; no original weights modified.",
+    "Runtime cancellation and rollback faults not exercised by this request.",
+    "No production or installed-app change. Last accepted app rate1.529820 tokens/s.",
+    "No hardware ceiling or20 tokens/s achievement proved."
+  ],
+  "next": "Read-only Opus and Grok next-direction reviews. No parameter sweep, gate change or prefetch revival."
+}

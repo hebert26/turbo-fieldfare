@@ -25,6 +25,9 @@ struct AttentionSplitGeometry: Sendable, Equatable {
 ///   - `out` : `[numQHeads, headDim]`
 final class Attention {
     private let ctx: MetalContext
+    private let retainSWAQuery: Bool
+    private let useQueryPair: Bool
+    var useTokenPairReuse = false
     private let psoPartial: MTLComputePipelineState
     private let psoGQAPartial: MTLComputePipelineState
     private let psoCombine: MTLComputePipelineState
@@ -40,9 +43,7 @@ final class Attention {
     private let psoCombineSWAChunks16: MTLComputePipelineState
     private let psoCombineFullChunks16: MTLComputePipelineState
 
-    /// Mirrors `kAttnThreads` in `attention.metal`. The kernel was authored
-    /// with a hardcoded 256-thread group so its threadgroup-memory scratch
-    /// (q_smem[512] + reduce[8] + bcast) sizes are correct.
+    /// Matches the 256-thread group used by the Metal scratch arrays.
     static let threadsPerGroup: Int = 256
 
     /// Project ceilings for the split-KV partial scratch. `kAttnMaxHeadDim` in
@@ -62,8 +63,10 @@ final class Attention {
     private let dPartial: MTLBuffer
     private let oPartial: MTLBuffer
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, retainSWAQuery: Bool = true, useQueryPair: Bool = true) throws {
         self.ctx = context
+        self.retainSWAQuery = retainSWAQuery
+        self.useQueryPair = useQueryPair
         self.psoPartial = try context.pipeline("attention_decode_partial")
         self.psoGQAPartial = try context.pipeline("attention_decode_gqa_swa_partial")
         self.psoCombine = try context.pipeline("attention_decode_combine")
@@ -96,10 +99,10 @@ final class Attention {
                                                                    numChunks: 16)
         self.psoPartialFullQueryRegisters = try Self.specializedPipeline(context,
             "attention_decode_partial", headDim: 512, numQHeads: 16, numKVHeads: 2,
-            retainFullQuery: true, prefetchFullValue: true)
+            retainQuery: true, prefetchValue: true)
         self.psoPartialFullChunks16QueryRegisters = try Self.specializedPipeline(context,
             "attention_decode_partial", headDim: 512, numQHeads: 16, numKVHeads: 2,
-            numChunks: 16, retainFullQuery: true, prefetchFullValue: true)
+            numChunks: 16, retainQuery: true, prefetchValue: true)
         self.psoCombineSWA = try Self.specializedPipeline(context,
                                                           "attention_decode_combine",
                                                           headDim: 256,
@@ -181,7 +184,8 @@ final class Attention {
                           seqLen: UInt32,
                           window: UInt32,
                           scale: Float? = nil,
-                          ringCapacity: UInt32 = 0) {
+                          ringCapacity: UInt32 = 0,
+                          conditional: DecodeDispatch? = nil) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -195,7 +199,7 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: kvStart, scale: sc,
                     preferGQASWA: true,
-                    ringCapacity: ringCapacity)
+                    ringCapacity: ringCapacity, conditional: conditional)
     }
 
     /// Full attention. Gemma 4 reuses the raw K projection as raw V input, but
@@ -211,7 +215,8 @@ final class Attention {
                            numKVHeads: UInt32,
                            seqLen: UInt32,
                            scale: Float? = nil,
-                           stageTiming: FullAttentionStageTiming? = nil) {
+                           stageTiming: FullAttentionStageTiming? = nil,
+                           conditional: DecodeDispatch? = nil) {
         precondition(numQHeads % numKVHeads == 0,
                      "numQHeads must be a multiple of numKVHeads for GQA")
         precondition(headDim <= 512,
@@ -226,7 +231,7 @@ final class Attention {
                     headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
                     seqLen: seqLen, kvStart: 0, scale: sc,
                     preferGQASWA: false,
-                    stageTiming: stageTiming)
+                    stageTiming: stageTiming, conditional: conditional)
     }
 
 
@@ -244,7 +249,8 @@ final class Attention {
                              seqLen: UInt32, kvStart: UInt32, scale: Float,
                              preferGQASWA: Bool,
                              ringCapacity: UInt32 = 0,
-                             stageTiming: FullAttentionStageTiming? = nil) {
+                             stageTiming: FullAttentionStageTiming? = nil,
+                             conditional: DecodeDispatch? = nil) {
         precondition(Int(numQHeads) <= Self.maxQHeads,
                      "numQHeads \(numQHeads) exceeds split-KV scratch (max \(Self.maxQHeads))")
         precondition(Int(headDim) <= Self.maxHeadDim,
@@ -265,15 +271,43 @@ final class Attention {
                                          numChunks: nChunks,
                                          useGQAPartial: useSWAGQAPartial,
                                          ringCapacity: ringCapacity)
-        let tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
+        var tgWidth = min(Self.threadsPerGroup, Int(partialPSO.maxTotalThreadsPerThreadgroup))
+        var partialGroups = geometry.partialThreadgroups
         // Keep the baseline's exact width. A register variant is eligible only
         // for full attention when its compiled limit also supports 256 threads.
-        if !preferGQASWA, headDim == 512, numQHeads == 16, numKVHeads == 2,
+        if !useQueryPair, !preferGQASWA, headDim == 512, numQHeads == 16, numKVHeads == 2,
            tgWidth == Self.threadsPerGroup {
             let candidate = nChunks == 16
                 ? psoPartialFullChunks16QueryRegisters : psoPartialFullQueryRegisters
             if candidate.maxTotalThreadsPerThreadgroup >= tgWidth {
                 partialPSO = candidate
+            }
+        }
+        if !useQueryPair, retainSWAQuery, useSWAGQAPartial, headDim == 256,
+           numQHeads == 16, numKVHeads == 8, tgWidth == Self.threadsPerGroup {
+            let candidate = try? Self.specializedPipeline(ctx,
+                "attention_decode_gqa_swa_partial", headDim: headDim,
+                numQHeads: numQHeads, numKVHeads: numKVHeads,
+                numChunks: nChunks == 16 ? 16 : nil,
+                ringCapacity: ringCapacity > 0 ? ringCapacity : nil,
+                retainQuery: true, prefetchValue: true)
+            if let candidate, candidate.maxTotalThreadsPerThreadgroup >= tgWidth {
+                partialPSO = candidate
+            }
+        }
+
+        let queryPairShape = (useSWAGQAPartial && headDim == 256 && numKVHeads == 8)
+            || (!preferGQASWA && headDim == 512 && numKVHeads == 2)
+        if useQueryPair, numQHeads == 16, queryPairShape, tgWidth == Self.threadsPerGroup {
+            let candidate = try? Self.specializedPipeline(ctx, "attention_decode_query_pair_partial",
+                headDim: headDim, numQHeads: numQHeads, numKVHeads: numKVHeads,
+                numChunks: nChunks == 16 ? 16 : nil,
+                ringCapacity: ringCapacity > 0 ? ringCapacity : nil)
+            let width = Int(headDim) / 2
+            if let candidate, candidate.maxTotalThreadsPerThreadgroup >= width {
+                partialPSO = candidate
+                tgWidth = width
+                partialGroups = Int(numQHeads) / 2 * nChunks
             }
         }
 
@@ -301,9 +335,9 @@ final class Attention {
         p1.setBytes(&cl,  length: MemoryLayout<UInt32>.size, index: 11)
         p1.setBytes(&nc,  length: MemoryLayout<UInt32>.size, index: 12)
         p1.setBytes(&sc,  length: MemoryLayout<Float>.size,  index: 13)
-        let partialGroups = geometry.partialThreadgroups
-        p1.dispatchThreadgroups(MTLSize(width: partialGroups, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: tgWidth, height: 1, depth: 1))
+        p1.dispatchDecode(MTLSize(width: partialGroups, height: 1, depth: 1),
+                          threads: MTLSize(width: tgWidth, height: 1, depth: 1),
+                          conditional: conditional)
         p1.endEncoding()
 
         let combineEncoder: MTLComputeCommandEncoder?
@@ -327,9 +361,78 @@ final class Attention {
         p2.setBytes(&nc2, length: MemoryLayout<UInt32>.size, index: 5)
         let combineTGWidth = min(Self.threadsPerGroup,
                                  Int(combinePSO.maxTotalThreadsPerThreadgroup))
-        p2.dispatchThreadgroups(MTLSize(width: Int(numQHeads), height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: combineTGWidth, height: 1, depth: 1))
+        p2.dispatchDecode(MTLSize(width: Int(numQHeads), height: 1, depth: 1),
+                          threads: MTLSize(width: combineTGWidth, height: 1, depth: 1),
+                          conditional: conditional)
         p2.endEncoding()
+    }
+
+    /// Runs two consecutive query tokens with the same sum order as decode.
+    func encodePair(commandBuffer: MTLCommandBuffer,
+                    queries: [MTLBuffer], keys: MTLBuffer, values: MTLBuffer,
+                    outputs: [MTLBuffer], full: Bool, firstLength: UInt32,
+                    window: UInt32, ringCapacity: UInt32,
+                    conditional: DecodeDispatch? = nil) throws -> Bool {
+        guard queries.count == 2, outputs.count == 2 else { return false }
+        let hd: UInt32 = full ? 512 : 256
+        let nk: UInt32 = full ? 2 : 8
+        let lengths = [firstLength, firstLength + 1]
+        let starts = lengths.map { !full && $0 > window ? $0 - window : 0 }
+        let shapes = zip(lengths, starts).map {
+            Self.splitGeometry(numQHeads: 16, numKVHeads: nk,
+                seqLen: $0.0, kvStart: $0.1, preferGQASWA: !full)
+        }
+        guard shapes.allSatisfy({ $0.numChunks == 16 }) else { return false }
+        let reuseTokens = useTokenPairReuse && useQueryPair
+            && starts[0] == starts[1] && shapes[0].chunkLength == shapes[1].chunkLength
+        let partial = try Self.specializedPipeline(ctx,
+            reuseTokens ? "attention_decode_token_pair_partial" : useQueryPair ? "attention_decode_query_pair_partial"
+                : (full ? "attention_decode_partial" : "attention_decode_gqa_swa_partial"),
+            headDim: hd, numQHeads: 16, numKVHeads: nk, numChunks: 16,
+            ringCapacity: ringCapacity > 0 ? ringCapacity : nil,
+            retainQuery: full || retainSWAQuery,
+            prefetchValue: full || retainSWAQuery, paired: true)
+        let combine = try Self.specializedPipeline(ctx, "attention_decode_combine",
+            headDim: hd, numQHeads: 16, numKVHeads: nk, numChunks: 16, paired: true)
+        let partialWidth = useQueryPair ? Int(hd) / 2 : Self.threadsPerGroup
+        guard partial.maxTotalThreadsPerThreadgroup >= partialWidth,
+              combine.maxTotalThreadsPerThreadgroup >= Self.threadsPerGroup else { return false }
+        guard let first = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.noQueue }
+        first.setComputePipelineState(partial)
+        for (index, buffer) in [queries[0], keys, values, mPartial, dPartial, oPartial].enumerated() {
+            first.setBuffer(buffer, offset: 0, index: index)
+        }
+        first.setBuffer(queries[1], offset: 0, index: 14)
+        for (index, value) in [hd, 16, nk].enumerated() {
+            var value = value
+            first.setBytes(&value, length: 4, index: 6 + index)
+        }
+        let chunks = shapes.map { UInt32($0.chunkLength) }
+        for (index, values) in [lengths, starts, chunks].enumerated() {
+            values.withUnsafeBytes { first.setBytes($0.baseAddress!, length: $0.count, index: 9 + index) }
+        }
+        var count: UInt32 = 16
+        var scale: Float = 1
+        first.setBytes(&count, length: 4, index: 12)
+        first.setBytes(&scale, length: 4, index: 13)
+        let threads = MTLSize(width: Self.threadsPerGroup, height: 1, depth: 1)
+        first.dispatchDecode(MTLSize(width: useQueryPair ? 128 : shapes[0].partialThreadgroups,
+            height: reuseTokens ? 1 : 2, depth: 1), threads: MTLSize(width: partialWidth, height: 1, depth: 1),
+            conditional: conditional)
+        first.endEncoding()
+        guard let second = commandBuffer.makeComputeCommandEncoder() else { throw MetalError.noQueue }
+        second.setComputePipelineState(combine)
+        for (index, buffer) in [mPartial, dPartial, oPartial, outputs[0]].enumerated() {
+            second.setBuffer(buffer, offset: 0, index: index)
+        }
+        second.setBuffer(outputs[1], offset: 0, index: 6)
+        var dimension = hd
+        second.setBytes(&dimension, length: 4, index: 4)
+        second.setBytes(&count, length: 4, index: 5)
+        second.dispatchDecode(MTLSize(width: 16, height: 2, depth: 1),
+            threads: threads, conditional: conditional)
+        second.endEncoding()
+        return true
     }
 
     /// `1 / sqrt(head_dim)` — the classic transformer scaling. Used as the
@@ -346,8 +449,9 @@ final class Attention {
                                             numKVHeads: UInt32,
                                             numChunks: UInt32? = nil,
                                             ringCapacity: UInt32? = nil,
-                                            retainFullQuery: Bool = false,
-                                            prefetchFullValue: Bool = false) throws -> MTLComputePipelineState {
+                                            retainQuery: Bool = false,
+                                            prefetchValue: Bool = false,
+                                            paired: Bool = false) throws -> MTLComputePipelineState {
         var constants = [
             MetalFunctionConstant(index: 60, value: .uint32(headDim)),
             MetalFunctionConstant(index: 61, value: .uint32(numQHeads)),
@@ -357,11 +461,14 @@ final class Attention {
         if let numChunks {
             constants.append(MetalFunctionConstant(index: 65, value: .uint32(numChunks)))
         }
-        if retainFullQuery {
+        if retainQuery {
             constants.append(MetalFunctionConstant(index: 66, value: .bool(true)))
         }
-        if prefetchFullValue {
+        if prefetchValue {
             constants.append(MetalFunctionConstant(index: 67, value: .bool(true)))
+        }
+        if paired {
+            constants.append(MetalFunctionConstant(index: 68, value: .bool(true)))
         }
         if let ringCapacity {
             constants.append(MetalFunctionConstant(index: 69, value: .uint32(ringCapacity)))

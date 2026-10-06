@@ -48,6 +48,44 @@ enum ResidentWriter {
         return outFile
     }
 
+    /// Qwen resident dispatch. The caller supplies its plan-bound request
+    /// identity and compact global progress; no per-group state is retained.
+    static func write(
+        qwenTensor tensor: QwenPlannedTensor,
+        outputDirectory: String,
+        requestIndex: UInt64,
+        requestID: String,
+        sourcePayloadSHA256: String?,
+        progress: RemoteTransformProgress,
+        resumeUnitCount: UInt64,
+        audit: RepackAudit,
+        operations: TransformedTensorWriterOperations = .production,
+        commit: (RemoteTransformProgress) throws -> Void
+    ) throws -> TransformedTensorWriteResult {
+        let destinationPath = (outputDirectory as NSString)
+            .appendingPathComponent(tensor.relativeFile)
+        let fd = try Posix.openReadNoFollow(destinationPath)
+        let destinationSize = try Posix.fileSize(fd: fd, path: destinationPath)
+        close(fd)
+        return try TransformedTensorWriter.write(
+            .init(
+                requestIndex: requestIndex,
+                requestID: requestID,
+                tensorName: tensor.source.name,
+                source: tensor.source,
+                sourcePayloadSHA256: sourcePayloadSHA256,
+                destinationPath: destinationPath,
+                destinationFileSize: destinationSize,
+                fileOffset: tensor.fileOffset,
+                storage: tensor.storage,
+                affineComponents: tensor.affineComponents),
+            progress: progress,
+            resumeUnitCount: resumeUnitCount,
+            audit: audit,
+            operations: operations,
+            commit: commit)
+    }
+
     static func createAndWriteIndex(plan: ResidentFilePlan,
                                            audit: RepackAudit) throws -> Int32 {
         try Posix.mkdirP(((plan.path as NSString).deletingLastPathComponent))

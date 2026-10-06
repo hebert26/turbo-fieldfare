@@ -1,0 +1,55 @@
+{
+  "accumulationExpertIDs": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7
+  ],
+  "device": "cpu",
+  "downBF16SHA256": "6381147d133de05fdf130352670c44dd082c35d22780f78b5d00270ac194ac82",
+  "dtype": "float32 reference from original BF16 tensors",
+  "expectedOutputFile": "ascending-expert-output.bin",
+  "expectedOutputSHA256": "a89327cf2831b72e5af6df346d0cca3387fcb66f3a6cee2a016ed877740218d9",
+  "formatVersion": 1,
+  "gateUpBF16SHA256": "d9dc4992829a5f03d03b513d3613a141c5c7169d9d5c445bcb01fca152b3cbf7",
+  "geometry": {
+    "expertCount": 8,
+    "hiddenSize": 512,
+    "routedIntermediateSize": 512,
+    "sharedIntermediateSize": 1,
+    "topK": 8
+  },
+  "inputSHA256": "c71873f6f3105b15ca6cd4b1db85011b4339558a0e0d912527da8a7011988b40",
+  "leaseExpertIDs": [
+    7,
+    6,
+    5,
+    4,
+    3,
+    2,
+    1,
+    0
+  ],
+  "leaseRankControlFile": "lease-rank-order-control.bin",
+  "leaseRankControlSHA256": "799edb4c10c7db2b1a460a3cd8b21cd1bb991b0eca56a890653f77a919ee6d06",
+  "routeWeightFloat32Bits": [
+    1031798784,
+    1031798784,
+    1040187392,
+    1040187392,
+    1040187392,
+    1040187392,
+    1048576000,
+    1040187392
+  ],
+  "routingWeightsFloat32SHA256": "9df68b96f6cc2883a69381170185508beaa42c1d9939d3ef50c643531abc9d1f",
+  "sharedWeightsBF16SHA256": "d41b12f77ceed94a2f538d79c1bf28e590db5be26be1600579a46b944fe86564",
+  "torchGit": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+  "torchInteropThreads": 1,
+  "torchThreads": 1,
+  "torchVersion": "2.10.0"
+}

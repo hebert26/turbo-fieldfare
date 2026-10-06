@@ -6,6 +6,7 @@ import ImageIO
 public enum VisionImageError: Error, CustomStringConvertible {
     case invalidSource(String)
     case invalidMetadata(String)
+    case unsupportedVideo(displayName: String)
     case unsupportedFrameCount(Int)
     case sourceTooLarge(bytes: Int, limit: Int)
     case dimensionsTooLarge(width: Int, height: Int, pixelLimit: Int)
@@ -18,6 +19,8 @@ public enum VisionImageError: Error, CustomStringConvertible {
         switch self {
         case .invalidSource(let detail): "invalid image source: \(detail)"
         case .invalidMetadata(let detail): "invalid image metadata: \(detail)"
+        case .unsupportedVideo(let displayName):
+            "Video input is not supported: \(displayName)"
         case .unsupportedFrameCount(let count): "image must contain one frame, found \(count)"
         case .sourceTooLarge(let bytes, let limit):
             "encoded image has \(bytes) bytes, limit is \(limit)"
@@ -122,6 +125,25 @@ package struct OpenedVisionImage {
         self.provider = provider
         self.fileProvider = fileProvider
         self.encodedBytes = encodedBytes
+    }
+
+    /// Copies only the bytes of the already admitted, retained descriptor.
+    /// The caller can verify its recorded digest without reopening the path.
+    package func copyEncodedBytes(maximum: Int) throws -> Data {
+        guard encodedBytes > 0, encodedBytes <= maximum else {
+            throw VisionImageError.sourceTooLarge(bytes: encodedBytes, limit: maximum)
+        }
+        guard fileProvider.hasAdmittedLength() else {
+            throw VisionImageError.invalidSource("admitted encoded image length changed")
+        }
+        var data = Data(count: encodedBytes)
+        let read = data.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
+            fileProvider.read(into: bytes.baseAddress!, position: 0, count: encodedBytes)
+        }
+        guard read == encodedBytes, fileProvider.hasAdmittedLength() else {
+            throw VisionImageError.invalidSource("admitted encoded image changed or could not be read")
+        }
+        return data
     }
 
 
@@ -242,6 +264,13 @@ private final class VisionFileProvider {
 
     deinit {
         Darwin.close(descriptor)
+    }
+
+    func hasAdmittedLength() -> Bool {
+        var status = stat()
+        return fstat(descriptor, &status) == 0
+            && (status.st_mode & S_IFMT) == S_IFREG
+            && status.st_size == off_t(encodedBytes)
     }
 
     func read(into buffer: UnsafeMutableRawPointer, position: off_t, count: Int) -> Int {

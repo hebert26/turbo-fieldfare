@@ -106,11 +106,102 @@ import Testing
 
     /// The checks must not have cost the ordinary case its acceptance.
     @Test func wellFormedHeaderStillParses() throws {
-        let parsed = try Self.parse(Self.entry(shape: [2, 2], offsets: [0, 8]))
+        let entries = Self.entry(shape: [2, 2], offsets: [0, 8])
+        let headerBytes = Self.header(entries)
+        let parsed = try Safetensors.parseHeaderBytes(
+            path: "hostile.safetensors",
+            fileSize: UInt64(8 + headerBytes.count + 8),
+            headerBytes: headerBytes)
         #expect(parsed.tensors.count == 1)
         let tensor = try #require(parsed.tensors.first)
         #expect(tensor.sizeBytes == 8)
         #expect(tensor.shape == [2, 2])
         #expect(tensor.absoluteOffset == parsed.payloadBaseOffset)
+    }
+
+    @Test func adapterRejectsDuplicateKeysAndBooleanShapeOrOffset() throws {
+        let cases = [
+            #"{"weight":{"dtype":"BF16","shape":[1],"data_offsets":[0,2]},"\u0077eight":{"dtype":"BF16","shape":[1],"data_offsets":[2,4]}}"#,
+            #"{"weight":{"dtype":"BF16","dtype":"F16","shape":[1],"data_offsets":[0,2]}}"#,
+            #"{"weight":{"dtype":"BF16","shape":[true],"data_offsets":[0,2]}}"#,
+            #"{"weight":{"dtype":"BF16","shape":[1],"data_offsets":[false,2]}}"#,
+        ]
+        for raw in cases {
+            let bytes = Data(raw.utf8)
+            do {
+                _ = try Safetensors.parseHeaderBytes(
+                    path: "hostile.safetensors",
+                    fileSize: UInt64(8 + bytes.count + 8),
+                    headerBytes: bytes)
+                Issue.record("adapter accepted ambiguous or non-integer header: \(raw)")
+            } catch let error as RepackError {
+                guard case .safetensorsHeaderInvalid = error else {
+                    Issue.record("unexpected adapter error for \(raw): \(error)")
+                    continue
+                }
+            }
+        }
+    }
+
+    @Test func adapterRejectsLeadingInternalAndTrailingPayloadGaps() {
+        let cases: [(String, UInt64)] = [
+            (#"{"w":{"dtype":"BF16","shape":[1],"data_offsets":[2,4]}}"#, 4),
+            (#"{"a":{"dtype":"BF16","shape":[1],"data_offsets":[0,2]},"b":{"dtype":"BF16","shape":[1],"data_offsets":[4,6]}}"#, 6),
+            (#"{"w":{"dtype":"BF16","shape":[1],"data_offsets":[0,2]}}"#, 3),
+        ]
+        for (raw, payloadBytes) in cases {
+            let bytes = Data(raw.utf8)
+            do {
+                _ = try Safetensors.parseHeaderBytes(
+                    path: "gapped.safetensors",
+                    fileSize: UInt64(8 + bytes.count) + payloadBytes,
+                    headerBytes: bytes)
+                Issue.record("adapter accepted a payload gap: \(raw)")
+            } catch let error as RepackError {
+                guard case .safetensorsHeaderInvalid = error else {
+                    Issue.record("unexpected adapter error for payload gap: \(error)")
+                    continue
+                }
+            } catch {
+                Issue.record("unexpected non-RepackError for payload gap: \(error)")
+            }
+        }
+    }
+
+    @Test func adapterPreservesDeterministicZeroLengthRange() throws {
+        let bytes = Data(#"{"empty":{"dtype":"BF16","shape":[0],"data_offsets":[0,0]}}"#.utf8)
+        let parsed = try Safetensors.parseHeaderBytes(
+            path: "empty.safetensors",
+            fileSize: UInt64(8 + bytes.count),
+            headerBytes: bytes)
+
+        let tensor = try #require(parsed.tensors.first)
+        #expect(parsed.tensors.count == 1)
+        #expect(tensor.name == "empty")
+        #expect(tensor.dtype == .bf16)
+        #expect(tensor.sizeBytes == 0)
+        #expect(tensor.absoluteOffset == parsed.payloadBaseOffset)
+
+        let boundaryBytes = Data(
+            #"{"a_nonempty":{"dtype":"BF16","shape":[1],"data_offsets":[0,2]},"z_empty":{"dtype":"BF16","shape":[0],"data_offsets":[0,0]}}"#.utf8)
+        let boundary = try Safetensors.parseHeaderBytes(
+            path: "zero-boundary.safetensors",
+            fileSize: UInt64(8 + boundaryBytes.count + 2),
+            headerBytes: boundaryBytes)
+        #expect(boundary.tensors.map(\.name) == ["a_nonempty", "z_empty"])
+        #expect(boundary.tensors.map(\.sizeBytes) == [2, 0])
+    }
+
+    @Test func adapterPreservesGenericSupportedDtypeInterpretation() throws {
+        let bytes = Data(
+            #"{"f16":{"dtype":"F16","shape":[1],"data_offsets":[0,2]},"f32":{"dtype":"F32","shape":[1],"data_offsets":[2,6]},"u32":{"dtype":"U32","shape":[1],"data_offsets":[6,10]}}"#.utf8)
+        let parsed = try Safetensors.parseHeaderBytes(
+            path: "generic.safetensors",
+            fileSize: UInt64(8 + bytes.count + 10),
+            headerBytes: bytes)
+
+        #expect(parsed.tensors.map(\.name) == ["f16", "f32", "u32"])
+        #expect(parsed.tensors.map(\.dtype) == [.fp16, .fp32, .u32])
+        #expect(parsed.tensors.map(\.sizeBytes) == [2, 4, 4])
     }
 }

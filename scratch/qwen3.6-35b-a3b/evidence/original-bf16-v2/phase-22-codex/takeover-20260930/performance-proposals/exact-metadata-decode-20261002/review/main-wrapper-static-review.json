@@ -1,0 +1,18 @@
+{
+  "at": "2026-10-02T15:57:40.174940+00:00",
+  "scope": "Main static review of full compare.py plus run.py diff against previously audited and executed guarded wrapper",
+  "hashes": {
+    "run.py": "b2e151914fa2668316c20d5f4b1ffae436d8e1810144216d8423faade8bd3c6a",
+    "compare.py": "5c07861514e6e44d8ca379c05319dd28ab8dc763e5a1919b87824d9bbc68621f"
+  },
+  "status": "No blocking finding in wrappers. Candidate/source freeze and source review remain.",
+  "observations": [
+    "Current b43390c base; exact new product/flag; all prior competing process exclusions plus current probe.",
+    "Same guarded serial OFF/ON followed conditionally by ON/OFF. Every run and failed verdict retained.",
+    "Preset new candidate ratio<=.97 in both orders and parallel mean<=1050000ns; full decode remains headline.",
+    "Exact29 outputs includingEOS,28forwards,1120routes/plans/safety, count and entry-check equality, >=30% internal/wrapper memory.",
+    "Measured entry FD bounds1 serial/4 parallel; CPU user/system totals separate from wall timing.",
+    "No quarantine or prefetch requirement. More source/build/request/wrapper hash checks after child completion."
+  ],
+  "executedTestsBuildsModelRuns": false
+}

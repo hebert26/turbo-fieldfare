@@ -25,6 +25,7 @@ constant uint FC_INT4_QKV_MQ [[function_constant(23)]];
 constant uint FC_INT4_QKV_MKV [[function_constant(24)]];
 constant uint FC_INT4_QKV_N [[function_constant(25)]];
 constant bool FC_INT4_QKV_USE_FC [[function_constant(26)]];
+constant bool FC_INT4_QKV_K_EQUALS_V [[function_constant(27)]];
 
 static inline uint int4_fc_m(constant uint& M) {
     return (is_function_constant_defined(FC_INT4_USE_FC) &&
@@ -82,96 +83,90 @@ kernel void embed_lookup_int4(
     out[gid] = half((float(q) * s + b) * out_scale);
 }
 
-// y[m] = sum_{n} W[m, n] * x[n]. One-SIMD-per-row variant: 32 threads
-// cooperate on a single output row, each handling 2 elements per group of 64
-// (one byte → two nibbles). simd_sum reduces across the group; lane 0 writes.
-//
-// Requires N % 64 == 0 (per group of 64). Validated at the wrapper.
-// Each threadgroup handles eight consecutive rows, one SIMD per row. The
-// larger work unit gives the scheduler enough independent rows while sharing
-// the L1-cached input-vector reads.
+// Each group of 32 threads computes four rows with the same input values.
+// Each row keeps its own sum and the original order of calculations.
+// Packed weights need only two-byte alignment.
 static inline void dequant_int4_gemv_simd_body(
     device const uint8_t* W,
     device const bfloat*  scales,
     device const bfloat*  biases,
     device const half*    x,
     device half*          y,
+    device half*          duplicate_y,
+    bool                  duplicate_output,
     uint                  M,
     uint                  N,
-    uint                  rows_per_tg,
-    uint                  tg_idx,
-    uint                  sg_idx,
+    uint                  first_row,
     uint                  lane
 ) {
-    const uint row = tg_idx * rows_per_tg + sg_idx;
-    if (row >= M) return;
+    if (first_row >= M) return;
     const uint n_groups  = N / kGroupSize;
     const uint row_bytes = N / 2;
-    device const uint8_t* W_row = W      + uint(row) * row_bytes;
-    device const bfloat*  s_row = scales + uint(row) * n_groups;
-    device const bfloat*  b_row = biases + uint(row) * n_groups;
-
-    float acc = 0.0f;
-    // The vectorized row path reads
-    // weights a uint (4 bytes = 8 nibbles) and x as half4 in 4-group (128-byte)
-    // blocks, with a scalar byte-per-lane remainder. Within a block the 32
-    // lanes split 8-per-group, each handling 8 contiguous elements of one
-    // 64-element group, so the affine factoring s·Σqx + b·Σx is preserved
-    // (simd_sum aggregates; s/b are constant within a group). Aligned: row
-    // stride N/2 and weightsOffset are multiples of 4; x is
-    // half4-aligned (lane*8 elements). N=2816/4096/8192 → 44/64/128 groups, all
-    // exact 4-blocks; the remainder covers any non-multiple-of-4 group count.
+    const uint valid_rows = min(4u, M - first_row);
+    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
     const uint full_blocks = n_groups / 4;
     for (uint blk = 0; blk < full_blocks; ++blk) {
         const uint byte_base = blk * 128u + lane * 4u;
-        // Read the 4-byte weight chunk as two ushorts. The resident weight
-        // tensors are 2-byte aligned but NOT 4-byte aligned (BF16 scale/bias
-        // regions leave a 2-aligned weightsOffset), so a `uint*` load would be
-        // misaligned (undefined → garbage); a `ushort*` load is safe (row stride
-        // N/2, weightsOffset, and byte_base are all even) and halves the loads
-        // vs byte-by-byte.
-        device const ushort* wp = (device const ushort*)(W_row + byte_base);
-        const uint w4 = uint(wp[0]) | (uint(wp[1]) << 16);
         const uint g  = blk * 4u + (lane >> 3);
-        const float s = float(s_row[g]);
-        const float b = float(b_row[g]);
         const uint elem = byte_base * 2u;
         const half4 xa = *((device const half4*)(x + elem));
         const half4 xb = *((device const half4*)(x + elem + 4u));
-        const uint b0 =  w4        & 0xFFu;
-        const uint b1 = (w4 >> 8)  & 0xFFu;
-        const uint b2 = (w4 >> 16) & 0xFFu;
-        const uint b3 = (w4 >> 24) & 0xFFu;
         const float e0 = float(xa.x), e1 = float(xa.y), e2 = float(xa.z), e3 = float(xa.w);
         const float e4 = float(xb.x), e5 = float(xb.y), e6 = float(xb.z), e7 = float(xb.w);
-        float dot = 0.0f;
-        dot = fma(float(b0 & 0x0Fu), e0, dot); dot = fma(float(b0 >> 4), e1, dot);
-        dot = fma(float(b1 & 0x0Fu), e2, dot); dot = fma(float(b1 >> 4), e3, dot);
-        dot = fma(float(b2 & 0x0Fu), e4, dot); dot = fma(float(b2 >> 4), e5, dot);
-        dot = fma(float(b3 & 0x0Fu), e6, dot); dot = fma(float(b3 >> 4), e7, dot);
         const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
-        acc = fma(s, dot, acc);
-        acc = fma(b, sum, acc);
+        // Scale in float so small half inputs stay exact.
+        // All rows can then use weights without bit shifts.
+        const float x1 = e1 * 0x1p-4f, x2 = e2 * 0x1p-8f, x3 = e3 * 0x1p-12f;
+        const float x5 = e5 * 0x1p-4f, x6 = e6 * 0x1p-8f, x7 = e7 * 0x1p-12f;
+        #pragma unroll
+        for (uint r = 0; r < 4u; ++r) {
+            if (r >= valid_rows) continue;
+            const uint row = first_row + r;
+            device const ushort* wp = (device const ushort*)(W + row * row_bytes + byte_base);
+            const uint w0 = uint(wp[0]);
+            const uint w1 = uint(wp[1]);
+            const float s = float(scales[row * n_groups + g]);
+            const float b = float(biases[row * n_groups + g]);
+            float dot = 0.0f;
+            dot = fma(float(w0 & 0x000Fu), e0, dot); dot = fma(float(w0 & 0x00F0u), x1, dot);
+            dot = fma(float(w0 & 0x0F00u), x2, dot); dot = fma(float(w0 & 0xF000u), x3, dot);
+            dot = fma(float(w1 & 0x000Fu), e4, dot); dot = fma(float(w1 & 0x00F0u), x5, dot);
+            dot = fma(float(w1 & 0x0F00u), x6, dot); dot = fma(float(w1 & 0xF000u), x7, dot);
+            acc[r] = fma(s, dot, acc[r]);
+            acc[r] = fma(b, sum, acc[r]);
+        }
     }
     for (uint g = full_blocks * 4u; g < n_groups; ++g) {
-        const float s = float(s_row[g]);
-        const float b = float(b_row[g]);
-        const uint8_t byte = W_row[g * (kGroupSize / 2) + lane];
         const float x0 = float(x[g * kGroupSize + lane * 2u]);
         const float x1 = float(x[g * kGroupSize + lane * 2u + 1u]);
-        float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
-        dot = fma(float(uint(byte >> 4)), x1, dot);
         const float sum = x0 + x1;
-        acc = fma(s, dot, acc);
-        acc = fma(b, sum, acc);
+        #pragma unroll
+        for (uint r = 0; r < 4u; ++r) {
+            if (r >= valid_rows) continue;
+            const uint row = first_row + r;
+            const float s = float(scales[row * n_groups + g]);
+            const float b = float(biases[row * n_groups + g]);
+            const uint8_t byte = W[row * row_bytes + g * (kGroupSize / 2) + lane];
+            float dot = fma(float(uint(byte & 0x0Fu)), x0, 0.0f);
+            dot = fma(float(uint(byte >> 4)), x1, dot);
+            acc[r] = fma(s, dot, acc[r]);
+            acc[r] = fma(b, sum, acc[r]);
+        }
     }
-    acc = simd_sum(acc);
-    if (lane == 0) {
-        y[row] = half(acc);
+    #pragma unroll
+    for (uint r = 0; r < 4u; ++r) {
+        if (r >= valid_rows) continue;
+        const float value = simd_sum(acc[r]);
+        if (lane == 0) {
+            const half result = half(value);
+            y[first_row + r] = result;
+            if (duplicate_output) duplicate_y[first_row + r] = result;
+        }
     }
 }
 
-kernel void dequant_int4_gemv_simd(
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void dequant_int4_gemv_simd(
     device const uint8_t* W      [[buffer(0)]],
     device const bfloat*  scales [[buffer(1)]],
     device const bfloat*  biases [[buffer(2)]],
@@ -186,12 +181,13 @@ kernel void dequant_int4_gemv_simd(
     constexpr uint rows_per_tg = 8;
     const uint MM = int4_fc_m(M);
     const uint NN = int4_fc_n(N);
-    dequant_int4_gemv_simd_body(W, scales, biases, x, y, MM, NN,
-                                rows_per_tg, tg_idx, sg_idx, lane);
+    dequant_int4_gemv_simd_body(W, scales, biases, x, y, y, false, MM, NN,
+                                tg_idx * rows_per_tg + sg_idx * 4u, lane);
 }
 
 
-kernel void dequant_int4_qkv_gemv_simd(
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void dequant_int4_qkv_gemv_simd(
     device const uint8_t* qW      [[buffer(0)]],
     device const bfloat*  qScales [[buffer(1)]],
     device const bfloat*  qBiases [[buffer(2)]],
@@ -212,33 +208,38 @@ kernel void dequant_int4_qkv_gemv_simd(
     uint                  sg_idx  [[simdgroup_index_in_threadgroup]],
     uint                  lane    [[thread_index_in_simdgroup]]
 ) {
-    constexpr uint rows_per_tg = 8;
     const uint QQ = int4_qkv_fc_mq(Mq);
     const uint KK = int4_qkv_fc_mkv(Mkv);
     const uint NN = int4_qkv_fc_n(N);
-    const uint global_row = tg_idx * rows_per_tg + sg_idx;
-    const uint total_rows = QQ + 2u * KK;
-    if (global_row >= total_rows) { return; }
+    const uint q_groups = QQ / 4u + uint(QQ % 4u != 0u);
+    const uint kv_groups = KK / 4u + uint(KK % 4u != 0u);
+    const bool k_equals_v = is_function_constant_defined(FC_INT4_QKV_K_EQUALS_V) &&
+        FC_INT4_QKV_K_EQUALS_V;
+    const uint group = tg_idx * 2u + sg_idx;
+    if (group >= q_groups + (k_equals_v ? kv_groups : 2u * kv_groups)) return;
 
     device const uint8_t* W;
     device const bfloat* scales;
     device const bfloat* biases;
     device half* y;
+    device half* duplicate_y;
+    bool duplicate_output = false;
     uint local_row;
     uint M;
-    if (global_row < QQ) {
-        W = qW; scales = qScales; biases = qBiases; y = qY;
-        local_row = global_row;
+    if (group < q_groups) {
+        W = qW; scales = qScales; biases = qBiases; y = qY; duplicate_y = qY;
+        local_row = group * 4u;
         M = QQ;
-    } else if (global_row < QQ + KK) {
-        W = kW; scales = kScales; biases = kBiases; y = kY;
-        local_row = global_row - QQ;
+    } else if (group < q_groups + kv_groups) {
+        W = kW; scales = kScales; biases = kBiases; y = kY; duplicate_y = vY;
+        duplicate_output = k_equals_v;
+        local_row = (group - q_groups) * 4u;
         M = KK;
     } else {
-        W = vW; scales = vScales; biases = vBiases; y = vY;
-        local_row = global_row - QQ - KK;
+        W = vW; scales = vScales; biases = vBiases; y = vY; duplicate_y = vY;
+        local_row = (group - q_groups - kv_groups) * 4u;
         M = KK;
     }
-    dequant_int4_gemv_simd_body(W, scales, biases, x, y, M, NN,
-                                1u, local_row, 0u, lane);
+    dequant_int4_gemv_simd_body(W, scales, biases, x, y, duplicate_y, duplicate_output, M, NN,
+                                local_row, lane);
 }

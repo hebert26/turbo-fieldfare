@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "status": "whole stage frozen; Main review/build/run only",
+  "head": "ab21aeadac0297ab253b56b0b8aab0fd6ebb5e6b",
+  "productionAnchor": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "product": "TurboFieldfareCausalLookupDecode",
+  "ownership": "new causal-lookup-decode-20261002 only",
+  "sourceDependency": "exact-pair-probe-20261002 immutable reviewed candidate",
+  "driverOnlyDelta": [
+    "candidate/Package.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift",
+    "candidate/Sources/TurboFieldfareCausalLookupDecode/Command.swift"
+  ],
+  "policy": "fixed max4 longest suffix2..12, latest prior match; prompt+consumed history+pending only; no tuning or cooldown",
+  "generation": {
+    "promptInputs": 1175,
+    "contextCapacity": 8192,
+    "outputLimit": 29,
+    "cacheSlotsPerLayer": 16,
+    "policy": "LFU",
+    "temperature": 0,
+    "terminal": "sampledEOS stays pending; expected consumedPosition1203",
+    "captureSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285"
+  },
+  "recovery": "existing restoreTurnBaseline plus serial replay of pending and matched drafts; no snapshot feature",
+  "timing": {
+    "prompt": "prefill only; loading excluded",
+    "decode": "initial sampler through final finishTurn, including proposal work, source checks, all branch verification, accepted hashes, checkpoints, restore and replay, cycle hashes/counters",
+    "excluded": "final numerical-state readback/hash and final memory probe",
+    "CPU": "process getrusage before/after decode, not additive stage attribution"
+  },
+  "stateComparison": "bitPattern hashes of accepted logits and route IDs/weight bits; final recurrent/convolution and committedKV numeric bits; speculative tail and UUID identities excluded",
+  "counts": {
+    "acceptedRawRows": 28,
+    "acceptedRoutes": 1120
+  },
+  "transactionDifference": "OFF one turn across decode; ON one turn per cycle. ON outer conversation integration is absent. All required rollback costs remain.",
+  "memory": "one loaded model and runner; no prefix snapshots or quarantine. One final committed-state snapshot; per-cycle at most4rawlogit rows. External own-child watchdog requires>=30%free.",
+  "gate": "fresh OFF/ON; stop on mismatch, safety/memory failure or ratio>.95; reverse only<=.95; speed claim requires<=.95 both orders. Not app qualification or nativeMTP.",
+  "commands": {
+    "prepare": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/prepare.py"
+    ],
+    "build": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/build.py"
+    ],
+    "preflight": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/preflight.py"
+    ],
+    "compare": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/compare.py",
+      "REGISTRATION.json"
+    ],
+    "binary": [
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/build/release/TurboFieldfareCausalLookupDecode",
+      "REGISTRATION.json",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/request.json",
+      "UNIQUE_REPORT.json",
+      "off|on"
+    ],
+    "run": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/causal-lookup-decode-20261002/run.py",
+      "REGISTRATION.json",
+      "--mode",
+      "off|on"
+    ]
+  },
+  "expectedDurationSeconds": {
+    "freshChild": "150\u2013170 estimate;420watchdog",
+    "firstPair": "300\u2013340 estimate"
+  },
+  "builds": false,
+  "modelRuns": false,
+  "unitTests": false,
+  "sourceAppliedLive": false,
+  "wrapperHashes": {
+    "run.py": "7da16247aec2f22ec9e8cd3c2151598d86f3579a80ba525a198aefba04e8af5b",
+    "compare.py": "e6ee1300593f0e599d71e5422950107e5c0b48936336babe2c2be80aa79bc230",
+    "analyze.py": "91a61bd6aafd7d131d03ca05e2e2376f12c4bc95dfa1244ff04cf2fc27c30a13",
+    "wrapper-handoff.json": "b0bbc18fcd21df1c7e0bbc05b08a2c20ab4bd0a27e9b18aceb1d84a971045477"
+  },
+  "staticChecks": [
+    "Python AST parsed without execution",
+    "HEAD ab21aea and clean checkout",
+    "production Sources/Tests/Scripts/Package equal3fe",
+    "forward gitapply check; owned-copy apply/inverse exactroundtrip",
+    "six pair dependency files byte-identical"
+  ]
+}

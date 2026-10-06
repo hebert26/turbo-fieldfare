@@ -1,0 +1,26 @@
+{
+  "recordedAt": "2026-10-02T18:51:10.661453+00:00",
+  "decision": "REPEAT_RESOURCE_GUARD_ABORT_NO_SPEED_RESULT",
+  "previousTurn": "Progress: reviewed and built recovery candidate, resource abort preserved and committed.",
+  "buildCommit": "867e99bf202fda5c7ea54c8f4aa1744cb42a8299",
+  "executionCommit": "298c08aa785b39f6b978cc7de7035da708b3f2d8",
+  "comparisonReceipt": "scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/retry-001/comparison-20261002T184441.058744Z-1a9592d810904612aaac800cb9b9837e/receipt.json",
+  "runReceipt": "scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/retry-001/run-20261002T184441.098365Z-db868cbe53f14c9d9e4a8f8df956c79a/receipt.json",
+  "launchFreePercent": 71,
+  "minimumFreePercent": 29,
+  "wallSeconds": 150.26874254178256,
+  "childExit": -15,
+  "wrapperExit": 2,
+  "ownedPID": 87717,
+  "ownedChildExited": true,
+  "lastRSSKiB": 3012576,
+  "rssLimit": "Resident set is not Metal physical footprint.",
+  "phase": "Unknown: unchanged binary has no phase markers.",
+  "unstartedModes": [
+    "legacy",
+    "new"
+  ],
+  "completedModes": [],
+  "productionChanged": false,
+  "next": "Opus/Grok/Astra independently diagnose shared baseline memory barrier; Sol6.1 codes one evidence-based next measurement/fix. No further blind retry or relaxed guard."
+}

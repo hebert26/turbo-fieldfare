@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Synchronization
 import TurboFieldfare
@@ -5,6 +6,7 @@ import TurboFieldfareRepackCore
 import TurboFieldfare
 import Observation
 import TurboFieldfareDecodeProtocol
+import TurboFieldfareOfficialQwenSource
 
 @MainActor
 @Observable
@@ -14,7 +16,24 @@ public final class AppModel {
         case running
     }
 
+    public enum ModelSelectionTransition: Equatable, Sendable {
+        case idle
+        case unloading(from: AppModelID, to: AppModelID)
+        case loading(AppModelID)
+        case failed(AppModelID, String)
+    }
+
+    public enum QwenSourceConfigurationState: Equatable, Sendable {
+        case notConfigured
+        case checking(URL)
+        case ready(URL)
+        case failed(String)
+    }
+
     public var modelPathText: String
+    public private(set) var selectedModelID: AppModelID
+    public private(set) var loadedModelReadiness: AppLoadedModelReadiness?
+    public private(set) var modelSelectionTransition: ModelSelectionTransition = .idle
     public var promptText: String = ""
     public private(set) var imageAttachments: [AppImageAttachment] = []
     public private(set) var imageAttachmentError: String?
@@ -93,6 +112,9 @@ public final class AppModel {
     public private(set) var phase: AppGenerationPhase = .idle
     public private(set) var liveTokenCount: Int = 0
     public private(set) var liveElapsedDecodeSeconds: Double = 0
+    /// UI-only time since submission, including waits before the first token.
+    public private(set) var liveRequestElapsedSeconds: Double = 0
+    private var requestProgressTask: Task<Void, Never>?
     private var liveStructuredProgress: DecodeStructuredProgress?
     /// Display only. Never appended to the answer, conversation, or tool results.
     public private(set) var thinkingPreview: DecodeThinkingPreview?
@@ -103,6 +125,11 @@ public final class AppModel {
 
     public var generationStatusText: String? {
         guard isRunning else { return nil }
+        let seconds = max(0, Int(liveRequestElapsedSeconds))
+        return "\(generationPhaseStatusText) · \(seconds / 60):\(String(format: "%02d", seconds % 60)) elapsed"
+    }
+
+    private var generationPhaseStatusText: String {
         if isCancellationPending { return "Stopping generation" }
         if let compaction = activeAgentCompaction {
             guard compaction.replacementPromptTokens != nil else { return "Compacting history…" }
@@ -112,9 +139,12 @@ public final class AppModel {
         }
         if agentWaitingForMCP { return "Waiting for VisionCapture" }
         if phase == .prefill {
+            if livePrefillTotal > 0, livePrefillDone >= livePrefillTotal {
+                return "Waiting for first response · \(livePrefillDone) / \(livePrefillTotal) tokens"
+            }
             return livePrefillTotal > 0
-                ? "Reading prompt · \(livePrefillDone) / \(livePrefillTotal) tokens"
-                : "Processing your prompt"
+                ? "Processing prompt · \(livePrefillDone) / \(livePrefillTotal) tokens"
+                : "Preparing request"
         }
         guard phase == .decode else { return "Preparing next step" }
         let stage: String
@@ -123,10 +153,9 @@ public final class AppModel {
         case "tool_call": stage = "Preparing tool call"
         case "visible_response": stage = "Writing response"
         case "channel_label": stage = "Reading channel label"
-        default: stage = agentModeEnabled ? "Unknown output stage" : "Writing response"
+        default: stage = "Generating response"
         }
-        let seconds = max(0, Int(liveElapsedDecodeSeconds))
-        return "\(stage) · \(seconds / 60):\(String(format: "%02d", seconds % 60)) elapsed · \(liveTokenCount) tokens"
+        return "\(stage) · \(liveTokenCount) tokens"
     }
     public private(set) var livePrefillDone: Int = 0
     public private(set) var livePrefillTotal: Int = 0
@@ -140,6 +169,10 @@ public final class AppModel {
     /// Tower weights the inference process is holding mapped, reported
     /// separately because no per-process counter attributes them.
     public private(set) var visionTowerMappedBytes: UInt64?
+    /// Logical bytes owned by the committed retained conversation state.
+    public private(set) var conversationLogicalStateBytes: UInt64?
+    /// Actual bytes allocated by the loaded model's expert cache.
+    public private(set) var expertCacheBytes: UInt64?
     public private(set) var isCancellationPending: Bool = false
     /// Increments when a generation starts. The transcript watches it to put
     /// the newest turn on screen: with several images attached, the prompt and
@@ -151,6 +184,15 @@ public final class AppModel {
     private let client: any AppInferenceClient
     private let installer: any AppModelInstallerClient
     private let visionInstaller: any AppVisionPackInstallerClient
+    private let catalogEntryProvider: (AppModelID) -> AppModelCatalogEntry
+    private var qwenRegistrationURL: URL?
+    private let installationStatusProvider: (URL, AppModelCatalogEntry) -> AppModelInstallationStatus
+    private var localQwenInstaller: LocalQwenModelInstallerClient?
+    private var pendingLocalQwenInstaller: LocalQwenModelInstallerClient?
+    public private(set) var qwenSourceDirectory: URL?
+    public private(set) var qwenSourceIncludesVision = false
+    public private(set) var qwenSourceConfigurationState: QwenSourceConfigurationState =
+        .notConfigured
     private var runTask: Task<Void, Never>?
     /// One exact user instruction waiting for the current Agent Mode step to
     /// stop at a safe model boundary. It becomes a normal visible user turn,
@@ -166,8 +208,11 @@ public final class AppModel {
     private var agentCancellationIssued = false
     private var loadTask: Task<Void, Never>?
     private var installTask: Task<Void, Never>?
+    private var installReadinessTask: Task<Void, Never>?
+    private var qwenSourceConfigurationTask: Task<Void, Never>?
     private var visionInstallTask: Task<Void, Never>?
     private var unloadTask: Task<Void, Never>?
+    private var modelSelectionTask: Task<Void, Never>?
     private var agentToolLoop = VisionCaptureToolLoop()
     private var agentCheckpointRequested = false
     private var agentCheckpointRecord: String?
@@ -195,10 +240,14 @@ public final class AppModel {
     /// phase the runtime had already left.
     private var appliedLoadSequence: UInt64 = 0
     private var unloadGeneration: UInt64 = 0
+    private var modelSelectionGeneration: UInt64 = 0
     private var installGeneration: UInt64 = 0
+    private var installReadinessGeneration: UInt64 = 0
+    private var qwenSourceConfigurationGeneration: UInt64 = 0
     private var visionInstallGeneration: UInt64 = 0
     private var visionInstallCancellationRequested = false
     private var pendingExplicitLoadRuntimeKey: AppLoadedRuntimeKey?
+    private var pendingSelectionLoadID: AppModelID?
     private var activeRunRuntimeKey: AppLoadedRuntimeKey?
     private var hasHandledTerminalEvent = false
     private var hasShutDownForTermination = false
@@ -215,33 +264,91 @@ public final class AppModel {
         VisionRuntime.isSupportedOnDefaultDevice
     }
 
-    public init(modelDirectory: URL? = nil,
-                client: any AppInferenceClient = RealInferenceClient(),
-                installer: any AppModelInstallerClient = RepackModelInstallerClient(),
-                visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
-                memorySampler: AppMemorySampler = AppMemorySampler(),
-                attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
-                visionRuntimeSupported: Bool = true,
-                settingsPersistenceEnabled: Bool = false) {
-        let directory = (modelDirectory ?? AppModelLocation.defaultURL()).standardizedFileURL
+    /// A 64-slot Gemma cache is expensive to rebuild after every Agent Mode
+    /// screenshot. A 32 GB Mac can keep that cache beside the image tower.
+    static func automaticVisionResidencyPolicy(
+        expertCacheSlots: Int,
+        physicalMemoryBytes: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> VisionResidencyPolicy {
+        let thirtyTwoGiB = UInt64(32) * 1_024 * 1_024 * 1_024
+        return expertCacheSlots >= 64 && physicalMemoryBytes >= thirtyTwoGiB
+            ? .keepReady : .onDemand
+    }
+
+    public convenience init(
+        modelDirectory: URL? = nil,
+        client: any AppInferenceClient = RealInferenceClient(),
+        installer: any AppModelInstallerClient = RepackModelInstallerClient(),
+        visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
+        memorySampler: AppMemorySampler = AppMemorySampler(),
+        attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
+        visionRuntimeSupported: Bool = true,
+        settingsPersistenceEnabled: Bool = false
+    ) {
+        self.init(
+            modelDirectory: modelDirectory,
+            client: client,
+            installer: installer,
+            visionInstaller: visionInstaller,
+            memorySampler: memorySampler,
+            attachmentStore: attachmentStore,
+            visionRuntimeSupported: visionRuntimeSupported,
+            settingsPersistenceEnabled: settingsPersistenceEnabled,
+            catalogEntryProvider: { AppModelCatalog.entry(for: $0) })
+    }
+
+    /// Internal deterministic-location seam for state tests. Production always
+    /// enters through the public initializer and the live catalog resolver.
+    init(
+        modelDirectory: URL? = nil,
+        client: any AppInferenceClient = RealInferenceClient(),
+        installer: any AppModelInstallerClient = RepackModelInstallerClient(),
+        visionInstaller: any AppVisionPackInstallerClient = RepackVisionPackInstallerClient(),
+        memorySampler: AppMemorySampler = AppMemorySampler(),
+        attachmentStore: AppImageAttachmentStore = AppImageAttachmentStore(),
+        visionRuntimeSupported: Bool = true,
+        settingsPersistenceEnabled: Bool = false,
+        installationStatusProvider: @escaping (URL, AppModelCatalogEntry) -> AppModelInstallationStatus = {
+            AppModelInstallationProbe.status(at: $0, entry: $1)
+        },
+        catalogEntryProvider: @escaping (AppModelID) -> AppModelCatalogEntry
+    ) {
+        let settingsDirectory = (modelDirectory ?? AppModelLocation.defaultURL())
+            .standardizedFileURL
         let installETAClock = SuspendingClock()
         let settings = settingsPersistenceEnabled
-            ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: directory)
+            ? MacAppSettingsFileStore.loadOrCreate(forModelDirectory: settingsDirectory)
             : MacAppSettings()
+        let selectedModelID = settings.selectedModelID
+        let savedRegistration = settings.qwenRegistrationPath.map {
+            AppModelLocation.qwenRegistrationResolved(
+                logicalURL: URL(fileURLWithPath: $0, isDirectory: true)).textModelURL
+        }
+        let selectedEntry: AppModelCatalogEntry
+        if selectedModelID == .qwen3_6, let savedRegistration {
+            selectedEntry = AppModelCatalog.entry(
+                for: .qwen3_6,
+                location: AppModelLocation.qwenRegistrationResolved(
+                    logicalURL: savedRegistration))
+        } else {
+            selectedEntry = catalogEntryProvider(selectedModelID)
+        }
+        let directory = (selectedModelID == .qwen3_6 && savedRegistration != nil
+            ? selectedEntry.location.textModelURL
+            : (modelDirectory ?? selectedEntry.location.textModelURL))
+        self.selectedModelID = selectedModelID
         self.modelPathText = directory.path
-        // The app always releases the image tower after each image. Keeping it
-        // resident saves a few hundred milliseconds on a run of images and
-        // holds about 1 GB of page cache to do it — a trade worth exposing to
-        // a CLI or server operator, not to someone using the app, where it was
-        // one more setting whose effect no figure on screen could show.
-        // `keepReady` remains available through AppRuntimeOptions for those.
+        // Keep the large expert cache across Agent Mode screenshots when this
+        // Mac has enough unified memory. Releasing 64 slots makes the next
+        // decode rebuild several gigabytes of cache.
         self.runtimeOptions = AppRuntimeOptions(
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
-            visionResidencyPolicy: .onDemand,
-            toolThinkingEnabled: settings.toolThinkingEnabled)
-        self.maxContextTokens = settings.contextTokens
+            visionResidencyPolicy: Self.automaticVisionResidencyPolicy(
+                expertCacheSlots: settings.expertCacheSlots),
+            toolThinkingEnabled: settings.toolThinkingEnabled(for: selectedModelID))
+        self.maxContextTokens = settings.contextTokens(for: selectedModelID)
         self.temperature = settings.temperature
         self.topKEnabled = settings.topKEnabled
         self.topK = settings.topK
@@ -251,17 +358,36 @@ public final class AppModel {
         self.showPromptExamples = settings.showPromptExamples
         self.loadModelOnLaunch = settings.loadModelOnLaunch
         self.agentModeEnabled = settings.agentModeEnabled
-        self.installationStatus = AppModelInstallationProbe.status(at: directory)
-        self.visionInstallationStatus = AppVisionPackInstallationProbe.status(at: directory)
+        self.installationStatus = installationStatusProvider(directory, selectedEntry)
+        self.visionInstallationStatus = AppVisionPackInstallationProbe.status(
+            at: directory,
+            entry: selectedEntry)
         self.client = client
         self.installer = installer
         self.visionInstaller = visionInstaller
+        self.catalogEntryProvider = catalogEntryProvider
+        self.qwenRegistrationURL = savedRegistration
+        self.installationStatusProvider = installationStatusProvider
         self.memorySampler = memorySampler
         self.attachmentStore = attachmentStore
         self.isVisionRuntimeSupported = visionRuntimeSupported
         self.settingsPersistenceEnabled = settingsPersistenceEnabled
         self.installETAClock = installETAClock
         self.installETAOrigin = installETAClock.now
+        if let path = settings.qwenSourceRoot {
+            let source = Self.physicalSourceURL(
+                URL(fileURLWithPath: path, isDirectory: true))
+            self.qwenSourceDirectory = source
+            self.qwenSourceIncludesVision = true
+            self.localQwenInstaller = try? LocalQwenModelInstallerClient(
+                entry: catalogEntry(for: .qwen3_6), sourceDirectory: source)
+            if FileManager.default.fileExists(atPath: source.path) {
+                self.qwenSourceConfigurationState = .ready(source)
+            } else {
+                self.qwenSourceConfigurationState = .failed(
+                    "The saved Qwen source folder moved. Restore it at its registered path or select it again to create a new registration.")
+            }
+        }
         // Staged images of runs that were killed before they could clean up;
         // nothing else ever removes them.
         AppImageAttachmentStore.sweepAbandoned()
@@ -270,6 +396,184 @@ public final class AppModel {
     }
 
     public var isRunning: Bool { runState == .running }
+
+    public var modelCatalogEntries: [AppModelCatalogEntry] {
+        AppModelID.allCases.map(catalogEntry(for:)).filter {
+            $0.id == selectedModelID
+                || isModelInstallable($0.id)
+                || installationStatus(for: $0.id) == .complete
+        }
+    }
+
+    public var selectedModelEntry: AppModelCatalogEntry {
+        catalogEntry(for: selectedModelID)
+    }
+
+    private func catalogEntry(for id: AppModelID) -> AppModelCatalogEntry {
+        guard id == .qwen3_6, let qwenRegistrationURL else {
+            return catalogEntryProvider(id)
+        }
+        return AppModelCatalog.entry(
+            for: id,
+            location: AppModelLocation.qwenRegistrationResolved(
+                logicalURL: qwenRegistrationURL))
+    }
+
+    private func resolvedModelURL(_ url: URL) -> URL {
+        selectedModelID == .qwen3_6
+            ? AppModelLocation.qwenRegistrationResolved(logicalURL: url).textModelURL
+            : url.standardizedFileURL
+    }
+
+    public var isModelSelectionInProgress: Bool {
+        switch modelSelectionTransition {
+        case .unloading, .loading: true
+        case .idle, .failed: false
+        }
+    }
+
+    public var canSelectModel: Bool {
+        !isRunning && !loadState.isLoading && !isInstallingModel
+            && !isVisionCompanionOperationInProgress
+            && modelSelectionTask == nil
+    }
+
+    public func installationStatus(for modelID: AppModelID) -> AppModelInstallationStatus {
+        let entry = catalogEntry(for: modelID)
+        return installationStatusProvider(entry.location.textModelURL, entry)
+    }
+
+    public func isModelSelectable(_ modelID: AppModelID) -> Bool {
+        isModelInstallable(modelID) || installationStatus(for: modelID) == .complete
+    }
+
+    public func isModelInstallable(_ modelID: AppModelID) -> Bool {
+        let entry = catalogEntry(for: modelID)
+        return entry.isInstallable
+            || (modelID == .qwen3_6 && localQwenInstaller != nil)
+    }
+
+    public func configureQwenSourceDirectory(
+        _ sourceDirectory: URL,
+        includesVision: Bool = true
+    ) {
+        guard canSelectModel, !loadState.isReady else { return }
+        let sourceDirectory = Self.physicalSourceURL(sourceDirectory)
+        if let existing = localQwenInstaller ?? pendingLocalQwenInstaller,
+           existing.hasPartialInstall,
+           (existing.sourceDirectory.path != sourceDirectory.path
+                || existing.includesVision != includesVision) {
+            error = .modelLoadFailed(
+                "The saved Qwen registration is busy. Wait for verification before choosing another source folder.")
+            return
+        }
+        do {
+            let current = catalogEntry(for: .qwen3_6).location.textModelURL
+            var currentInfo = stat()
+            if lstat(current.path, &currentInfo) == 0 {
+                let existing = try? OfficialSourceRegistration.inspect(at: current)
+                if existing?.sourceRoot != sourceDirectory.path {
+                    let sibling = current.deletingLastPathComponent()
+                        .appendingPathComponent(
+                            "qwen3.6-35b-a3b-\(UUID().uuidString.lowercased()).gturbo",
+                            isDirectory: true)
+                    qwenRegistrationURL = sibling
+                    if selectedModelID == .qwen3_6 {
+                        modelPathText = sibling.path
+                        installationStatus = .missing
+                    }
+                }
+            }
+            let client = try LocalQwenModelInstallerClient(
+                entry: catalogEntry(for: .qwen3_6),
+                sourceDirectory: sourceDirectory,
+                includesVision: includesVision)
+            installReadinessGeneration &+= 1
+            installReadinessTask?.cancel()
+            installReadinessTask = nil
+            localQwenInstaller?.cancel()
+            pendingLocalQwenInstaller?.cancel()
+            localQwenInstaller = nil
+            pendingLocalQwenInstaller = client
+            qwenSourceConfigurationGeneration &+= 1
+            let generation = qwenSourceConfigurationGeneration
+            qwenSourceConfigurationTask?.cancel()
+            qwenSourceConfigurationState = .checking(client.sourceDirectory)
+            qwenSourceDirectory = client.sourceDirectory
+            qwenSourceIncludesVision = includesVision
+            if selectedModelID == .qwen3_6 {
+                installReadiness = .checking
+            }
+            error = nil
+            qwenSourceConfigurationTask = Task { [weak self, client] in
+                do {
+                    let requirement = try await client.checkInstallRequirement()
+                    guard let self,
+                          generation == self.qwenSourceConfigurationGeneration else { return }
+                    self.localQwenInstaller = client
+                    self.pendingLocalQwenInstaller = nil
+                    self.qwenSourceConfigurationState = .ready(client.sourceDirectory)
+                    self.persistSettings()
+                    self.qwenSourceConfigurationTask = nil
+                    if self.selectedModelID == .qwen3_6 {
+                        self.installReadiness = requirement.canInstall
+                            ? .ready(requirement)
+                            : .insufficientSpace(requirement)
+                        self.refreshVisionInstallReadiness()
+                    }
+                } catch is CancellationError {
+                } catch {
+                    guard let self,
+                          generation == self.qwenSourceConfigurationGeneration else { return }
+                    self.localQwenInstaller = nil
+                    let message = "The Qwen source folder is unavailable: \(error)"
+                    self.qwenSourceConfigurationState = .failed(message)
+                    self.qwenSourceConfigurationTask = nil
+                    self.error = .modelLoadFailed(message)
+                    if self.selectedModelID == .qwen3_6 {
+                        self.installReadiness = .failed(message)
+                    }
+                }
+            }
+        } catch {
+            let message = "The Qwen source folder could not be configured: \(error)"
+            qwenSourceConfigurationState = .failed(message)
+            self.error = .modelLoadFailed(message)
+        }
+    }
+
+    public func clearQwenSourceDirectory() {
+        guard canSelectModel else { return }
+        guard (localQwenInstaller ?? pendingLocalQwenInstaller)?.hasPartialInstall != true else {
+            error = .modelLoadFailed(
+                "Wait for Qwen source verification before clearing its folder.")
+            return
+        }
+        qwenSourceConfigurationGeneration &+= 1
+        qwenSourceConfigurationTask?.cancel()
+        qwenSourceConfigurationTask = nil
+        installReadinessGeneration &+= 1
+        installReadinessTask?.cancel()
+        installReadinessTask = nil
+        localQwenInstaller?.cancel()
+        pendingLocalQwenInstaller?.cancel()
+        localQwenInstaller = nil
+        pendingLocalQwenInstaller = nil
+        qwenSourceDirectory = nil
+        qwenSourceIncludesVision = false
+        qwenSourceConfigurationState = .notConfigured
+        persistSettings()
+        if selectedModelID == .qwen3_6 {
+            refreshInstallReadiness()
+            refreshVisionInstallReadiness()
+        }
+    }
+
+    private static func physicalSourceURL(_ url: URL) -> URL {
+        guard let physical = realpath(url.path, nil) else { return url }
+        defer { free(physical) }
+        return URL(fileURLWithPath: String(cString: physical), isDirectory: true)
+    }
 
     public var isModelAvailable: Bool { loadState.isReady }
 
@@ -280,6 +584,7 @@ public final class AppModel {
 
     public var canLoadModel: Bool {
         isModelInstalled && !isRunning && !isVisionCompanionOperationInProgress
+            && modelSelectionTask == nil
             && (loadState == .notLoaded || loadState.isFailed)
     }
 
@@ -304,6 +609,13 @@ public final class AppModel {
 
     public var installDescriptor: AppModelInstallDescriptor { installer.descriptor }
 
+    public var selectedTextInstallDescriptor: AppModelInstallDescriptor? {
+        guard case .remoteRepack(let text, _) = selectedModelEntry.installRoute else {
+            return nil
+        }
+        return text
+    }
+
     public var installRequirement: AppModelInstallRequirement? {
         installReadiness.requirement
     }
@@ -312,19 +624,30 @@ public final class AppModel {
 
     public var canInstallModel: Bool {
         guard case .ready = installReadiness else { return false }
-        return !isRunning && !loadState.isLoading && !isInstallingModel
+        return isModelInstallable(selectedModelID)
+            && !isRunning && !loadState.isLoading && !isInstallingModel
             && !isVisionCompanionOperationInProgress
+            && modelSelectionTask == nil
             && requiresModelInstallation
     }
 
     public var canCancelInstall: Bool { installState.canCancel }
 
-    public var isVisionPackInstalled: Bool { visionInstallationStatus == .complete }
+    public var isVisionPackInstalled: Bool {
+        visionInstallationStatus == .complete
+    }
 
     public var isInstallingVisionPack: Bool { visionInstallState.isInstalling }
 
     public var visionInstallDescriptor: AppModelInstallDescriptor {
         visionInstaller.descriptor
+    }
+
+    public var selectedVisionInstallDescriptor: AppModelInstallDescriptor? {
+        guard case .remoteRepack(_, let vision) = selectedModelEntry.installRoute else {
+            return nil
+        }
+        return vision
     }
 
     /// Every companion Download, Resume, Verify, Activate, Repair, and Remove
@@ -341,10 +664,12 @@ public final class AppModel {
     public var canBeginVisionCompanionOperation: Bool {
         !isRunning && !loadState.isLoading && !loadState.isReady
             && !isInstallingModel && !isVisionCompanionOperationInProgress
+            && modelSelectionTask == nil
     }
 
     public var canInstallVisionPack: Bool {
         guard isVisionRuntimeSupported else { return false }
+        guard selectedModelEntry.isInstallable else { return false }
         // A layout with nowhere to put a companion cannot be repaired by
         // downloading one, so do not offer to.
         guard visionInstallationStatus != .unsupportedLayout else { return false }
@@ -356,6 +681,7 @@ public final class AppModel {
 
     public var canActivateVisionPack: Bool {
         guard isVisionRuntimeSupported else { return false }
+        guard selectedModelEntry.isInstallable else { return false }
         guard case .readyToActivate = visionInstallState else { return false }
         return canBeginVisionCompanionOperation
     }
@@ -443,7 +769,10 @@ public final class AppModel {
         case .downloadingMetadata: return "Downloading metadata"
         case .planning: return "Planning installation"
         case .reservingOutput: return "Reserving storage"
-        case .copyingPayload: return "Downloading model"
+        case .copyingPayload:
+            return selectedModelID == .qwen3_6
+                ? "Verifying original BF16 source"
+                : "Downloading model"
         case .hashingOutput(let file): return "Verifying \(file)"
         case .finalizing: return "Finalizing installation"
         case .activating:
@@ -452,8 +781,8 @@ public final class AppModel {
             }
             return "Verifying image support \(Int(fraction * 100))%"
         case .cancelling: return "Cancelling"
-        case .discarding: return "Discarding download"
-        case .cancelled: return "Download paused"
+        case .discarding: return selectedModelID == .qwen3_6 ? "Clearing registration" : "Discarding download"
+        case .cancelled: return selectedModelID == .qwen3_6 ? "Verification cancelled" : "Download paused"
         case .readyToActivate: return "Ready to activate"
         case .recoverable: return "Saved download needs attention"
         case .installed: return "Model installed"
@@ -578,7 +907,7 @@ public final class AppModel {
     }
 
     public var presentation: AppPresentationState {
-        AppPresentationState.resolve(AppPresentationSnapshot(
+        var presentation = AppPresentationState.resolve(AppPresentationSnapshot(
             requiresInstallation: requiresModelInstallation,
             installState: installState,
             installReadiness: installReadiness,
@@ -592,6 +921,10 @@ public final class AppModel {
             lastStopReason: diagnostics?.stopReason,
             isVisionCompanionOperationInProgress: isVisionCompanionOperationInProgress,
             terminalError: hasHandledTerminalEvent ? error : nil))
+        if selectedModelID == .qwen3_6, case .copyingPayload = installState {
+            presentation.label = "Verifying source"
+        }
+        return presentation
     }
 
     public var currentProcessMemoryBytes: UInt64? {
@@ -618,27 +951,127 @@ public final class AppModel {
         AppLoadedRuntimeKey(modelDirectory: URL(fileURLWithPath: modelPathText),
                             maxContextTokens: maxContextTokens,
                             options: runtimeOptions,
-                            forceLogitsHead: currentForceLogitsHead)
+                            forceLogitsHead: currentForceLogitsHead,
+                            preservePhysicalPath: selectedModelID == .qwen3_6)
     }
 
     private var currentForceLogitsHead: Bool {
         temperature != 0
     }
 
+    /// Changes catalog identity only from a resting app state. The old runtime
+    /// is fully retired before the selected paths, probes, and settings move to
+    /// the target, so no request can observe two mapped model families.
+    public func selectModel(_ modelID: AppModelID) {
+        guard canSelectModel, modelID != selectedModelID else { return }
+        guard isModelSelectable(modelID) else {
+            let entry = catalogEntry(for: modelID)
+            modelSelectionTransition = .failed(
+                modelID,
+                "\(entry.displayName) is unavailable until a verified model is present.")
+            return
+        }
+        guard let lifecycle = client as? AppModelLifecycleClient else {
+            modelSelectionTransition = .failed(
+                modelID,
+                "This client has no model load lifecycle.")
+            return
+        }
+
+        persistSettings()
+        let previousID = selectedModelID
+        runIdentity &+= 1
+        loadGeneration &+= 1
+        loadTask?.cancel()
+        loadTask = nil
+        installReadinessGeneration &+= 1
+        installReadinessTask?.cancel()
+        installReadinessTask = nil
+        pendingExplicitLoadRuntimeKey = nil
+        modelSelectionGeneration &+= 1
+        let generation = modelSelectionGeneration
+        loadedModelReadiness = nil
+        loadedRuntimeKey = nil
+        conversationLogicalStateBytes = nil
+        expertCacheBytes = nil
+        diagnostics = nil
+        error = nil
+        loadState = .unloading
+        modelSelectionTransition = .unloading(from: previousID, to: modelID)
+
+        modelSelectionTask = Task { [weak self, lifecycle] in
+            await lifecycle.unload()
+            guard let self, generation == self.modelSelectionGeneration else { return }
+            self.finishModelRetirementAndSelect(modelID, generation: generation)
+        }
+    }
+
+    private func finishModelRetirementAndSelect(
+        _ modelID: AppModelID,
+        generation: UInt64
+    ) {
+        guard generation == modelSelectionGeneration else { return }
+        modelSelectionTask = nil
+        liveMemoryBytes = nil
+        liveResidentBytes = nil
+        visionTowerMappedBytes = nil
+        conversationLogicalStateBytes = nil
+        expertCacheBytes = nil
+        endConversationForReleasedKV()
+        clearImages()
+
+        let entry = catalogEntry(for: modelID)
+        selectedModelID = modelID
+        modelPathText = entry.location.textModelURL.path
+        applyPersistedSettings(
+            forModelDirectory: entry.location.textModelURL,
+            modelID: modelID)
+        resetInstallETA()
+        resetVisionInstallETA()
+        installState = .idle
+        visionInstallState = .idle
+        installReadiness = .checking
+        visionInstallReadiness = .checking
+        activeRunRuntimeKey = nil
+        loadState = .notLoaded
+        installationStatus = installationStatusProvider(entry.location.textModelURL, entry)
+        visionInstallationStatus = AppVisionPackInstallationProbe.status(
+            at: entry.location.textModelURL,
+            entry: entry)
+        refreshInstallReadiness()
+        refreshVisionInstallReadiness()
+        persistSettings()
+
+        guard isModelInstalled else {
+            let message = isModelInstallable(modelID)
+                ? "\(entry.displayName) must be installed before it can load."
+                : "\(entry.displayName) is unavailable until a verified model is present."
+            modelSelectionTransition = .failed(modelID, message)
+            error = .modelLoadFailed(message)
+            return
+        }
+
+        modelSelectionTransition = .loading(modelID)
+        pendingSelectionLoadID = modelID
+        beginLoad()
+    }
+
     public func setModelURL(_ url: URL) {
-        guard !isRunning else { return }
-        let path = url.standardizedFileURL.path
+        guard canSelectModel else { return }
+        let path = resolvedModelURL(url).path
         guard path != modelPathText else { return }
 
         modelPathText = path
         clearImages()
         applyPersistedSettings(
-            forModelDirectory: URL(fileURLWithPath: path, isDirectory: true))
+            forModelDirectory: URL(fileURLWithPath: path, isDirectory: true),
+            modelID: selectedModelID)
         loadGeneration &+= 1
         loadTask?.cancel()
         loadTask = nil
         installGeneration &+= 1
         installTask?.cancel()
+        installReadinessTask?.cancel()
         installer.cancel()
         installTask = nil
         visionInstallGeneration &+= 1
@@ -649,17 +1082,23 @@ public final class AppModel {
         resetInstallETA()
         installState = .idle
         visionInstallState = .idle
+        installReadiness = .checking
+        visionInstallReadiness = .checking
         pendingExplicitLoadRuntimeKey = nil
         activeRunRuntimeKey = nil
         loadedRuntimeKey = nil
+        loadedModelReadiness = nil
+        modelSelectionTransition = .idle
         loadState = .notLoaded
         endConversationForReleasedKV()
         diagnostics = nil
         error = nil
         phase = .idle
-        installationStatus = AppModelInstallationProbe.status(at: URL(fileURLWithPath: path))
+        installationStatus = installationStatusProvider(
+            URL(fileURLWithPath: path), selectedModelEntry)
         visionInstallationStatus = AppVisionPackInstallationProbe.status(
-            at: URL(fileURLWithPath: path))
+            at: URL(fileURLWithPath: path),
+            entry: selectedModelEntry)
         refreshInstallReadiness()
         refreshVisionInstallReadiness()
 
@@ -1004,7 +1443,10 @@ public final class AppModel {
         let runtimeKey = AppLoadedRuntimeKey(modelDirectory: directory,
                                              maxContextTokens: maxContext,
                                              options: runtimeOptions,
-                                             forceLogitsHead: forceLogitsHead)
+                                             forceLogitsHead: forceLogitsHead,
+                                             preservePhysicalPath: selectedModelID == .qwen3_6)
+        let entry = selectedModelEntry
+        let requiredSelectionID = pendingSelectionLoadID
         // The session is loaded with the same normalized options a run sends.
         // Loading with the raw settings instead meant a control that is off but
         // still carries a non-default value — RDADVISE off with its policy left
@@ -1019,8 +1461,13 @@ public final class AppModel {
         pendingExplicitLoadRuntimeKey = runtimeKey
         error = nil
         appliedLoadSequence = 0
+        loadedModelReadiness = nil
+        conversationLogicalStateBytes = nil
+        expertCacheBytes = nil
+        modelSelectionTransition = .loading(selectedModelID)
         loadState = .loading(.validatingDirectory)
         let emitted = Mutex<UInt64>(0)
+        let completedReadyState = Mutex<AppModelLoadState?>(nil)
         loadTask = Task.detached { [weak self, lifecycle, pendingUnload] in
             do {
                 await pendingUnload?.value
@@ -1029,6 +1476,10 @@ public final class AppModel {
                                                  maxContextTokens: maxContext,
                                                  options: options,
                                                  forceLogitsHead: forceLogitsHead) { [weak self] state in
+                    if case .ready = state {
+                        completedReadyState.withLock { $0 = state }
+                        return
+                    }
                     // Stamped where the phase is emitted, in order; checked
                     // where it is applied, which is not.
                     let sequence = emitted.withLock { value -> UInt64 in
@@ -1040,6 +1491,19 @@ public final class AppModel {
                                              sequence: sequence)
                     }
                 }
+                guard let readyState = completedReadyState.withLock({ $0 }) else {
+                    throw AppInferenceError.modelLoadFailed(
+                        "The model loader finished without reporting a ready state.")
+                }
+                let readiness = await lifecycle.loadedModelReadiness
+                await self?.finishVerifiedLoad(
+                    readyState,
+                    readiness: readiness,
+                    entry: entry,
+                    runtimeKey: runtimeKey,
+                    requiredSelectionID: requiredSelectionID,
+                    lifecycle: lifecycle,
+                    generation: generation)
             } catch is CancellationError {
             } catch let appError as AppInferenceError {
                 await self?.applyLoadState(.failed(appError), generation: generation)
@@ -1052,6 +1516,83 @@ public final class AppModel {
         }
     }
 
+    private func finishVerifiedLoad(
+        _ readyState: AppModelLoadState,
+        readiness: AppLoadedModelReadiness?,
+        entry: AppModelCatalogEntry,
+        runtimeKey: AppLoadedRuntimeKey,
+        requiredSelectionID: AppModelID?,
+        lifecycle: any AppModelLifecycleClient,
+        generation: UInt64
+    ) async {
+        guard generation == loadGeneration,
+              selectedModelID == entry.id else { return }
+        let installationIsVerified = installationStatusProvider(
+            runtimeKey.modelDirectory, entry) == .complete
+        let readinessMatches = Self.readiness(
+            readiness,
+            matches: entry,
+            runtimeKey: runtimeKey,
+            allowLegacyGemmaAbsence: requiredSelectionID == nil)
+        guard installationIsVerified, readinessMatches else {
+            await lifecycle.unload()
+            guard generation == loadGeneration else { return }
+            loadedRuntimeKey = nil
+            loadedModelReadiness = nil
+            conversationLogicalStateBytes = nil
+            expertCacheBytes = nil
+            pendingExplicitLoadRuntimeKey = nil
+            pendingSelectionLoadID = nil
+            let message = "Loaded model readiness did not match \(entry.displayName)."
+            loadState = .failed(.modelLoadFailed(message))
+            error = .modelLoadFailed(message)
+            modelSelectionTransition = .failed(entry.id, message)
+            endConversationForReleasedKV()
+            return
+        }
+
+        loadedModelReadiness = readiness
+        pendingSelectionLoadID = nil
+        applyLoadState(readyState, generation: generation)
+        guard loadState.isReady else { return }
+        modelSelectionTransition = .idle
+    }
+
+    private static func readiness(
+        _ readiness: AppLoadedModelReadiness?,
+        matches entry: AppModelCatalogEntry,
+        runtimeKey: AppLoadedRuntimeKey,
+        allowLegacyGemmaAbsence: Bool
+    ) -> Bool {
+        guard let readiness else {
+            // Existing test and injected lifecycle clients predate readiness.
+            // Keep their Gemma-only seam while every catalog switch and every
+            // Qwen load requires an explicit loader-produced identity.
+            return allowLegacyGemmaAbsence && entry.family == .gemma4
+        }
+        switch readiness {
+        case .gemma(let toolThinkingEnabled):
+            return entry.family == .gemma4
+                && toolThinkingEnabled == runtimeKey.toolThinkingEnabled
+        case .qwen(let identity):
+            return identity.family == .qwen3_6
+                && entry.accepts(
+                    family: .qwen3_6,
+                    modelID: identity.modelID,
+                    revision: identity.sourceRevision,
+                    sourceIndexSHA256: identity.sourceIndexSHA256)
+        case .qwenSource(let identity):
+            guard entry.family == .qwen3_6,
+                  identity.kind == .officialSafetensorsBF16V1,
+                  let descriptor = try? OfficialSourceRegistration.inspect(
+                    at: runtimeKey.modelDirectory) else { return false }
+            return descriptor.repository == entry.sourceIdentity.repoID
+                && descriptor.revision == entry.sourceIdentity.revision
+                && descriptor.storageProfile == OfficialQwenSourceIdentity.pinned.storageProfile
+                && descriptor.contentSHA256 == identity.contentDigest
+        }
+    }
+
     public func cancelLoad() {
         guard canCancelLoad, let lifecycle = client as? AppModelLifecycleClient else { return }
         loadState = .cancelling
@@ -1059,6 +1600,11 @@ public final class AppModel {
         loadTask?.cancel()
         loadTask = nil
         pendingExplicitLoadRuntimeKey = nil
+        pendingSelectionLoadID = nil
+        loadedModelReadiness = nil
+        conversationLogicalStateBytes = nil
+        expertCacheBytes = nil
+        modelSelectionTransition = .idle
         unloadGeneration &+= 1
         let generation = unloadGeneration
         unloadTask = Task { [weak self, lifecycle] in
@@ -1078,19 +1624,26 @@ public final class AppModel {
     /// directly. Calling this from those sites is what actually runs it.
     private func endConversationForReleasedKV() {
         serviceEpoch = nil
+        conversationLogicalStateBytes = nil
+        expertCacheBytes = nil
         archiveConversationContext()
     }
 
     public func unloadModel() {
         guard canUnloadModel, let lifecycle = client as? AppModelLifecycleClient else { return }
         loadState = .unloading
+        conversationLogicalStateBytes = nil
+        expertCacheBytes = nil
         unloadGeneration &+= 1
         let generation = unloadGeneration
         unloadTask = Task { [weak self, lifecycle] in
             await lifecycle.unload()
             guard let self, generation == self.unloadGeneration else { return }
             self.loadedRuntimeKey = nil
+            self.loadedModelReadiness = nil
             self.liveMemoryBytes = nil
+            self.conversationLogicalStateBytes = nil
+            self.expertCacheBytes = nil
             self.loadState = .notLoaded
             endConversationForReleasedKV()
             self.clearUnloadTask(generation: generation)
@@ -1099,18 +1652,47 @@ public final class AppModel {
 
     public func installModel() {
         guard !isRunning, !loadState.isLoading, !isInstallingModel,
+              isModelInstallable(selectedModelID),
               requiresModelInstallation else {
             return
         }
-        refreshInstallReadiness()
-        guard canInstallModel else { return }
+        if selectedModelID == .qwen3_6 {
+            guard canInstallModel else {
+                refreshInstallReadiness()
+                return
+            }
+        } else {
+            refreshInstallReadiness()
+            guard canInstallModel else { return }
+        }
         installTask?.cancel()
-        installer.cancel()
+        if selectedModelID == .qwen3_6 {
+            localQwenInstaller?.cancel()
+        } else {
+            installer.cancel()
+        }
         resetInstallETA()
         let outputDirectory = URL(fileURLWithPath: modelPathText)
         installGeneration &+= 1
         let generation = installGeneration
         installState = .checking
+        if selectedModelID == .qwen3_6, let qwenInstaller = localQwenInstaller {
+            let resume = qwenInstaller.canResume
+            installTask = Task { [weak self, qwenInstaller] in
+                do {
+                    for try await event in qwenInstaller.install(resume: resume) {
+                        guard let self else { return }
+                        self.applyInstallEvent(event, generation: generation)
+                    }
+                    self?.finishInstallStream(generation: generation)
+                } catch is CancellationError {
+                    self?.finishInstallCancellation(generation: generation)
+                } catch {
+                    self?.finishInstallFailure(error, generation: generation)
+                }
+            }
+            return
+        }
         installTask = Task { [weak self, installer] in
             do {
                 for try await event in installer.installDefaultModel(outputDirectory: outputDirectory) {
@@ -1129,10 +1711,19 @@ public final class AppModel {
     public func cancelInstall() {
         guard canCancelInstall else { return }
         installState = .cancelling
-        installer.cancel()
+        if selectedModelID == .qwen3_6 {
+            localQwenInstaller?.cancel()
+            installTask?.cancel()
+        } else {
+            installer.cancel()
+        }
     }
 
     public var hasPartialModelDownload: Bool {
+        if selectedModelID == .qwen3_6 {
+            return (localQwenInstaller ?? pendingLocalQwenInstaller)?
+                .hasPartialInstall == true
+        }
         guard let paths = try? RemoteInstallPaths(outputDirectory: modelPathText) else {
             return false
         }
@@ -1150,6 +1741,21 @@ public final class AppModel {
         installGeneration &+= 1
         let generation = installGeneration
         installState = .discarding
+        if selectedModelID == .qwen3_6,
+           let qwenInstaller = localQwenInstaller ?? pendingLocalQwenInstaller {
+            installTask = Task { [weak self, qwenInstaller] in
+                do {
+                    try await qwenInstaller.discardPartialInstall()
+                    guard let self, generation == self.installGeneration else { return }
+                    self.installTask = nil
+                    self.installState = .idle
+                    self.refreshInstallReadiness()
+                } catch {
+                    self?.finishInstallFailure(error, generation: generation)
+                }
+            }
+            return
+        }
         installTask = Task { [weak self, installer] in
             do {
                 try await installer.discardPartialInstall(
@@ -1165,6 +1771,7 @@ public final class AppModel {
     }
 
     public var hasPartialVisionPackDownload: Bool {
+        guard selectedModelEntry.isInstallable else { return false }
         guard let output = try? VisionPackLocation.companionURL(
             forTextModel: URL(fileURLWithPath: modelPathText, isDirectory: true)),
               let paths = try? RemoteInstallPaths(outputDirectory: output.path) else {
@@ -1179,7 +1786,9 @@ public final class AppModel {
     }
 
     public var canRemoveVisionPack: Bool {
-        hasVisionPackDirectory && canBeginVisionCompanionOperation
+        selectedModelEntry.isInstallable
+            && hasVisionPackDirectory
+            && canBeginVisionCompanionOperation
     }
 
     public var hasVisionPackDirectory: Bool {
@@ -1198,9 +1807,9 @@ public final class AppModel {
         visionInstallCancellationRequested = false
         visionInstallTask?.cancel()
         visionInstaller.cancel()
-        let textModelDirectory = URL(
+        let textModelDirectory = resolvedModelURL(URL(
             fileURLWithPath: modelPathText,
-            isDirectory: true).standardizedFileURL
+            isDirectory: true))
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
         visionInstallState = .checking
@@ -1233,8 +1842,8 @@ public final class AppModel {
 
     public func activateVisionPack() {
         guard canActivateVisionPack else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         visionInstallCancellationRequested = false
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
@@ -1289,8 +1898,8 @@ public final class AppModel {
 
     public func discardVisionPackDownload() {
         guard canDiscardVisionPackDownload else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         visionInstallCancellationRequested = false
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
@@ -1322,8 +1931,8 @@ public final class AppModel {
     public func removeVisionPack() {
         isConfirmingVisionPackRemoval = false
         guard canRemoveVisionPack else { return }
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         visionInstallCancellationRequested = false
         visionInstallGeneration &+= 1
         let generation = visionInstallGeneration
@@ -1345,23 +1954,58 @@ public final class AppModel {
 
     public func refreshInstallReadiness() {
         refreshInstallReadiness(
-            at: URL(fileURLWithPath: modelPathText, isDirectory: true).standardizedFileURL)
+            at: resolvedModelURL(URL(fileURLWithPath: modelPathText, isDirectory: true)))
     }
 
     public func recheckModelAtCurrentLocation() {
-        let directory = URL(fileURLWithPath: modelPathText, isDirectory: true)
-            .standardizedFileURL
+        let directory = resolvedModelURL(
+            URL(fileURLWithPath: modelPathText, isDirectory: true))
         modelPathText = directory.path
         refreshInstallReadiness(at: directory)
         refreshVisionInstallReadiness(at: directory)
     }
 
     private func refreshInstallReadiness(at outputDirectory: URL) {
-        installationStatus = AppModelInstallationProbe.status(
-            at: outputDirectory,
-            descriptor: installer.descriptor)
+        installReadinessGeneration &+= 1
+        let readinessGeneration = installReadinessGeneration
+        installReadinessTask?.cancel()
+        installReadinessTask = nil
+        installationStatus = installationStatusProvider(outputDirectory, selectedModelEntry)
         guard !isModelInstalled else { return }
+        guard isModelInstallable(selectedModelID) else {
+            installReadiness = .failed(
+                "A verified local source is required to install \(selectedModelEntry.displayName).")
+            return
+        }
         installReadiness = .checking
+        if selectedModelID == .qwen3_6 {
+            guard let localQwenInstaller else {
+                installReadiness = .failed(
+                    "Choose the verified local Qwen source folder first.")
+                return
+            }
+            installReadinessTask = Task { [weak self, localQwenInstaller] in
+                do {
+                    let requirement = try await localQwenInstaller
+                        .checkInstallRequirement()
+                    guard let self,
+                          readinessGeneration == self.installReadinessGeneration,
+                          self.selectedModelID == .qwen3_6 else { return }
+                    self.installReadiness = requirement.canInstall
+                        ? .ready(requirement)
+                        : .insufficientSpace(requirement)
+                    self.installReadinessTask = nil
+                } catch is CancellationError {
+                } catch {
+                    guard let self,
+                          readinessGeneration == self.installReadinessGeneration,
+                          self.selectedModelID == .qwen3_6 else { return }
+                    self.installReadiness = .failed("\(error)")
+                    self.installReadinessTask = nil
+                }
+            }
+            return
+        }
         do {
             let requirement = try installer.checkInstallRequirement(
                 outputDirectory: outputDirectory)
@@ -1375,13 +2019,14 @@ public final class AppModel {
 
     public func refreshVisionInstallReadiness() {
         refreshVisionInstallReadiness(
-            at: URL(fileURLWithPath: modelPathText, isDirectory: true)
-                .standardizedFileURL)
+            at: resolvedModelURL(
+                URL(fileURLWithPath: modelPathText, isDirectory: true)))
     }
 
     private func refreshVisionInstallReadiness(at textModelDirectory: URL) {
         visionInstallationStatus = AppVisionPackInstallationProbe.status(
-            at: textModelDirectory)
+            at: textModelDirectory,
+            entry: selectedModelEntry)
         // Removing the companion leaves any attached image unsendable, and the
         // composer would keep offering it with nothing able to encode it.
         // Only once the dust has settled: the probe verifies the pack on disk,
@@ -1403,6 +2048,11 @@ public final class AppModel {
             return
         }
         guard !isVisionPackInstalled else { return }
+        guard selectedModelEntry.isInstallable else {
+            visionInstallReadiness = .failed(
+                "Image support is unavailable for this model installation.")
+            return
+        }
         if visionInstaller.preparedInstallIsValid(
             textModelDirectory: textModelDirectory) {
             let output = try? VisionPackLocation.companionURL(
@@ -1481,11 +2131,12 @@ public final class AppModel {
             visionInstallTask = nil
         case .installed:
             resetVisionInstallETA()
-            let textModelDirectory = URL(
+            let textModelDirectory = resolvedModelURL(URL(
                 fileURLWithPath: modelPathText,
-                isDirectory: true).standardizedFileURL
+                isDirectory: true))
             visionInstallationStatus = AppVisionPackInstallationProbe.status(
-                at: textModelDirectory)
+                at: textModelDirectory,
+                entry: selectedModelEntry)
             guard isVisionPackInstalled else {
                 finishVisionInstallFailure(
                     RepackError.configurationInvalid(
@@ -1539,9 +2190,9 @@ public final class AppModel {
         resetVisionInstallETA()
         visionInstallTask = nil
         let hasSavedDownload = hasPartialVisionPackDownload
-        let textModelDirectory = URL(
+        let textModelDirectory = resolvedModelURL(URL(
             fileURLWithPath: modelPathText,
-            isDirectory: true).standardizedFileURL
+            isDirectory: true))
         // A download that finished and verifies is activatable whatever went
         // wrong afterwards. Reporting it as "needs attention" hid the Activate
         // button behind a Resume that only repeats work already done. The one
@@ -1580,7 +2231,7 @@ public final class AppModel {
         }
     }
 
-    private func applyInstallEvent(_ event: AppModelInstallEvent, generation: UInt64) {
+    func applyInstallEvent(_ event: AppModelInstallEvent, generation: UInt64) {
         guard generation == installGeneration else { return }
         switch event {
         case .checking:
@@ -1600,10 +2251,14 @@ public final class AppModel {
                 reusedBytes: reused,
                 downloadedThisRunBytes: downloadedThisRun,
                 totalBytes: total)
-            updateInstallETA(
-                reusedBytes: reused,
-                downloadedThisRunBytes: downloadedThisRun,
-                totalBytes: total)
+            if selectedModelID == .qwen3_6 {
+                resetInstallETA()
+            } else {
+                updateInstallETA(
+                    reusedBytes: reused,
+                    downloadedThisRunBytes: downloadedThisRun,
+                    totalBytes: total)
+            }
         case .hashingOutput(let file):
             resetInstallETA()
             installState = .hashingOutput(file)
@@ -1617,10 +2272,8 @@ public final class AppModel {
                 generation: generation)
         case .installed(let directory):
             resetInstallETA()
-            let directory = directory.standardizedFileURL
-            installationStatus = AppModelInstallationProbe.status(
-                at: directory,
-                descriptor: installer.descriptor)
+            let directory = resolvedModelURL(directory)
+            installationStatus = installationStatusProvider(directory, selectedModelEntry)
             guard installationStatus == .complete else {
                 finishInstallFailure(
                     RepackError.configurationInvalid(detail: "completed install did not pass metadata validation"),
@@ -1631,6 +2284,8 @@ public final class AppModel {
             installTask = nil
             modelPathText = directory.path
             loadState = .notLoaded
+            modelSelectionTransition = .idle
+            error = nil
             endConversationForReleasedKV()
             refreshVisionInstallReadiness(at: directory)
         }
@@ -1709,7 +2364,10 @@ public final class AppModel {
         installETAText = DownloadETAFormatter.string(for: presentation)
     }
 
-    private func applyPersistedSettings(forModelDirectory modelDirectory: URL) {
+    private func applyPersistedSettings(
+        forModelDirectory modelDirectory: URL,
+        modelID: AppModelID
+    ) {
         guard settingsPersistenceEnabled else { return }
         let settings = MacAppSettingsFileStore.loadOrCreate(
             forModelDirectory: modelDirectory)
@@ -1717,13 +2375,10 @@ public final class AppModel {
             expertCacheSlots: settings.expertCacheSlots,
             prefillEnabled: settings.prefillEnabled,
             rdadvisePolicy: settings.rdadvisePolicy,
-            // Pinned for the same reason as `init`: the app always releases the
-            // image tower. Reading the persisted value here would let a
-            // `keepReady` written by an older build resurrect ~1 GB of resident
-            // tower on a machine with no control that shows or clears it.
-            visionResidencyPolicy: .onDemand,
-            toolThinkingEnabled: settings.toolThinkingEnabled)
-        maxContextTokens = settings.contextTokens
+            visionResidencyPolicy: Self.automaticVisionResidencyPolicy(
+                expertCacheSlots: settings.expertCacheSlots),
+            toolThinkingEnabled: settings.toolThinkingEnabled(for: modelID))
+        maxContextTokens = settings.contextTokens(for: modelID)
         temperature = settings.temperature
         topKEnabled = settings.topKEnabled
         topK = settings.topK
@@ -1738,23 +2393,29 @@ public final class AppModel {
 
     private func persistSettings() {
         guard settingsPersistenceEnabled else { return }
-        let settings = MacAppSettings(
-            contextTokens: maxContextTokens,
-            expertCacheSlots: runtimeOptions.expertCacheSlots,
-            temperature: temperature,
-            topKEnabled: topKEnabled,
-            topK: topK,
-            topPEnabled: topPEnabled,
-            topP: topP,
-            prefillEnabled: runtimeOptions.prefillEnabled,
-            newlineShortcut: newlineShortcut,
-            showPromptExamples: showPromptExamples,
-            visionResidencyPolicy: runtimeOptions.visionResidencyPolicy,
-            rdadvisePolicy: runtimeOptions.rdadvisePolicy,
-            loadModelOnLaunch: loadModelOnLaunch,
-            agentModeEnabled: agentModeEnabled,
-            toolThinkingEnabled: runtimeOptions.toolThinkingEnabled)
         let modelDirectory = URL(fileURLWithPath: modelPathText, isDirectory: true)
+        var settings = MacAppSettingsFileStore.loadOrCreate(
+            forModelDirectory: modelDirectory)
+        settings.setContextTokens(maxContextTokens, for: selectedModelID)
+        settings.expertCacheSlots = runtimeOptions.expertCacheSlots
+        settings.temperature = temperature
+        settings.topKEnabled = topKEnabled
+        settings.topK = topK
+        settings.topPEnabled = topPEnabled
+        settings.topP = topP
+        settings.prefillEnabled = runtimeOptions.prefillEnabled
+        settings.newlineShortcut = newlineShortcut
+        settings.showPromptExamples = showPromptExamples
+        settings.visionResidencyPolicy = runtimeOptions.visionResidencyPolicy
+        settings.rdadvisePolicy = runtimeOptions.rdadvisePolicy
+        settings.loadModelOnLaunch = loadModelOnLaunch
+        settings.agentModeEnabled = agentModeEnabled
+        settings.selectedModelID = selectedModelID
+        settings.qwenSourceRoot = qwenSourceDirectory?.path
+        settings.qwenRegistrationPath = catalogEntry(for: .qwen3_6).location.textModelURL.path
+        settings.setToolThinkingEnabled(
+            runtimeOptions.toolThinkingEnabled,
+            for: selectedModelID)
         try? MacAppSettingsFileStore.save(
             settings,
             forModelDirectory: modelDirectory)
@@ -1794,8 +2455,8 @@ public final class AppModel {
             appliedLoadSequence = sequence
         }
         if case .ready(let directory, _) = state,
-           directory.standardizedFileURL.path
-            != URL(fileURLWithPath: modelPathText).standardizedFileURL.path {
+           resolvedModelURL(directory).path
+            != resolvedModelURL(URL(fileURLWithPath: modelPathText)).path {
             return
         }
         loadState = state
@@ -1814,6 +2475,10 @@ public final class AppModel {
         switch state {
         case .notLoaded:
             loadedRuntimeKey = nil
+            loadedModelReadiness = nil
+            conversationLogicalStateBytes = nil
+            expertCacheBytes = nil
+            pendingSelectionLoadID = nil
             // Unloading released the runner and the KV, so whatever lineage was
             // open no longer has tokens behind it.
             serviceEpoch = nil
@@ -1842,6 +2507,12 @@ public final class AppModel {
             _ = seconds
         case .failed(let loadError):
             pendingExplicitLoadRuntimeKey = nil
+            loadedModelReadiness = nil
+            conversationLogicalStateBytes = nil
+            expertCacheBytes = nil
+            let failedModelID = pendingSelectionLoadID ?? selectedModelID
+            modelSelectionTransition = .failed(failedModelID, "\(loadError)")
+            pendingSelectionLoadID = nil
             error = loadError
         }
     }
@@ -1887,8 +2558,16 @@ public final class AppModel {
         runTask?.cancel()
         loadTask?.cancel()
         installTask?.cancel()
+        installReadinessGeneration &+= 1
+        installReadinessTask?.cancel()
+        qwenSourceConfigurationGeneration &+= 1
+        qwenSourceConfigurationTask?.cancel()
         visionInstallTask?.cancel()
         unloadTask?.cancel()
+        modelSelectionGeneration &+= 1
+        modelSelectionTask?.cancel()
+        localQwenInstaller?.cancel()
+        pendingLocalQwenInstaller?.cancel()
         installer.cancel()
         visionInstaller.cancel()
         client.cancel()
@@ -1911,12 +2590,27 @@ public final class AppModel {
             if let tower = reporter.currentInferenceTowerBytes {
                 visionTowerMappedBytes = tower
             }
+            conversationLogicalStateBytes =
+                reporter.currentConversationLogicalStateBytes
+            expertCacheBytes = reporter.currentExpertCacheBytes
         } else {
             liveMemoryBytes = memorySampler.sample()
             // The occupied figure, not the footprint again: this row is the one
             // that includes the mapped weights, and feeding it the footprint
             // made both numbers report the same thing.
             liveResidentBytes = memorySampler.occupiedSample()
+            conversationLogicalStateBytes = nil
+            expertCacheBytes = nil
+        }
+    }
+
+    private func applyRuntimeStateDiagnostics(_ diagnostics: AppDiagnostics?) {
+        guard let diagnostics else { return }
+        if let bytes = diagnostics.conversationLogicalStateBytes {
+            conversationLogicalStateBytes = bytes
+        }
+        if let bytes = diagnostics.expertCacheBytes {
+            expertCacheBytes = bytes
         }
     }
 
@@ -2038,6 +2732,7 @@ public final class AppModel {
                 && !hasStaleLoadedRuntime && conversation.canSend
                 && (!prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     || !attachments.isEmpty) else { return false }
+        let submittedAt = ContinuousClock.now
         let agentConfiguration = agentModeEnabled ? makeAgentConfiguration() : nil
         // Reserved before the request is built, so the position the service
         // will check is the position the transcript shows.
@@ -2114,7 +2809,8 @@ public final class AppModel {
             modelDirectory: request.modelDirectory,
             maxContextTokens: request.maxContextTokens,
             options: request.runtimeOptions,
-            forceLogitsHead: !request.isPureGreedy)
+            forceLogitsHead: !request.isPureGreedy,
+            preservePhysicalPath: selectedModelID == .qwen3_6)
         isCancellationPending = false
         agentCancellationIssued = false
         liveTokenCount = 0
@@ -2124,6 +2820,7 @@ public final class AppModel {
         sampleLiveMemory()
         phase = .prefill
         runState = .running
+        startRequestProgress(generation: generation, submittedAt: submittedAt)
         // A chat composer always clears. Keeping the sent turn in the box means
         // the next message starts as a copy of the last one, and the images
         // silently re-attach to a different message. Dropping them is safe
@@ -2183,6 +2880,8 @@ public final class AppModel {
                         generation: generation)
                 } catch is CancellationError {
                     await self.finishAgentFailure(.cancelled, generation: generation)
+                } catch VisionCaptureAgentError.proposalCorrectionExhausted(let message) {
+                    await self.finishAgentProposalPause(message, generation: generation)
                 } catch let error as VisionCaptureAgentError {
                     await self.finishAgentFailure(
                         .conversationLineageLost(error.description),
@@ -2211,6 +2910,21 @@ public final class AppModel {
             }
         }
         return true
+    }
+
+    private func startRequestProgress(generation: Int, submittedAt: ContinuousClock.Instant) {
+        requestProgressTask?.cancel()
+        liveRequestElapsedSeconds = 0
+        requestProgressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(1)) }
+                catch { return }
+                guard let self, generation == self.runIdentity, self.isRunning else { return }
+                let elapsed = submittedAt.duration(to: .now).components
+                self.liveRequestElapsedSeconds = max(0,
+                    Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18)
+            }
+        }
     }
 
     /// Sends the composer text normally when idle, or queues it as a live
@@ -2613,28 +3327,35 @@ public final class AppModel {
                     "The repetition receipt conflicted with completed tool-call output. No recovery or action was admitted.")
             }
             if allowsMalformedRegeneration, calls.isEmpty,
-               case .results(let results) = toolTurn,
                let failure = error as? AppInferenceError,
                case .structuredToolFailure(_, true, _) = failure {
                 try Task.checkCancellation()
-                // The pending tool result was rolled back, not its preceding
-                // app action. Reprocess that result once without invoking MCP.
-                let feedback = """
-
-
-                Host format correction: Your previous response was malformed and no proposed action was executed. Make one visioncapture_navigate call using its schema and the latest permitted choices. Use Gemma's native string delimiters. Do not replay earlier input.
-                """
-                let corrected = results.map { result in
-                    return AppToolResult(callID: result.callID, name: result.name,
-                        content: result.content + feedback, imageAttachments: result.imageAttachments)
+                let recoveryID = UUID()
+                await applyAgentActivity(.generationRecovery(id: recoveryID,
+                    text: "Correcting an invalid model tool request. No action was sent.",
+                    status: .dispatching), generation: generation)
+                var correctedRequest = baseRequest
+                if case .user = toolTurn {
+                    correctedRequest.prompt += AppToolTurn.formatCorrectionInstruction
                 }
-                return try await generateAgentStep(
-                    client: client, baseRequest: baseRequest,
-                    toolTurn: .results(corrected), generation: generation,
-                    allowsMalformedRegeneration: false)
+                do {
+                    let corrected = try await generateAgentStep(
+                        client: client, baseRequest: correctedRequest,
+                        toolTurn: toolTurn.correctingMalformedResponse(), generation: generation,
+                        allowsMalformedRegeneration: false)
+                    await applyAgentActivity(.generationRecovery(id: recoveryID,
+                        text: "Model response regenerated after a format correction.",
+                        status: .succeeded), generation: generation)
+                    return corrected
+                } catch {
+                    await applyAgentActivity(.generationRecovery(id: recoveryID,
+                        text: "The format correction did not complete.",
+                        status: error is CancellationError ? .cancelled
+                            : .localFailure(reason: String(describing: error))), generation: generation)
+                    throw error
+                }
             }
             if !allowsMalformedRegeneration, calls.isEmpty,
-               case .results = toolTurn,
                let failure = error as? AppInferenceError,
                case .structuredToolFailure(_, true, let evidence) = failure {
                 throw AppInferenceError.structuredToolFailure(
@@ -2757,6 +3478,7 @@ public final class AppModel {
             break
         case .finished(let diagnostics):
             self.diagnostics = diagnostics
+            applyRuntimeStateDiagnostics(diagnostics)
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
             liveStructuredProgress = nil
             agentModelStepActive = false
@@ -2862,11 +3584,12 @@ public final class AppModel {
         let exhaustedChecklistCorrection = result.followUpPrompt != nil
             && agentChecklistContinuationUsed
         let answer = exhaustedChecklistCorrection
-            ? "Incomplete QA report: Gemma stopped again with pending or in-progress checks.\n\n"
+            ? "Incomplete QA report: The model stopped again with pending or in-progress checks.\n\n"
                 + result.answer
             : result.answer
         outputText = answer
         diagnostics = result.diagnostics
+        applyRuntimeStateDiagnostics(result.diagnostics)
         conversation.completeTurn(text: answer, diagnostics: result.diagnostics)
         finishTerminalRun()
         if let instruction = pendingAgentInstruction {
@@ -2903,23 +3626,36 @@ public final class AppModel {
         }
     }
 
+    private func finishAgentProposalPause(_ message: String, generation: Int) async {
+        guard generation == runIdentity, !hasHandledTerminalEvent else { return }
+        hasHandledTerminalEvent = true
+        interruptAgentCompaction(.invalidRequest(message))
+        outputText = message
+        conversation.interruptUncommittedTurn(text: message, stopReason: .failed)
+        finishTerminalRun()
+        // Retain the task record. The next message opens a fresh model session.
+        archiveConversationContext()
+        error = .invalidRequest(message)
+        if let instruction = pendingAgentInstruction {
+            pendingAgentInstruction = nil
+            await continueAgentTask(with: instruction)
+        }
+    }
+
     private func finishAgentFailure(_ appError: AppInferenceError, generation: Int) async {
         guard generation == runIdentity, !hasHandledTerminalEvent else { return }
         hasHandledTerminalEvent = true
 
-        // A live instruction stops the current model step at its next token
-        // boundary. If that boundary falls inside an unfinished structured
-        // tool span, the parser correctly refuses to commit the partial call.
-        // That refusal is an interruption, not a failed user instruction: keep
-        // the completed QA evidence, move the uncommitted turn out of the old
-        // KV lineage, and immediately send the exact queued instruction in a
-        // fresh lineage reconstructed from the host checkpoint.
+        // An instruction can interrupt decoding or suppress a completed call
+        // before dispatch. Keep settled external evidence, retire the old model
+        // lineage (including any undelivered pending calls), and deliver the
+        // exact instruction using a fresh lineage and the host checkpoint.
         if let instruction = pendingAgentInstruction,
-           agentCancellationIssued,
+           agentCancellationIssued || appError == .cancelled,
            Self.isRecoverableAgentInstructionInterruption(appError) {
             pendingAgentInstruction = nil
             interruptAgentCompaction(appError)
-            let interruption = "Interrupted by a new user instruction before an unfinished tool call was sent."
+            let interruption = "Interrupted by a new user instruction before a proposed tool call was sent."
             if !outputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 outputText += "\n\n" + interruption
             } else {
@@ -3039,11 +3775,14 @@ public final class AppModel {
                 "The model returned a tool call while Agent Mode was off."))
         case .finished(let diagnostics):
             visionTowerMappedBytes = diagnostics.visionTowerMappedBytes
+            applyRuntimeStateDiagnostics(diagnostics)
             finishSuccessfully(diagnostics)
         case .cancelled(let diagnostics):
+            applyRuntimeStateDiagnostics(diagnostics)
             finishCancelled(diagnostics)
         case .failed(let appError, let partial):
             diagnostics = partial
+            applyRuntimeStateDiagnostics(partial)
             materializeServiceTranscript()
             finishWithError(appError)
         }
@@ -3054,6 +3793,7 @@ public final class AppModel {
         hasHandledTerminalEvent = true
         materializeServiceTranscript()
         self.diagnostics = diagnostics
+        applyRuntimeStateDiagnostics(diagnostics)
         conversation.completeTurn(text: outputText, diagnostics: diagnostics)
         finishTerminalRun()
     }
@@ -3063,6 +3803,7 @@ public final class AppModel {
         hasHandledTerminalEvent = true
         materializeServiceTranscript()
         self.diagnostics = diagnostics
+        applyRuntimeStateDiagnostics(diagnostics)
         error = .cancelled
         // A `.cancelled` event means the run threw `CancellationError`, and the
         // conversation rewound the turn: its tokens are not in the KV, and the
@@ -3139,6 +3880,9 @@ public final class AppModel {
     }
 
     private func finishTerminalRun() {
+        requestProgressTask?.cancel()
+        requestProgressTask = nil
+        liveRequestElapsedSeconds = 0
         liveStructuredProgress = nil
         agentWaitingForMCP = false
         agentModelStepActive = false

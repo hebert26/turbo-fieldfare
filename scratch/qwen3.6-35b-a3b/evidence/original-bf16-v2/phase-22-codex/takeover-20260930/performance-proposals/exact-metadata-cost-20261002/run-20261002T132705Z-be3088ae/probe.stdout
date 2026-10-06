@@ -1,0 +1,231 @@
+{
+  "batches" : [
+    {
+      "actualIntervalsMeasured" : false,
+      "mode" : "baseline",
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 42449000,
+      "userCPUNanoseconds" : 4462000,
+      "wallNanoseconds" : 46970334
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 0
+        }
+      },
+      "mode" : "clockOff",
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 35948000,
+      "userCPUNanoseconds" : 3836000,
+      "wallNanoseconds" : 39862084
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 5109336
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 3854195
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 696596
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 22519241
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 859204
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2461540
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 2447191
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 157043
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1342922
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 36514126
+        }
+      },
+      "mode" : "clockOn",
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 32771000,
+      "userCPUNanoseconds" : 3716000,
+      "wallNanoseconds" : 36515417
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 4967415
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 3762871
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 682941
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 22226932
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 856242
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 2356550
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 2408009
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 144668
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 1247798
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 35708752
+        }
+      },
+      "mode" : "clockOn",
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 32174000,
+      "userCPUNanoseconds" : 3536000,
+      "wallNanoseconds" : 35709750
+    },
+    {
+      "actualIntervals" : {
+        "binding" : {
+          "count" : 96,
+          "wallNanoseconds" : 0
+        },
+        "fileCheckAndRemember" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "fileClose" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "fileOpen" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "heldStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "listing" : {
+          "count" : 64,
+          "wallNanoseconds" : 0
+        },
+        "namedStat" : {
+          "count" : 2496,
+          "wallNanoseconds" : 0
+        },
+        "receiptNames" : {
+          "count" : 32,
+          "wallNanoseconds" : 0
+        },
+        "root" : {
+          "count" : 128,
+          "wallNanoseconds" : 0
+        },
+        "total" : {
+          "count" : 32,
+          "wallNanoseconds" : 0
+        }
+      },
+      "mode" : "clockOff",
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 32568000,
+      "userCPUNanoseconds" : 3323000,
+      "wallNanoseconds" : 35889916
+    },
+    {
+      "actualIntervalsMeasured" : false,
+      "mode" : "baseline",
+      "successfulCalls" : 32,
+      "systemCPUNanoseconds" : 34038000,
+      "userCPUNanoseconds" : 3423000,
+      "wallNanoseconds" : 37497583
+    }
+  ],
+  "handleInitializationNanoseconds" : 1000833,
+  "initializationSystemCPUNanoseconds" : 4127000,
+  "initializationUserCPUNanoseconds" : 5327000,
+  "metadataOnly" : true,
+  "modelConstructed" : false,
+  "passed" : true,
+  "payloadBytesReadByAuditedPath" : 0,
+  "payloadReadEvidence" : "Static call-path audit. Fixed sizeCheckTrustedReceipt policy and handle validation. No model or tensor calls. Not system IO tracing.",
+  "receiptFileCount" : 39,
+  "scope" : "Current exact metadata validation only. No new validator or app throughput qualification.",
+  "sourceDescriptorSHA256" : "c1ac463726b716e7db3a9fbe5db4cb690f95be7e5779aea02e49c2020bca7a7a",
+  "steadyValidationCalls" : 192,
+  "trustedReceiptMetadataNanoseconds" : 15941625,
+  "warmValidationCalls" : 3,
+  "zeroMeaning" : "Clock-off duration is unmeasured. Baseline primitive counts are unmeasured."
+}

@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-cpu-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-cpu-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareExpertPredictCPU"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "0d09e2ad1b895757810558f83b9d87f9e30a2f236d24a4b3731c3d7ffee7584c",
+  "binarySHA256": "f5a97c2ca4d82a012ecb21b774065afc64592af45aaf63f2b4859bff94e252f2",
+  "stageHashesSHA256": "2528950663e2ff8a224735e4953ca4e93f6c290e5bc53441a413c5d10d885c92"
+}

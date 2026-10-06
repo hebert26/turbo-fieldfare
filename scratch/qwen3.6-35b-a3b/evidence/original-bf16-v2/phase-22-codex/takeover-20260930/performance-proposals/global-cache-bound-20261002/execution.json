@@ -1,0 +1,17 @@
+{
+  "command": [
+    "/usr/local/bin/python3",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/global-cache-bound-20261002/analyze.py",
+    "--trace",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/run-20261002T161328.568847Z-1ea5d43faad8453c9627769b9fe8750b/result.json",
+    "--request",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/request.json",
+    "--output",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/global-cache-bound-20261002/output"
+  ],
+  "exit": 0,
+  "wallSeconds": 0.3480304996483028,
+  "commit": "47df2419b2b0730fd3a75de287b698c45df234cb",
+  "sourceEdits": false,
+  "modelOrPayloadOperations": false
+}

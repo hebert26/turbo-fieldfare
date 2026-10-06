@@ -30,6 +30,8 @@ enum VisionCaptureToolDefinitions {
                             .string("observe"),
                             .string("screenshot"),
                             .string("tap"),
+                            .string("tap_coordinates"),
+                            .string("computer_use_click"),
                             .string("set_boolean"),
                             .string("type"),
                             .string("back"),
@@ -48,7 +50,27 @@ enum VisionCaptureToolDefinitions {
                         "type": .string("string"),
                         "minLength": .integer(1),
                         "description": .string(
-                            "For tap, set_boolean, and type only. Copy a current choice ID and use its listed operation. A new packet expires it; request screenshot first if required."),
+                            "For tap and set_boolean. For type, use a current field ID when one exists. Omit it only when a current screenshot shows that the intended field is already focused."),
+                    ]),
+                    "x_norm": .object([
+                        "type": .string("integer"),
+                        "minimum": .integer(0),
+                        "maximum": .integer(1000),
+                        "description": .string(
+                            "For tap_coordinates or computer_use_click. X position in the current screenshot, from 0 at the left to 1000 at the right."),
+                    ]),
+                    "y_norm": .object([
+                        "type": .string("integer"),
+                        "minimum": .integer(0),
+                        "maximum": .integer(1000),
+                        "description": .string(
+                            "For tap_coordinates or computer_use_click. Y position in the current screenshot, from 0 at the top to 1000 at the bottom."),
+                    ]),
+                    "intent": .object([
+                        "type": .string("string"),
+                        "minLength": .integer(1),
+                        "description": .string(
+                            "Briefly name the purpose. Required for tap_coordinates and computer_use_click; optional for other actions."),
                     ]),
                     "desired_state": .object([
                         "type": .string("boolean"),
@@ -59,7 +81,7 @@ enum VisionCaptureToolDefinitions {
                         "type": .string("string"),
                         "minLength": .integer(1),
                         "description": .string(
-                            "For type only. Text is appended. To replace a nonempty value, tap an offered clear control first."),
+                            "For type only. Text is appended. A target is optional only for a field already focused in the current screenshot."),
                     ]),
                 ]),
                 "required": .array([.string("action")]),

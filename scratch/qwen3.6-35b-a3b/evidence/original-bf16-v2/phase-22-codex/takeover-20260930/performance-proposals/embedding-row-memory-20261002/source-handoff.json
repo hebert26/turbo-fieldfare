@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "status": "source-frozen-not-built-not-run",
+  "head": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "sourceManifestSHA256": "67694a9d45fb3ae3f2b4772eee05a5ece3f01cd4326323b148f36c3a5c47af31",
+  "flag": "TURBO_QWEN_PROTECTED_EMBEDDING_ROWS=1",
+  "residencyBothArms": "TURBO_QWEN_EXPERT_CACHE_RESIDENCY=0",
+  "changedVsMemory": [
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceModel.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift"
+  ],
+  "sourceContract": "Default loader retains table. Explicit request is effective only with genuine hooks.none. A row-only model refuses a custom-hook runner. Only embedding CPU path changes; image feature rows bypass embedding as before. Head remains resident.",
+  "readContract": "Admitted owner-bound TensorRange checks BF16 shape and size; zero-byte end admission retains existing check path. Each row reads4096 bytes through unchanged preadTensorRange with cancellation and original beforeRead/afterRead/beforeReturn checks. Failed buffers are discarded. Little-endian UInt16 maps to Float bitPattern UInt32(word)<<16.",
+  "memoryContract": "One retained admitted FD. Per call2048UInt16 plus2048Float row. No whole table, FP32 router cache, extra model or weight copy. Removes1017118720 resident bytes.",
+  "reference": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967/result.json",
+  "referenceSHA256": "b433d22aa6f254794a1fd7e4b05adec8227ea0fdaf4252c34aca8efa6d73b737",
+  "referenceFinalState": {
+    "committedKeysSHA256": "e69a6401e45992a725b6d985252c45fe1d8e44c4e410f44c8070e0417ceb1bd5",
+    "committedValuesSHA256": "06c8326c758b6196cfca720b296db13a78a62c40b3209ffb8fa6bb5f2022ad56",
+    "fullKVPositions": {
+      "3": 1203,
+      "7": 1203,
+      "11": 1203,
+      "15": 1203,
+      "19": 1203,
+      "23": 1203,
+      "27": 1203,
+      "31": 1203,
+      "35": 1203,
+      "39": 1203
+    },
+    "linearPositions": {
+      "0": 1203,
+      "1": 1203,
+      "2": 1203,
+      "4": 1203,
+      "5": 1203,
+      "6": 1203,
+      "8": 1203,
+      "9": 1203,
+      "10": 1203,
+      "12": 1203,
+      "13": 1203,
+      "14": 1203,
+      "16": 1203,
+      "17": 1203,
+      "18": 1203,
+      "20": 1203,
+      "21": 1203,
+      "22": 1203,
+      "24": 1203,
+      "25": 1203,
+      "26": 1203,
+      "28": 1203,
+      "29": 1203,
+      "30": 1203,
+      "32": 1203,
+      "33": 1203,
+      "34": 1203,
+      "36": 1203,
+      "37": 1203,
+      "38": 1203
+    },
+    "linearStateSHA256": "26403c4f9b1a703a717b471270f7de30992789d0628a580adc37ab828c14f3d3",
+    "pendingTokens": 1,
+    "position": 1203,
+    "runnerUsable": true
+  },
+  "referenceAcceptedRouteSHA256": "95a3771000bbcc77b3848b5dbdaae0fd7b9bee66d5806414af9e58cf0d5019c5",
+  "referenceAcceptedRawRowSHA256": "212502f111d598174e971a9c6eddcc6fc09f0129a8f58f7fc5da5332db29705f",
+  "observability": [
+    "protectedEmbeddingRows",
+    "protectedEmbeddingRowBytes",
+    "residentWeightBytes",
+    "removedResidentEmbeddingBytes"
+  ],
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/build.py"
+    ]
+  ],
+  "wrapperOwnership": "Main wrapper agent owns request/run/preflight/analyze/control. Whole-stage freeze awaits wrapper files.",
+  "checks": "Forward patch check passed. No build, test, model or payload read.",
+  "limits": "This is a serial diagnostic memory experiment. Completion with exact IDs/routes/logit rows/final state is required. No speed or physical-residency claim."
+}

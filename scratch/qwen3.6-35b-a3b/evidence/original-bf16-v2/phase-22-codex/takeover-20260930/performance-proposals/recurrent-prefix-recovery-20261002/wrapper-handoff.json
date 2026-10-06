@@ -1,0 +1,34 @@
+{
+  "schema": 1,
+  "baselineCommit": "867e99bf202fda5c7ea54c8f4aa1744cb42a8299",
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "wrapperHashes": {
+    "run.py": "6a360e37e40eb1bf127b4a6a9a34c3031cc213d5f7beee72d379fc886a4ac3cd",
+    "compare.py": "b086e814185f28e70d59340e89fbad6aa055acaf04723a89dec45300e5e21c79",
+    "analyze.py": "42950e38231e7fe8240f52a1f9b137d2139745a022311a908fc57c3c2398ddc0"
+  },
+  "command": "python3 compare.py REGISTRATION",
+  "singleRunCommand": "python3 run.py REGISTRATION --mode serial|legacy|new",
+  "probeCLI": "TurboFieldfareRecurrentPrefixRecovery REGISTRATION REQUEST REPORT serial|legacy|new",
+  "order": [
+    [
+      "serial",
+      "legacy",
+      "new"
+    ],
+    [
+      "new",
+      "legacy",
+      "serial"
+    ]
+  ],
+  "gate": "Reverse only if first new/legacy <= 0.95 AND new/serial <= 0.95 for whole decode. Both balanced orders must pass to advance for Main review. No 70ms gate.",
+  "correctness": "29 IDs including pending EOS, 28 consumed raw rows, 1120 routes, final state hashes, all layer positions, transaction counts, and actual causal accounting must match. Legacy/new branch decisions and branch route/raw-row hashes must match.",
+  "memory": "Fresh admission >= 50% free; internal and external whole-child free >= 30%. One child at a time. Own-child deadline 420s. No user app termination.",
+  "recovery": "Require actual recurrent-only settlement. Exact4 new captures save 983040 input bytes. Recurrent calls equal 30 times kept inputs. Short proposals retain full replay. Saved input bytes at successful exit must be zero.",
+  "timing": "Record prompt, whole request, whole decode, cycle and settlement times. Settlement stays in decode. Whole request includes the interphase guard. Final golden assertion and diagnostic state readback remain outside these timers.",
+  "preservation": "Same four-input arithmetic and proposer. Baseline clones remain. No router/head batching, chunks, native MTP, forced-boundary probe or prior-stage edit.",
+  "scopeLimit": "Actual causal keep boundaries only. Integration and exhaustive boundary checks are deferred. An isolated recovery win is not an app speed claim.",
+  "verification": "Python AST/compile and JSON parse only. No tests, builds, model runs, payload reads or commits.",
+  "executionOwner": "Main"
+}

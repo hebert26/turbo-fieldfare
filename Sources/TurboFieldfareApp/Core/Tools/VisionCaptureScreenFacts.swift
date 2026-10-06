@@ -26,6 +26,10 @@ struct VisionCaptureScreenFacts {
     private let elements: [Element]
     private let navigationFacts: [String]
 
+    var hasSoftwareKeyboard: Bool {
+        elements.contains { $0.type == "XCUIElementTypeKey" }
+    }
+
     init(elements: [JSONValue], navigation: [[String: JSONValue]] = []) {
         self.elements = elements.compactMap { value in
             guard case .object(let object) = value,

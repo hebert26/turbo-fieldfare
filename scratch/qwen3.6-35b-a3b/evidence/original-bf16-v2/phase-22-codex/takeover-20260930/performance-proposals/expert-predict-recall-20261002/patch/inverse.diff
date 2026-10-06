@@ -1,0 +1,574 @@
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,7 +8,6 @@
+         .iOS(.v26),
+     ],
+     products: [
+-        .executable(name: "TurboFieldfareExpertPredictRecall", targets: ["TurboFieldfareExpertPredictRecall"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -27,7 +26,6 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
+-        .executableTarget(name: "TurboFieldfareExpertPredictRecall", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareExpertPredictRecall"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+--- a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
++++ b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+@@ -828,8 +828,7 @@
+         hooks = readHooks
+     }
+ 
+-    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil,
+-             prediction: QwenExpertPredictionMapContext? = nil) async throws -> QwenBF16ExpertLease {
++    func map(expertIDs: [Int], measurement: QwenCacheMapContext? = nil) async throws -> QwenBF16ExpertLease {
+         do {
+             guard expertIDs.count <= slotCount else {
+                 throw QwenExpertMappingError.insufficientUnpinnedSlots
+@@ -857,7 +856,7 @@
+             let outcome: Result<FetchResult, Error> = await withCheckedContinuation { continuation in
+                 DispatchQueue.global(qos: .userInitiated).async { [self] in
+                     let outcome = Result {
+-                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement, prediction: prediction)
++                        try performFetch(expertIDs: expertIDs, canceled: canceled, measurement: measurement)
+                     }
+                     handoff?.completed()
+                     continuation.resume(returning: outcome)
+@@ -896,8 +895,7 @@
+     }
+ 
+     private func performFetch(expertIDs: [Int], canceled: CancellationFlag,
+-                              measurement: QwenCacheMapContext?,
+-                              prediction: QwenExpertPredictionMapContext?) throws -> FetchResult {
++                              measurement: QwenCacheMapContext?) throws -> FetchResult {
+         ioLock.lock()
+         defer { ioLock.unlock() }
+         if canceled.isCanceled() {
+@@ -917,7 +915,6 @@
+         do {
+             reserved = try withStateLock {
+                 let avoiding = Set(activeSlots.keys)
+-                let predictionResidents = prediction.map { _ in cache.measurementSnapshot().expertIDs }
+                 guard let plan = cache.plan(expertIDs: expertIDs, avoidingSlots: avoiding) else {
+                     throw QwenExpertMappingError.insufficientUnpinnedSlots
+                 }
+@@ -930,10 +927,6 @@
+                 if let measurement, let mapID {
+                     measurement.capture.recordQwenCachePlan(mapID, plan: plan,
+                                                            clock: cache.measurementClock, avoidingSlots: avoiding)
+-                }
+-                if let prediction, let predictionResidents {
+-                    prediction.capture.plan(position: prediction.position, layer: prediction.layer,
+-                                            residents: predictionResidents, plan: plan)
+                 }
+                 let identifier = allocateIdentifierLocked()
+                 for index in plan.experts.indices {
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPredictRecallProbe.swift
++++ /dev/null
+@@ -1,259 +0,0 @@
+-import Foundation
+-import Metal
+-import CryptoKit
+-import TurboFieldfareOfficialQwenSource
+-
+-private struct PredictionProbeError: Error { let detail: String }
+-private func requirePrediction(_ condition: Bool, _ detail: String) throws {
+-    if !condition { throw PredictionProbeError(detail: detail) }
+-}
+-
+-// Source-copy command only. It publishes no parser, tools or conversation state.
+-public enum QwenExpertPredictRecallProbe {
+-    @MainActor public static func run(registrationURL: URL, requestURL: URL) async throws -> Data {
+-        let raw = try Data(contentsOf: requestURL)
+-        let digest = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
+-        try requirePrediction(digest == "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285", "capture hash")
+-        guard let request = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+-              let prefixInts = request["inputTokenIDs"] as? [Int],
+-              let recordedInts = request["sampledTokenIDs"] as? [Int],
+-              let settings = request["settings"] as? [String: Any],
+-              let stops = settings["extraStopTokens"] as? [Int],
+-              let strings = settings["stopStrings"] as? [String],
+-              let temperature = settings["temperature"] as? NSNumber,
+-              let penalty = settings["repetitionPenalty"] as? NSNumber,
+-              let maxNew = settings["maxNewTokens"] as? Int,
+-              let maxContext = request["maximumContext"] as? Int,
+-              let eosInt = request["codecEOS"] as? Int else {
+-            throw PredictionProbeError(detail: "capture fields")
+-        }
+-        try requirePrediction(prefixInts.count == 1175 && recordedInts.count == 29
+-            && request["complete"] as? Bool == true && request["terminal"] as? String == "committed"
+-            && request["fixtureSamples"] as? Bool == false && request["checkpointResume"] as? Bool == false
+-            && request["preparedPromptPresent"] as? Bool == false && request["visionStorePresent"] as? Bool == false
+-            && maxContext == 8192 && prefixInts.allSatisfy { Int32(exactly: $0) != nil }
+-            && recordedInts.allSatisfy { Int32(exactly: $0) != nil }, "frozen capture geometry")
+-        let prefix = prefixInts.map { Int32($0) }
+-        let recorded = recordedInts.map { Int32($0) }
+-        let eos = Int32(eosInt)
+-        var config = GenerationConfig(maxNewTokens: maxNew,
+-            temperature: Float(temperature.doubleValue), topK: settings["topK"] as? Int,
+-            topP: (settings["topP"] as? NSNumber).map { Float($0.doubleValue) },
+-            repetitionPenalty: Float(penalty.doubleValue), seed: nil,
+-            stopStrings: strings, extraStopTokens: Set(stops.map { Int32($0) }))
+-        config.logitTransform = .raw
+-        try config.validate()
+-        try requirePrediction(config.temperature == 0 && config.extraStopTokens.contains(eos)
+-            && recorded.last == eos, "greedy terminal capture")
+-        try memoryGuard()
+-        let context = try MetalContext()
+-        let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
+-            integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
+-            expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024)
+-        guard let source = model.sourceIdentity else { throw PredictionProbeError(detail: "source identity") }
+-        try requirePrediction(source.descriptorContentSHA256 == (request["sourceDescriptorSHA256"] as? String)
+-            && source.markerSHA256 == (request["sourceMarkerSHA256"] as? String)
+-            && source.checksumManifestSHA256 == (request["sourceManifestSHA256"] as? String)
+-            && source.shardSetSHA256 == (request["sourceShardSetSHA256"] as? String), "official source mismatch")
+-        try requirePrediction(model.architecture.layers == 40 && model.architecture.hiddenSize <= 4096,
+-                              "bounded architecture")
+-        let capture = QwenExpertPredictionCapture(firstPosition: prefix.count,
+-            width: model.architecture.hiddenSize, layers: model.architecture.layers)
+-        let runner = try QwenOfficialSourceRunner(model: model, maxContext: maxContext,
+-            expertSlotCount: 16, hooks: .none, predictionCapture: capture)
+-        let scratch = try RawCompletionScratch(context: context, vocab: model.architecture.vocabularySize)
+-        let prefillStart = QwenProductionTimingMeasurement.uptime()
+-        var logits = try await runner.prefill(tokenIDs: prefix, position: 0)
+-        let prefillEnd = QwenProductionTimingMeasurement.uptime()
+-        try memoryGuard()
+-        var history = prefix
+-        var generated: [Int32] = []
+-        var consumedForwards = 0
+-        var foundStop = false
+-        let decodeStart = QwenProductionTimingMeasurement.uptime()
+-        // The model supplies every input. Recorded IDs are used only to check results.
+-        for index in 0..<min(config.maxNewTokens, 64) {
+-            try Task.checkCancellation()
+-            try QwenSourceSamplerBoundary.publishFP32Logits(logits, into: scratch.logits,
+-                vocabularySize: model.architecture.vocabularySize)
+-            guard let command = context.queue.makeCommandBuffer() else {
+-                throw PredictionProbeError(detail: "sampler command")
+-            }
+-            scratch.sampler.sample(commandBuffer: command, logits: scratch.logits, probs: scratch.probs,
+-                history: history, config: config, position: index, outToken: scratch.outToken)
+-            try Task.checkCancellation()
+-            command.commit()
+-            await command.completed()
+-            try requirePrediction(command.status == .completed && command.error == nil, "sampler GPU error")
+-            let sampled = scratch.outToken.contents().load(as: UInt32.self)
+-            try requirePrediction(sampled < UInt32(model.architecture.vocabularySize), "invalid sampled ID")
+-            let token = Int32(sampled)
+-            try requirePrediction(index < recorded.count && token == recorded[index], "sample differs at index \(index)")
+-            generated.append(token)
+-            if config.extraStopTokens.contains(token) { foundStop = true; break }
+-            let position = history.count
+-            logits = try await runner.produce(token: token, position: position)
+-            consumedForwards += 1
+-            history.append(token)
+-        }
+-        let decodeEnd = QwenProductionTimingMeasurement.uptime()
+-        try requirePrediction(foundStop && generated == recorded && consumedForwards == 28, "incomplete frozen generation")
+-        let finalPosition = await runner.position
+-        try requirePrediction(finalPosition == 1203, "consumed/pending alignment")
+-        let state = capture.drain()
+-        try requirePrediction(state.failure == nil && state.rows.count == consumedForwards * 40,
+-                              state.failure ?? "missing decode rows")
+-        // Serial caches are private to each layer. The next layer cannot change
+-        // between this layer's launch point and its next map's entry snapshot.
+-        for position in 1175..<1203 {
+-            for layer in 0..<40 {
+-                let key = QwenExpertPredictionCapture.Key(position: position, layer: layer)
+-                guard let row = state.rows[key], let map = row.map else {
+-                    throw PredictionProbeError(detail: "missing actual map")
+-                }
+-                try requirePrediction(!row.duplicate && row.mapStart > 0 && row.mapEnd > row.mapStart,
+-                                      "duplicate, failed or incomplete map")
+-                try requirePrediction(map.experts.count == 8 && Set(map.experts).count == 8
+-                    && map.residentSlots.count == 16 && map.assignedSlots.count == 8
+-                    && Set(map.assignedSlots).count == 8 && map.assignedSlots.allSatisfy { (0..<16).contains($0) }
+-                    && Set(map.missIndices).count == map.missIndices.count
+-                    && map.missIndices.allSatisfy { map.experts.indices.contains($0) }, "actual plan shape")
+-                let residents = Set(map.residentSlots.filter { $0 >= 0 })
+-                try requirePrediction(map.residentSlots.allSatisfy { $0 == -1 || (0..<model.architecture.experts).contains($0) }
+-                    && residents.count == map.residentSlots.filter { $0 >= 0 }.count, "actual resident inventory shape")
+-                let misses = Set(map.missIndices.map { map.experts[$0] })
+-                try requirePrediction(misses == Set(map.experts).subtracting(residents), "actual miss/resident mismatch")
+-                if layer < 39 {
+-                    try requirePrediction(row.early?.count == model.architecture.hiddenSize
+-                        && row.late?.count == model.architecture.hiddenSize && row.lateTime > row.mapEnd,
+-                        "missing residual or layer boundary")
+-                }
+-            }
+-        }
+-        try memoryGuard()
+-        var rows: [[String: Any]] = []
+-        var totals: [String: (routeHits: Int, misses: Int, covered: Int, nonresident: Int, waste: Int,
+-                              predictor: UInt64, valid: Int, absent: Int, window: UInt64, ceiling: UInt64)] = [:]
+-        var scenarioTotals: [String: Double] = [:]
+-        let readCosts: [Double] = [630_000, 1_260_000, 2_520_000]
+-        let validationCosts: [Double] = [0, 1_000_000, 2_000_000]
+-        let pairBytes = UInt64(model.architecture.hiddenSize) * UInt64(model.architecture.routedIntermediateSize) * 6
+-        let posthocStart = QwenProductionTimingMeasurement.uptime()
+-        for position in 1175..<1203 {
+-            try memoryGuard()
+-            for layer in 0..<39 {
+-                let current = state.rows[.init(position: position, layer: layer)]!
+-                let target = state.rows[.init(position: position, layer: layer + 1)]!
+-                let map = target.map!
+-                let actual = Set(map.experts)
+-                let residents = Set(map.residentSlots.filter { $0 >= 0 })
+-                let actualMisses = Set(map.missIndices.map { map.experts[$0] })
+-                for predictor in ["early", "late"] {
+-                    let hidden = predictor == "early" ? current.early! : current.late!
+-                    let start = QwenProductionTimingMeasurement.uptime()
+-                    let predicted = try await runner.diagnosticNextLayerPrediction(hidden: hidden, layer: layer + 1)
+-                    let cost = QwenProductionTimingMeasurement.uptime() - start
+-                    let predictedSet = Set(predicted)
+-                    try requirePrediction(predicted.count == 8 && predictedSet.count == 8, "prediction route shape")
+-                    let nonresident = predictedSet.subtracting(residents)
+-                    let covered = nonresident.intersection(actualMisses)
+-                    let waste = nonresident.subtracting(actual)
+-                    try requirePrediction(nonresident.intersection(actual) == covered, "launch inventory mismatch")
+-                    let launch = predictor == "early" ? current.mapEnd : current.lateTime
+-                    let validWindow = launch > 0 && target.mapStart >= launch
+-                    let window = validWindow ? target.mapStart - launch : 0
+-                    let actualMapWall = target.mapEnd - target.mapStart
+-                    var record: [String: Any] = ["position": position, "fromLayer": layer,
+-                        "targetLayer": layer + 1, "predictor": predictor, "predictedExperts": predicted,
+-                        "actualExperts": map.experts, "actualMissExperts": actualMisses.sorted(),
+-                        "actualEntrySlots": map.residentSlots, "actualAssignedSlots": map.assignedSlots,
+-                        "routeMatches": predictedSet.intersection(actual).count,
+-                        "coveredMisses": covered.count, "nonresidentPredictions": nonresident.count,
+-                        "wastedNonresidentPredictions": waste.count, "wastedReadBytesScenario": UInt64(waste.count) * pairBytes,
+-                        "predictorNanoseconds": cost, "windowPresentAndCausal": validWindow,
+-                        "actualMapWallNanoseconds": actualMapWall]
+-                    if validWindow { record["windowNanoseconds"] = window }
+-                    var aggregate = totals[predictor] ?? (0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+-                    aggregate.routeHits += predictedSet.intersection(actual).count
+-                    aggregate.misses += actualMisses.count
+-                    aggregate.covered += covered.count
+-                    aggregate.nonresident += nonresident.count
+-                    aggregate.waste += waste.count
+-                    aggregate.predictor += cost
+-                    if validWindow {
+-                        aggregate.valid += 1
+-                        aggregate.window += window
+-                        aggregate.ceiling += min(actualMapWall, window)
+-                    } else { aggregate.absent += 1 }
+-                    totals[predictor] = aggregate
+-                    if validWindow {
+-                        var scenarios: [[String: Any]] = []
+-                        for q in readCosts {
+-                            for a in validationCosts {
+-                                let score = min(Double(actualMapWall), Double(covered.count) * q)
+-                                    - max(0, Double(nonresident.count) * q - Double(window)) - Double(cost) - a
+-                                let name = "\(predictor)/q\(Int(q))/a\(Int(a))"
+-                                scenarioTotals[name, default: 0] += score
+-                                scenarios.append(["qNanosecondsPerPair": q, "additionalValidationNanoseconds": a,
+-                                    "netNanosecondsScenario": score, "wastedReadNanosecondsScenario": Double(waste.count) * q])
+-                            }
+-                        }
+-                        record["scenarios"] = scenarios
+-                    }
+-                    rows.append(record)
+-                }
+-            }
+-        }
+-        let posthocEnd = QwenProductionTimingMeasurement.uptime()
+-        var summaries: [[String: Any]] = []
+-        for predictor in ["early", "late"] {
+-            let value = totals[predictor]!
+-            try requirePrediction(value.valid + value.absent == 1092, "prediction coverage count")
+-            let score = scenarioTotals["\(predictor)/q1260000/a0", default: 0] / Double(generated.count)
+-            let priority = value.absent != 0 ? "incomplete windows" : score < 65_000_000 ? "drop"
+-                : score >= 130_000_000 ? "supports next diagnostic review" : "review"
+-            summaries.append(["predictor": predictor, "cases": value.valid + value.absent,
+-                "routeRecall": Double(value.routeHits) / Double(1092 * 8),
+-                "actualMissCount": value.misses, "coveredActualMisses": value.covered,
+-                "actualMissRecall": Double(value.covered) / Double(max(1, value.misses)),
+-                "actualMissRecallDefined": value.misses != 0,
+-                "nonresidentPredictions": value.nonresident, "wastedNonresidentPredictions": value.waste,
+-                "wastedReadBytesScenario": UInt64(value.waste) * pairBytes,
+-                "predictorTotalNanoseconds": value.predictor, "causalWindows": value.valid,
+-                "excludedAbsentOrNoncausalWindows": value.absent,
+-                "totalCausalWindowNanoseconds": value.window,
+-                "idealOverlapWindowCeilingNanosecondsPerOutput": Double(value.ceiling) / Double(generated.count),
+-                "optimisticQ1260usA0NetNanosecondsPerOutputScenario": score,
+-                "optimisticQ1260usA0NetNanosecondsPerForwardScenario": score * Double(generated.count) / Double(consumedForwards),
+-                "prioritizationScreenOnly": priority])
+-        }
+-        let result: [String: Any] = ["passed": true, "captureSHA256": digest,
+-            "sampledTokenIDs": generated, "sampledIDMatch": true, "generatedOutputsIncludingEOS": generated.count,
+-            "consumedDecodeForwards": consumedForwards, "terminalEOSLeftPending": true,
+-            "actualDecodeMaps": state.rows.count, "predictionCasesPerPredictor": 1092,
+-            "prefillNanoseconds": prefillEnd - prefillStart, "observedDecodeNanoseconds": decodeEnd - decodeStart,
+-            "posthocNanoseconds": posthocEnd - posthocStart, "sourceBF16PairBytesFromGeometry": pairBytes, "collectionCallbackNanoseconds": state.callbackNanoseconds,
+-            "boundedResidualBytesMaximum": 32 * 39 * 2 * model.architecture.hiddenSize * MemoryLayout<Float>.stride,
+-            "actualResidualBytes": 28 * 39 * 2 * model.architecture.hiddenSize * MemoryLayout<Float>.stride,
+-            "summaries": summaries, "scenarioTotalNanoseconds": scenarioTotals, "rows": rows,
+-            "scenarioFormula": "min(actualMapWall,covered*q)-max(0,nonresident*q-window)-predictorCost-additionalValidationCost",
+-            "scenarioLimits": "q is an old cross-capture slope with0.5x/1x/2x sensitivity. a=0 is optimistic unknown extra prefetch validation cost;1ms/2ms are declared sensitivity assumptions. Reads serialize in a hypothetical queue and ALL speculative reads drain before demand work. Negative scores retained. Predictor timing includes norm, real router projection, routing and two full source validations. No prefetch runs or app gain is measured.",
+-            "windowLimits": "Early starts after current map. Late starts at residual-after-MoE. Both end at next map start. Existing phase boundaries use the production monotonic clock. Collection can inflate windows. Callback measurement includes lock wait/body but excludes unlock and later allocation effects. No calibration replay was added.",
+-            "residentStateProof": "Each layer has one private coordinator/cache. Serial decode makes one map per layer per position. There is no prefetch or other cache writer. Therefore target-layer preplan inventory equals its inventory at both earlier-layer launch points. No LFU replay is used.",
+-            "scope": "Posthoc recall probe only. Same normal grouped prefill and serial decode scheduling with hooks.none. No candidate routes or cache reads are substituted. Global early and late totals are separate; no per-case best-predictor oracle."]
+-        return try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+-    }
+-    private static func memoryGuard() throws {
+-        let process = Process(); process.executableURL = URL(fileURLWithPath: "/usr/bin/memory_pressure")
+-        process.arguments = ["-Q"]
+-        let pipe = Pipe(); process.standardOutput = pipe; process.standardError = pipe
+-        try process.run(); process.waitUntilExit()
+-        let text = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+-        let regex = try NSRegularExpression(pattern: "free percentage: ([0-9]+)%")
+-        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+-        guard process.terminationStatus == 0, let match = regex.firstMatch(in: text, range: range),
+-              let valueRange = Range(match.range(at: 1), in: text), let value = Int(text[valueRange]), value >= 30 else {
+-            throw PredictionProbeError(detail: "system free memory below30% or guard unavailable")
+-        }
+-    }
+-}
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExpertPredictionCapture.swift
++++ /dev/null
+@@ -1,115 +0,0 @@
+-import Foundation
+-import Synchronization
+-
+-// Fixed diagnostic storage. It cannot supply routes, bytes or callbacks.
+-final class QwenExpertPredictionCapture: Sendable {
+-    struct Key: Hashable, Sendable {
+-        let position: Int
+-        let layer: Int
+-    }
+-    struct Map: Sendable {
+-        let residentSlots: [Int]
+-        let experts: [Int]
+-        let missIndices: [Int]
+-        let assignedSlots: [Int]
+-    }
+-    struct Row: Sendable {
+-        var duplicate = false
+-        var early: [Float]?
+-        var late: [Float]?
+-        var lateTime: UInt64 = 0
+-        var mapStart: UInt64 = 0
+-        var mapEnd: UInt64 = 0
+-        var map: Map?
+-    }
+-    struct State: Sendable {
+-        var enabled = true
+-        var rows: [Key: Row] = [:]
+-        var failure: String?
+-        var callbackNanoseconds: UInt64 = 0
+-    }
+-    let firstPosition: Int
+-    let width: Int
+-    let layers: Int
+-    private let storage = Mutex(State())
+-    init(firstPosition: Int, width: Int, layers: Int) {
+-        precondition(firstPosition >= 0 && width > 0 && width <= 4096 && layers == 40)
+-        self.firstPosition = firstPosition
+-        self.width = width
+-        self.layers = layers
+-    }
+-    func includes(_ position: Int) -> Bool {
+-        position >= firstPosition && position < firstPosition + 32
+-    }
+-    private func update(position: Int, layer: Int, _ body: (inout Row) -> Void) {
+-        guard includes(position), (0..<layers).contains(layer) else { return }
+-        let start = QwenProductionTimingMeasurement.uptime()
+-        storage.withLock { state in
+-            guard state.enabled else { return }
+-            body(&state.rows[Key(position: position, layer: layer), default: Row()])
+-            state.callbackNanoseconds += QwenProductionTimingMeasurement.uptime() - start
+-        }
+-    }
+-    func residual(position: Int, layer: Int, early: Bool, hidden: [Float]) {
+-        guard includes(position), layer < layers - 1 else { return }
+-        guard hidden.count == width else {
+-            storage.withLock { $0.failure = "residual width mismatch" }
+-            return
+-        }
+-        update(position: position, layer: layer) { row in
+-            // Swift arrays retain value storage. No mutable scratch pointer is kept.
+-            if early {
+-                if row.early != nil { row.duplicate = true }
+-                row.early = hidden
+-            }
+-            else {
+-                if row.late != nil { row.duplicate = true }
+-                row.late = hidden
+-                row.lateTime = QwenProductionTimingMeasurement.uptime()
+-            }
+-        }
+-    }
+-    func mapStart(position: Int, layer: Int) {
+-        guard includes(position) else { return }
+-        let observed = QwenProductionTimingMeasurement.uptime()
+-        update(position: position, layer: layer) {
+-            if $0.mapStart != 0 { $0.duplicate = true }
+-            $0.mapStart = observed
+-        }
+-    }
+-    func mapEnd(position: Int, layer: Int) {
+-        guard includes(position) else { return }
+-        let observed = QwenProductionTimingMeasurement.uptime()
+-        update(position: position, layer: layer) {
+-            if $0.mapEnd != 0 { $0.duplicate = true }
+-            $0.mapEnd = observed
+-        }
+-    }
+-    func plan(position: Int, layer: Int, residents: [Int], plan: ExpertCachePlan) {
+-        guard includes(position) else { return }
+-        guard residents.count == 16 && plan.experts.count == 8
+-            && plan.assignedSlots.count == 8 else {
+-            storage.withLock { $0.failure = "map geometry mismatch" }
+-            return
+-        }
+-        update(position: position, layer: layer) { row in
+-            if row.map != nil { row.duplicate = true }
+-            row.map = Map(residentSlots: residents, experts: plan.experts,
+-                          missIndices: plan.misses, assignedSlots: plan.assignedSlots)
+-        }
+-    }
+-    func isDrained() -> Bool { storage.withLock { !$0.enabled } }
+-    func drain() -> State {
+-        storage.withLock { state in
+-            let result = state
+-            state = State(enabled: false)
+-            return result
+-        }
+-    }
+-}
+-
+-struct QwenExpertPredictionMapContext: Sendable {
+-    let capture: QwenExpertPredictionCapture
+-    let position: Int
+-    let layer: Int
+-}
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -60,7 +60,6 @@
+     private let moe: QwenMoE
+     private let moeConfiguration: QwenMoEConfiguration
+     private let expertSlotCount: Int
+-    private let predictionCapture: QwenExpertPredictionCapture?
+     private let hooks: QwenOfficialSourceTransactionHooks
+     private let useGPULinearPreparation: Bool
+     private let useGroupedLinearPrefill: Bool
+@@ -110,8 +109,7 @@
+     init(model: QwenOfficialSourceModel, maxContext: Int,
+          expertSlotCount: Int,
+          hooks: QwenOfficialSourceTransactionHooks = .none,
+-         useExpertCacheResidency: Bool? = nil,
+-         predictionCapture: QwenExpertPredictionCapture? = nil) throws {
++         useExpertCacheResidency: Bool? = nil) throws {
+         let architecture = model.architecture
+         let context = model.context
+         let useGroupedLinearPrefill = ProcessInfo.processInfo.environment[
+@@ -231,7 +229,6 @@
+             sharedIntermediateSize: architecture.sharedIntermediateSize)
+         self.model = model
+         self.context = context
+-        self.predictionCapture = predictionCapture
+         self.hooks = hooks
+         // Internal trial only, fixed for this runner's lifetime. Legacy
+         // diagnostic hooks still select the linear step's separated fallback.
+@@ -348,7 +345,6 @@
+                 guard mixer.count == width else { throw QwenTextRunnerError.stateArchitectureMismatch }
+                 hooks.observeActivation?(position, layer, "mixer", mixer)
+                 hidden = zip(hidden, mixer).map(+)
+-                predictionCapture?.residual(position: position, layer: layer, early: true, hidden: hidden)
+                 hooks.observeActivation?(position, layer, "residual-after-mixer", hidden)
+                 let post = try qwenOfficialSourceRMSNorm(hidden, weights.postNorm)
+                 hooks.observeActivation?(position, layer, "post-norm", post)
+@@ -358,7 +354,6 @@
+                 guard hidden.allSatisfy(\.isFinite) else {
+                     throw QwenTextRunnerError.execution(detail: "nonfinite source hidden")
+                 }
+-                predictionCapture?.residual(position: position, layer: layer, early: false, hidden: hidden)
+                 hooks.observeActivation?(position, layer, "residual-after-moe", hidden)
+             }
+             hooks.observeActivation?(position, -1, "final-hidden", hidden)
+@@ -942,29 +937,6 @@
+         return read(outputBuffer, count: outputCount)
+     }
+ 
+-    // Post-decode diagnostic only. No cache map or state update is performed.
+-    func diagnosticNextLayerPrediction(hidden: [Float], layer: Int) async throws -> [Int] {
+-        guard predictionCapture?.isDrained() == true, !inFlight, !prefillInFlight, !unusable,
+-              model.layers.indices.contains(layer), layer > 0,
+-              hidden.count == model.architecture.hiddenSize else {
+-            throw QwenTextRunnerError.invalidState(detail: "prediction diagnostic state")
+-        }
+-        try Task.checkCancellation()
+-        try model.revalidateSource()
+-        let row = model.layers[layer]
+-        let normalized = try qwenOfficialSourceRMSNorm(hidden, row.postNorm)
+-        let logits = try await projection(row.weights, row.routerName, input: normalized,
+-                                          outputCount: model.architecture.experts)
+-        let routing = try QwenMoE.route(logits: logits, configuration: moeConfiguration,
+-                                        arithmetic: .officialSourceCPU)
+-        try model.revalidateSource()
+-        guard let experts = routing.selectedExpertIDs.first,
+-              experts.count == model.architecture.expertsPerToken else {
+-            throw QwenTextRunnerError.execution(detail: "prediction Top-8 invalid")
+-        }
+-        return experts
+-    }
+-
+     private func moeStep(input: [Float], layer: Int) async throws -> [Float] {
+         if let location = QwenProductionTimingMeasurement.location, location.layer != layer {
+             return try await QwenProductionTimingMeasurement.$location.withValue(location.atLayer(layer)) {
+@@ -1001,16 +973,9 @@
+         }
+         let mapSpan = QwenProductionTimingMeasurement.span(.expertMap)
+         let lease: QwenBF16ExpertLease
+-        let predictionMap = predictionCapture.flatMap { capture in
+-            capture.includes(committedPosition)
+-                ? QwenExpertPredictionMapContext(capture: capture, position: committedPosition, layer: layer) : nil
+-        }
+-        predictionCapture?.mapStart(position: committedPosition, layer: layer)
+-        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement,
+-                                               prediction: predictionMap) }
++        do { lease = try await coordinator.map(expertIDs: experts, measurement: measurement) }
+         catch { mapSpan?.finish(); throw error }
+         mapSpan?.finish()
+-        predictionCapture?.mapEnd(position: committedPosition, layer: layer)
+         // Mapping has succeeded. Later GPU failure/cancellation cannot undo
+         // these completed cache reads, even when the token is rolled back.
+         successfulCacheHits += UInt64(lease.diagnostics.hits)
+--- a/Sources/TurboFieldfareExpertPredictRecall/Command.swift
++++ /dev/null
+@@ -1,31 +0,0 @@
+-import Foundation
+-import Darwin
+-import TurboFieldfare
+-
+-@main struct ExpertPredictRecallCommand {
+-    @MainActor static func main() async {
+-        guard CommandLine.arguments.count == 4 else {
+-            FileHandle.standardError.write(Data("usage: TurboFieldfareExpertPredictRecall registration.json request.json report.json\n".utf8))
+-            exit(2)
+-        }
+-        let output = URL(fileURLWithPath: CommandLine.arguments[3])
+-        do {
+-            guard !FileManager.default.fileExists(atPath: output.path) else {
+-                throw CocoaError(.fileWriteFileExists)
+-            }
+-            let data = try await QwenExpertPredictRecallProbe.run(
+-                registrationURL: URL(fileURLWithPath: CommandLine.arguments[1]),
+-                requestURL: URL(fileURLWithPath: CommandLine.arguments[2]))
+-            try data.write(to: output, options: .atomic)
+-            print(String(decoding: data, as: UTF8.self))
+-        } catch {
+-            let failure = ["passed": false, "error": String(describing: error)] as [String: Any]
+-            do {
+-                let data = try JSONSerialization.data(withJSONObject: failure, options: [.sortedKeys])
+-                if !FileManager.default.fileExists(atPath: output.path) { try data.write(to: output, options: .atomic) }
+-            } catch { FileHandle.standardError.write(Data("failure receipt write: \(error)\n".utf8)) }
+-            FileHandle.standardError.write(Data("expert prediction recall probe failed: \(error)\n".utf8))
+-            exit(1)
+-        }
+-    }
+-}

@@ -75,6 +75,54 @@ struct RoutedBlobs {
     device const uint8_t* blob[kMaxStreamedExperts];
 };
 
+struct CachedExpertBlobs {
+    device const uint8_t* blob[128];
+};
+
+// Three packed uints match MTLDispatchThreadgroupsIndirectArguments.
+struct CachedDispatchSize {
+    uint x;
+    uint y;
+    uint z;
+};
+
+static_assert(sizeof(CachedDispatchSize) == 12, "Indirect dispatch layout changed");
+static_assert(sizeof(RoutedBlobs) == 64, "Selected expert pointer layout changed");
+static_assert(sizeof(CachedExpertBlobs) == 1024, "Cached expert pointer layout changed");
+
+static inline void moe_cache_resolve(
+    device const CachedExpertBlobs& cache,
+    device const uint* slot_by_expert,
+    device const uint* indices,
+    device RoutedBlobs& selected,
+    device uint* routes,
+    device uint& stopped,
+    device CachedDispatchSize* dispatches,
+    uint first_routed_dispatch,
+    uint dispatch_limit,
+    uint layer,
+    uint slot_count) {
+    uint slots[kMaxStreamedExperts];
+    bool all_hit = true;
+    for (uint i = 0; i < kMaxStreamedExperts; ++i) {
+        uint expert = min(indices[i], 127u);
+        routes[i] = expert;
+        slots[i] = slot_by_expert[expert];
+        all_hit = all_hit && slots[i] < slot_count;
+    }
+    if (!all_hit) {
+        stopped = layer;
+        // Disable this layer's tail and every later layer in the batch.
+        for (uint i = first_routed_dispatch; i < dispatch_limit; ++i) {
+            dispatches[i] = CachedDispatchSize{0, 0, 0};
+        }
+        return;
+    }
+    for (uint i = 0; i < kMaxStreamedExperts; ++i) {
+        selected.blob[i] = cache.blob[slots[i]];
+    }
+}
+
 static inline void router_gemv_gemma4_body(
     device const uint8_t* W,
     device const bfloat* scales,
@@ -132,15 +180,13 @@ kernel void router_gemv_gemma4_r4(
                             out_logits, num_experts, D, 4, tg_idx, sg_idx, lane);
 }
 
-kernel void router_topk_select_k8(
-    device const float* logits [[buffer(0)]],
-    device const bfloat* per_expert_scale [[buffer(1)]],
-    device uint* out_indices [[buffer(2)]],
-    device half* out_weights [[buffer(3)]],
-    constant uint& num_experts [[buffer(4)]],
-    uint tid [[thread_position_in_threadgroup]]
+static inline void router_topk_select_k8_body(
+    device const float* logits,
+    device const bfloat* per_expert_scale,
+    device uint* out_indices,
+    device half* out_weights,
+    constant uint& num_experts
 ) {
-    if (tid != 0) return;
     const uint NE = router_fc_num_experts(num_experts);
     uint top_idx[8];
     float top_score[8];
@@ -182,6 +228,40 @@ kernel void router_topk_select_k8(
         out_indices[i] = expert_idx;
         out_weights[i] = half(weight * float(per_expert_scale[expert_idx]));
     }
+}
+
+kernel void router_topk_select_k8(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    uint tid [[thread_position_in_threadgroup]]) {
+    if (tid != 0) return;
+    router_topk_select_k8_body(logits, per_expert_scale, out_indices, out_weights, num_experts);
+}
+
+kernel void router_topk_select_k8_cached(
+    device const float* logits [[buffer(0)]],
+    device const bfloat* per_expert_scale [[buffer(1)]],
+    device uint* out_indices [[buffer(2)]],
+    device half* out_weights [[buffer(3)]],
+    constant uint& num_experts [[buffer(4)]],
+    device const CachedExpertBlobs& cache [[buffer(5)]],
+    device const uint* slot_by_expert [[buffer(6)]],
+    device RoutedBlobs& selected [[buffer(7)]],
+    device uint* routes [[buffer(8)]],
+    device uint& stopped [[buffer(9)]],
+    device CachedDispatchSize* dispatches [[buffer(10)]],
+    constant uint& first_routed_dispatch [[buffer(11)]],
+    constant uint& dispatch_limit [[buffer(12)]],
+    constant uint& layer [[buffer(13)]],
+    constant uint& slot_count [[buffer(14)]],
+    uint tid [[thread_position_in_threadgroup]]) {
+    if (tid != 0 || stopped != 0xffffffffu) return;
+    router_topk_select_k8_body(logits, per_expert_scale, out_indices, out_weights, num_experts);
+    moe_cache_resolve(cache, slot_by_expert, out_indices, selected, routes, stopped,
+                      dispatches, first_routed_dispatch, dispatch_limit, layer, slot_count);
 }
 
 // Each SIMD computes one affine INT4 row. Four adjacent groups are loaded as
@@ -243,8 +323,8 @@ static inline float moe_int4_gemv_row_simd_dev_vec(
     return simd_sum(acc);
 }
 
-// Gate and up rows share activation loads. Two 16-bit loads assemble each
-// 4-byte weight chunk because packed sub-tensor offsets need only be 2-byte aligned.
+// Gate and up rows share input loads and exact power-of-two scales.
+// Read weights in 16-bit words to support two-byte offsets.
 static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
     device const uint8_t* gateW,
     device const bfloat* gateS,
@@ -273,8 +353,8 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
         const uint byte_base = blk * 128u + lane * 4u;
         device const ushort* gp = (device const ushort*)(gW_row + byte_base);
         device const ushort* up = (device const ushort*)(uW_row + byte_base);
-        const uint gw4 = uint(gp[0]) | (uint(gp[1]) << 16);
-        const uint uw4 = uint(up[0]) | (uint(up[1]) << 16);
+        const uint gw0 = uint(gp[0]), gw1 = uint(gp[1]);
+        const uint uw0 = uint(up[0]), uw1 = uint(up[1]);
         const uint g = blk * 4u + (lane >> 3);
         const float gs = float(gS_row[g]);
         const float gb = float(gB_row[g]);
@@ -288,26 +368,20 @@ static inline float2 moe_int4_gate_up_rows_simd_dev_vec_u16load(
         const float e4 = float(xb.x), e5 = float(xb.y);
         const float e6 = float(xb.z), e7 = float(xb.w);
         const float sum = e0 + e1 + e2 + e3 + e4 + e5 + e6 + e7;
+        const float x1 = e1 * 0x1p-4f, x2 = e2 * 0x1p-8f, x3 = e3 * 0x1p-12f;
+        const float x5 = e5 * 0x1p-4f, x6 = e6 * 0x1p-8f, x7 = e7 * 0x1p-12f;
 
-        const uint gb0 = gw4 & 0xFFu;
-        const uint gb1 = (gw4 >> 8) & 0xFFu;
-        const uint gb2 = (gw4 >> 16) & 0xFFu;
-        const uint gb3 = (gw4 >> 24) & 0xFFu;
         float g_dot = 0.0f;
-        g_dot = fma(float(gb0 & 0x0Fu), e0, g_dot); g_dot = fma(float(gb0 >> 4), e1, g_dot);
-        g_dot = fma(float(gb1 & 0x0Fu), e2, g_dot); g_dot = fma(float(gb1 >> 4), e3, g_dot);
-        g_dot = fma(float(gb2 & 0x0Fu), e4, g_dot); g_dot = fma(float(gb2 >> 4), e5, g_dot);
-        g_dot = fma(float(gb3 & 0x0Fu), e6, g_dot); g_dot = fma(float(gb3 >> 4), e7, g_dot);
+        g_dot = fma(float(gw0 & 0x000Fu), e0, g_dot); g_dot = fma(float(gw0 & 0x00F0u), x1, g_dot);
+        g_dot = fma(float(gw0 & 0x0F00u), x2, g_dot); g_dot = fma(float(gw0 & 0xF000u), x3, g_dot);
+        g_dot = fma(float(gw1 & 0x000Fu), e4, g_dot); g_dot = fma(float(gw1 & 0x00F0u), x5, g_dot);
+        g_dot = fma(float(gw1 & 0x0F00u), x6, g_dot); g_dot = fma(float(gw1 & 0xF000u), x7, g_dot);
 
-        const uint ub0 = uw4 & 0xFFu;
-        const uint ub1 = (uw4 >> 8) & 0xFFu;
-        const uint ub2 = (uw4 >> 16) & 0xFFu;
-        const uint ub3 = (uw4 >> 24) & 0xFFu;
         float u_dot = 0.0f;
-        u_dot = fma(float(ub0 & 0x0Fu), e0, u_dot); u_dot = fma(float(ub0 >> 4), e1, u_dot);
-        u_dot = fma(float(ub1 & 0x0Fu), e2, u_dot); u_dot = fma(float(ub1 >> 4), e3, u_dot);
-        u_dot = fma(float(ub2 & 0x0Fu), e4, u_dot); u_dot = fma(float(ub2 >> 4), e5, u_dot);
-        u_dot = fma(float(ub3 & 0x0Fu), e6, u_dot); u_dot = fma(float(ub3 >> 4), e7, u_dot);
+        u_dot = fma(float(uw0 & 0x000Fu), e0, u_dot); u_dot = fma(float(uw0 & 0x00F0u), x1, u_dot);
+        u_dot = fma(float(uw0 & 0x0F00u), x2, u_dot); u_dot = fma(float(uw0 & 0xF000u), x3, u_dot);
+        u_dot = fma(float(uw1 & 0x000Fu), e4, u_dot); u_dot = fma(float(uw1 & 0x00F0u), x5, u_dot);
+        u_dot = fma(float(uw1 & 0x0F00u), x6, u_dot); u_dot = fma(float(uw1 & 0xF000u), x7, u_dot);
 
         g_acc = fma(gs, g_dot, g_acc);
         g_acc = fma(gb, sum, g_acc);

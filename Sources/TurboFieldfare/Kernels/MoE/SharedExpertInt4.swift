@@ -36,6 +36,24 @@ public final class SharedExpertInt4 {
                        scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
                        scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
                        scratchAct: MTLBuffer, scratchActOffset: Int = 0) throws {
+        try encodeConditional(commandBuffer: cb, x: x, xOffset: xOffset,
+                              gate: gate, up: up, down: down, y: y, yOffset: yOffset,
+                              scratchGate: scratchGate, scratchGateOffset: scratchGateOffset,
+                              scratchUp: scratchUp, scratchUpOffset: scratchUpOffset,
+                              scratchAct: scratchAct, scratchActOffset: scratchActOffset,
+                              conditional: nil)
+    }
+
+    func encodeConditional(commandBuffer cb: MTLCommandBuffer,
+                       x: MTLBuffer, xOffset: Int = 0,
+                       gate: SharedExpertProjection,
+                       up: SharedExpertProjection,
+                       down: SharedExpertProjection,
+                       y: MTLBuffer, yOffset: Int = 0,
+                       scratchGate: MTLBuffer, scratchGateOffset: Int = 0,
+                       scratchUp: MTLBuffer, scratchUpOffset: Int = 0,
+                       scratchAct: MTLBuffer, scratchActOffset: Int = 0,
+                       conditional: DecodeDispatch?) throws {
         guard gate.rows == up.rows, gate.cols == up.cols,
               down.rows == gate.cols, down.cols == gate.rows else {
             throw SharedExpertError.dimensionMismatch(
@@ -63,14 +81,14 @@ public final class SharedExpertInt4 {
                     biases: gate.biases, biasesOffset: gate.biasesOffset,
                     x: x, xOffset: xOffset,
                     y: scratchGate, yOffset: scratchGateOffset,
-                    m: gate.rows, n: gate.cols)
+                    m: gate.rows, n: gate.cols, conditional: conditional)
         int4.encode(commandBuffer: cb,
                     weights: up.weights, weightsOffset: up.weightsOffset,
                     scales: up.scales, scalesOffset: up.scalesOffset,
                     biases: up.biases, biasesOffset: up.biasesOffset,
                     x: x, xOffset: xOffset,
                     y: scratchUp, yOffset: scratchUpOffset,
-                    m: up.rows, n: up.cols)
+                    m: up.rows, n: up.cols, conditional: conditional)
 
         guard let encoder = cb.makeComputeCommandEncoder() else { return }
         encoder.setComputePipelineState(geluMulPSO)
@@ -80,8 +98,15 @@ public final class SharedExpertInt4 {
         var count = UInt32(intermediate)
         encoder.setBytes(&count, length: MemoryLayout<UInt32>.size, index: 3)
         let width = min(geluMulPSO.maxTotalThreadsPerThreadgroup, 256)
-        encoder.dispatchThreads(MTLSize(width: intermediate, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        if let conditional {
+            conditional.encode(encoder,
+                               groups: MTLSize(width: (intermediate + width - 1) / width,
+                                               height: 1, depth: 1),
+                               threads: MTLSize(width: width, height: 1, depth: 1))
+        } else {
+            encoder.dispatchThreads(MTLSize(width: intermediate, height: 1, depth: 1),
+                                    threadsPerThreadgroup: MTLSize(width: width, height: 1, depth: 1))
+        }
         encoder.endEncoding()
 
         int4.encode(commandBuffer: cb,
@@ -90,7 +115,7 @@ public final class SharedExpertInt4 {
                     biases: down.biases, biasesOffset: down.biasesOffset,
                     x: scratchAct, xOffset: scratchActOffset,
                     y: y, yOffset: yOffset,
-                    m: down.rows, n: down.cols)
+                    m: down.rows, n: down.cols, conditional: conditional)
     }
 }
 
@@ -134,4 +159,19 @@ public final class SharedExpertRuntime {
                                scratchAct: scratchAct, scratchActOffset: scratchActOffset)
         }
     }
+
+    func encodeCached(commandBuffer: MTLCommandBuffer, x: MTLBuffer,
+                      gate: SharedExpertProjection, up: SharedExpertProjection,
+                      down: SharedExpertProjection, y: MTLBuffer,
+                      scratchGate: MTLBuffer, scratchUp: MTLBuffer,
+                      scratchAct: MTLBuffer, conditional: DecodeDispatch) throws {
+        guard case .int4(let runtime) = implementation else {
+            throw SharedExpertError.unsupportedWeightBits(weightBits)
+        }
+        try runtime.encodeConditional(commandBuffer: commandBuffer, x: x,
+                                      gate: gate, up: up, down: down, y: y,
+                                      scratchGate: scratchGate, scratchUp: scratchUp,
+                                      scratchAct: scratchAct, conditional: conditional)
+    }
+
 }

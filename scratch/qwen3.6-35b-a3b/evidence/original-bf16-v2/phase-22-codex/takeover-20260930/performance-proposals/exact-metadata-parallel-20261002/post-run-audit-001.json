@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-02T13:46:54.424058+00:00",
+  "overlayFilesMatched": 5294,
+  "frozenFilesMatched": 19,
+  "binaryMatched": true,
+  "resultSHA256": "0805cce5c60365e895b39181376baae36b0ed518e81dc76ef0af54581028dde7",
+  "receiptSHA256": "f04b015dbb2dbdd37a634bc8135d5687285481707e2ed28e925c6ab15475f94f",
+  "buildReceiptSHA256": "f496f90215df37da7be591cf2b47e82a721ec0c698d5a22a67ed8eb18a09b46b",
+  "rootStatus": "",
+  "probeExited": true,
+  "actualHeadlineCalls": 4608,
+  "clockOnControlCalls": 192,
+  "warmCalls": 7
+}

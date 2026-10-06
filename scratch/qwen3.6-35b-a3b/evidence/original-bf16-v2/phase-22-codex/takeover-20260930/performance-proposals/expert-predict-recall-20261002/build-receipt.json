@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-recall-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-predict-recall-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareExpertPredictRecall"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "b14a6f610ee894021792141989aa7afa5fa80357d56b808b5f5c22202a0a7eb4",
+  "binarySHA256": "1c7ca22afd06a73b417ed34dd305a77cf14ed5be39698a8718978699c9289627",
+  "stageHashesSHA256": "ea3f667f60558c66852522e820b2a9382bd1318a02e759f28044471056426386"
+}

@@ -1,0 +1,56 @@
+{
+  "status": "STAGED_FROZEN_NO_BUILD_OR_RUN",
+  "baselineCommit": "e99e5c5b96e66d962504acfe82a84db8c5161673",
+  "sourceBaseline": "Production Sources/Tests/Scripts/Package/resolved equal3fe3305; all731app019hashes verified without executing guard. baseline-proof.json",
+  "ownerScope": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002",
+  "deltaSourcePaths": [
+    "Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift"
+  ],
+  "forwardSHA256": "94ce008ab3f22ad686e8b92f93eefd5e8ff6b975d935463fff93541b30af4dde",
+  "inverseSHA256": "b64febb9c88c1f0f71e56d1d6a32aac7d9fef314a8e70c6766d511154cd17e03",
+  "vsPairSHA256": "2b7a826524f01de38a0addd80680311ddbab77c7ca10a534a11a80fd87eb6571",
+  "frozenHashes": "frozen-hashes.json",
+  "method": "Optional diagnostic capture only. DispatchTime monotonic scalar wall counters. No events, new locks, worker callbacks, GPU counters or timer-event arrays. Source method order/checks, kernels, scheduling, routes, LFU16, flags, sampler, rollback and bit gates unchanged.",
+  "intervals": {
+    "sourceSerialStart/End": "Actual synchronous check at each produce start/end.",
+    "sourceSerialPreMap/PostMap": "Actual synchronous full-source check around each serial layer map. Postmap stays before buffer allocation.",
+    "sourcePairStart/Token/PreMap/PreGPU/Final/End": "Actual synchronous full-source call sites. Admissions remain separate per logical token.",
+    "sourceTurn": "Actual check in beginTurn. Nested inside turn interval.",
+    "sourceSampler": "Actual sampler-adjacent full-source call. Nested inside sampler interval.",
+    "map": "Await coordinator.map. Contains worker IO/validation and allocation. Raw worker times are not summed with this elapsed interval.",
+    "moe": "Serial buffer/scratch allocation through submit+settle. Pair grouped submit call covers bindings/row allocation, admission, submit+settle. Pair preGPUsource and reuseChecks are nested inside this interval.",
+    "moeSubmit": "Synchronous lease-owned encoding and commit call. Nested inside moe; GPU can run during this call. Not GPUduration.",
+    "moeSettle": "Await completion/settlement and existing error/cancellation checks. Nested inside moe. Not GPUduration.",
+    "reuseChecks": "Actual protected pair-reuse check in admission. Nested inside pairmoe. Also appears in raw IOcounters.",
+    "mixer": "Input normalization through append/output selection. Pair batching counted once on first row; remaining row selections each measured. No route/head inside.",
+    "router": "Projection, CPU routing/cutoff and existing route capture. Sourcepremap outside.",
+    "head": "Final norm and head projection/readback. Final sourcecheck outside.",
+    "sampler": "Whole existing FP32->FP16boundary plus sampler submission/wait/read. Includes sourceSampler.",
+    "turn": "beginTurn incl full-sourcecheck and checkpoint clone.",
+    "restoreReplay": "Existing restore plus accepted prefix replay. Child serial stage/source timings merged into totals. This interval overlaps those child stages. Replaycapture stores no route/logit values."
+  },
+  "aggregation": "fullSourceWallNanoseconds sums only direct synchronous model.revalidateSource calls; no nested stage totals added. remainingWallUpperBoundNanoseconds=armwall-fullsource; it still contains protected IO and required work, so is not all shareable. Child stage totals must not be added again to moe/sampler/turn/restoreReplay. Zero means no timed occurrence, not absent checks.",
+  "ioFields": "Serializes every existing counter field: count, bytes, errors, wallNanoseconds, threadCPUNanoseconds, unavailableCPU, interruptions. Phase/site arrays keep original index meanings. Raw worker sums can overlap and are not critical path elapsed.",
+  "controls": "After warming, same fullacceptarms fixed serialOFF,pairON,pairOFF,serialON once each; new scalar timers toggle only. IOmeasurement stays on. Cachedependent one-arm observations are descriptive. New diagnostic timings do not qualify speed. Existing ABBA/BAABon8arms and median/cost gate preserved.",
+  "guard": "Local copied preflight with e99 HEAD, minimal local plan same INSTALLED, and explicit git diff3fe..e99 for requiredproductioninputs. All prior731source/app019/Gemma/OS/Swift/disk/memory/process guards preserved. Runwrapper invokes localguard; oldguard/evidence immutable.",
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/run.py",
+      "/absolute/existing/official/registration.json"
+    ]
+  ],
+  "limits": "One model/runner, LFU16,12GiBloaderbudget,>=30%free internal/externalguards,1800s owned-child watchdog unchanged. Four additional controlarms only. No predictor/recovery/appchange.",
+  "verification": "4patchchecks passed, PythonASTparsed only, productioncheckout clean. Main reviews/builds/runs."
+}

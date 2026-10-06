@@ -16,3 +16,13 @@ void gelu_mul_fp16(
     const float u = float(up[tid]);
     out[tid] = half(gelu_pytorch_tanh(g) * u);
 }
+
+kernel void gemma_draft_add_scaled(
+    device half* hidden [[buffer(0)]],
+    device const half* branch [[buffer(1)]],
+    constant float& scale [[buffer(2)]],
+    uint index [[thread_position_in_grid]]) {
+    if (index >= 1024u) return;
+    const half sum = half(hidden[index] + branch[index]);
+    hidden[index] = half(float(sum) * scale);
+}

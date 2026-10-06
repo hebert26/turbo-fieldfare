@@ -1,0 +1,75 @@
+{
+  "commit": "e99e5c5b96e66d962504acfe82a84db8c5161673",
+  "commands": [
+    {
+      "argv": [
+        "python3",
+        "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/preflight.py"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "pgrep",
+        "-fl",
+        "TurboFieldfareExactBlockProbe|resident-kernel-timing|source64-token4|qwen.*harness"
+      ],
+      "exit": 1
+    },
+    {
+      "argv": [
+        "system_profiler",
+        "SPHardwareDataType"
+      ],
+      "exit": 0
+    }
+  ],
+  "environment": {
+    "TURBO_QWEN_SOURCE_VALIDATION_FAST": "1",
+    "TURBO_QWEN_EXPERT_CACHE_RESIDENCY": "1",
+    "TURBO_QWEN_GPU_LINEAR_PREPARATION": "1",
+    "TURBO_QWEN_GROUPED_LINEAR_PREFILL": "1",
+    "TURBO_QWEN_EXPERT_PROJECTION_BATCH": "0",
+    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN": "0",
+    "TURBO_QWEN_EXPERT_READ_KNOWN_NONE_4": "0",
+    "TURBO_QWEN_EXACT_TOKEN_CAPTURE": "0"
+  },
+  "memorySamplingSeconds": 2,
+  "wholeRunTimeoutSeconds": 1800,
+  "binarySHA256": "cd1ebb543f2598769463c039a2ac9c00ff39c20a151fae7b8518c2381716196f",
+  "stageHashes": {
+    "baseline-hashes.json": "f350a38669cc15a8422d0466193f424de7b6075071aa868526f68f353c64aa54",
+    "baseline-proof.json": "86065fd8843740df6feb7ceec78a99920e3d83da26a87990ce992f5a0106fbc9",
+    "build.py": "26efdf8bb377bb4569abdd48d9901004e019954fd3daccec66f907cc0d680d33",
+    "candidate/Package.swift": "a8f5a832a3a5573a86c7d059477b7bbe9a13748d6209c89354fe52a8d7154374",
+    "candidate/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift": "ec7ca99260123597e60ba860493b8363fdf3a5e4e04be69157a7d8c1e030bec1",
+    "candidate/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift": "c3d54a7e8893499923e35822ecc502f962ee5fdba733cc5cfb5b51680255e628",
+    "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift": "6edae3cec52c39dfd5a5698c821ee4d304e2fc4537c0c1e74289c43e2f2dcf09",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift": "8c94cb9364398feb2f6e07395a30c909b37394f3a10263efe0617fbaded9a667",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift": "868f4616d3b5b31952c873d483dcf7ea0230aea5d1b446401a0368873473981f",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": "9ce0cee60eb542d41c18ab94b40a7fd9a262c50ac78f8a83ddda2ca737dc588e",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift": "d975f261077504075319a81c9c93e6b4add0f48165ae2b31476cd7bb362ef478",
+    "candidate/Sources/TurboFieldfareExactBlockProbe/Command.swift": "3d71b433c0b9ff6459cd7caf59e63e1ede8494052e2d358c0e1b4d3311d5bbe3",
+    "evidence_helpers.py": "edb42e483d4255df6800aa2208807e45a380436cd86750fb598d24b62b2288f4",
+    "patch/forward.diff": "94ce008ab3f22ad686e8b92f93eefd5e8ff6b975d935463fff93541b30af4dde",
+    "patch/guard.diff": "29d2c693618316f554bf739482bf365e4e9b1870e887bf578189cb0d34a5294e",
+    "patch/inverse.diff": "b64febb9c88c1f0f71e56d1d6a32aac7d9fef314a8e70c6766d511154cd17e03",
+    "patch/vs-pair-inverse.diff": "e06f1494eecb70521bb94349656f5b2c60a0a6e59d365b2fafe2e87e0bde1ceb",
+    "patch/vs-pair.diff": "2b7a826524f01de38a0addd80680311ddbab77c7ca10a534a11a80fd87eb6571",
+    "preflight-plan.json": "262cff6d1157582495ec7abcdfa79d80284e61426ef0d8fa23e97f45655f7a1b",
+    "preflight.py": "34d71f4f0b0d4e1ba323dd48ebf070decb5d3645ce8c715ace4e3dd0fe382a32",
+    "prepare.py": "b66a81fab5a57144feae65ae1297bd892611aaa30beab2bbf1e9ce3d1d59d129",
+    "request.json": "a9d120c3e25bfedfa7634162c2f28dd94202bdbfe015cd242933d946b678dd16",
+    "run.py": "c891dc8c8d8dbcaf72a30f308d9ec8c9224d431b692f8214884c3e185588fbb7"
+  },
+  "probeCommand": [
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/build/release/TurboFieldfareExactBlockProbe",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/request.json",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/run-20261002T125618Z-124ee7d8/result.json"
+  ],
+  "ownedPID": 57291,
+  "childExit": 0,
+  "exit": 0,
+  "wallSeconds": 180.070967375068
+}

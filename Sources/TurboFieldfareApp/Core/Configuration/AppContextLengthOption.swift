@@ -51,4 +51,9 @@ public enum AppContextLengthOption: Int, CaseIterable, Identifiable, Sendable {
         case .sixtyFourK: "64K, +1.17 GB"
         }
     }
+
+    public func menuLabel(for family: AppModelFamily) -> String {
+        family == .gemma4 ? menuLabel
+            : (self == .eightK ? "8K, Default" : shortLabel)
+    }
 }

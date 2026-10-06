@@ -1,0 +1,119 @@
+{
+  "schema": 1,
+  "status": "frozen for Main review/build/run; no execution by coding owner",
+  "head": "867e99bf202fda5c7ea54c8f4aa1744cb42a8299",
+  "productionAnchor": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "sourceDependency": "immutable causal-lookup-decode-20261002 candidate",
+  "product": "TurboFieldfareRecurrentPrefixRecovery",
+  "modes": [
+    "serial",
+    "legacy",
+    "new"
+  ],
+  "newBehavior": "new exact4 captures normalized inputs; only rejected accepted-prefix settlement replaces full replay with linear-only re-append",
+  "unchanged": [
+    "fixed causal max4 longest-suffix latest-match proposer",
+    "29sample budget includingEOS,1175inputs,8192capacity",
+    "exact pair schedule,routers,head,weight arithmetic",
+    "LFU16;all original source/cache/read/publication/admission checks",
+    "original CPU linear checkpoint clone; no retained-checkpoint representation change",
+    "no arbitrary callbacks or production integration"
+  ],
+  "changedCopyPaths": [
+    "candidate/Package.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift",
+    "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift",
+    "candidate/Sources/TurboFieldfareRecurrentPrefixRecovery/Command.swift"
+  ],
+  "ownership": "only new sibling; wrapper owner owns run.py/compare.py/analyze.py/wrapper-handoff.json",
+  "inputCaptureSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "memory": {
+    "savedRowsBytes": 983040,
+    "formula": "4*30*2048*4bytes",
+    "extraPersistentWeightOrKVBytes": 0,
+    "perRowSliceBytes": 8192,
+    "existingBaselineClone": "unchanged approximately64MiB, not eliminated; existing GPU copy-on-write allocations remain",
+    "admissionFreePercent": 50,
+    "wholeChildMinimumFreePercent": 30,
+    "oneModelAndRunnerPerChild": true,
+    "stateDiagnostics": "one final committed-state snapshot; no per-token recurrent boundary snapshots"
+  },
+  "recoveryContract": {
+    "eligibility": "hooks genuinely knownnone; exact4 block; same runner owner/turnID/base/fullKV baseline; capture sealed after all40layers complete",
+    "capturedInputs": "immutable normalized Float rows retained by value, all30linear layers and4rows; no alias to mutable scratch",
+    "appendCalls": "30*keep, keep0..4 supported; actual causal chain only this run",
+    "sourceAdmission": "fresh full-source scan before recovery, before EACH new linear append, and before final KV truncation; original append projection checks untouched; these costs stay in settlement wall",
+    "atomicCommit": "all throwing/awaiting work precedes KV truncation; return refreshed ORIGINAL baseline position/lineage then update turn checkpoint and committed position synchronously",
+    "KV": "no payload copy,only checked committed cursors; speculative tail excluded from visible/readable prefix",
+    "error": "drain linear work,restore original linear/full baseline,refresh lineage,propagate original error;rollback failure marks runner unusable; no silent fallback",
+    "staleCapture": "owner,turn,base,fullKV owner/lineage,active capture identity,seal and consumed flag enforced",
+    "cleanup": "capture rows discarded on finish,normal rollback,prefill error,recovery return/error; final liveBytes must0",
+    "shortProposal": "existing charged full replay retained for non4input branches; explicit recoveryKind",
+    "terminal": "sampledEOS remains pending,not consumed; final committed1203,pending1"
+  },
+  "comparison": {
+    "orders": [
+      [
+        "serial",
+        "legacy",
+        "new"
+      ],
+      [
+        "new",
+        "legacy",
+        "serial"
+      ]
+    ],
+    "firstStop": "resource/correctness failure or either new/legacy>0.95 or new/serial>0.95",
+    "isolatedRecoveryGate": "new/legacy<=0.95bothorders; no whole-app claim",
+    "overallDecodeGate": "new/serial<=0.95bothorders; still isolated,not app qualification",
+    "noHard70msGate": true,
+    "correctness": "29IDs,1120accepted routeIDs/weightbits,28acceptedrawrowbits,final recurrent/convolution+committedKV bits; legacy/new same actual causal decisions and branch hashes",
+    "diagnosticCoverage": "actual causal keeps only; keep0..4 source support is not exhaustive executed qualification"
+  },
+  "timing": {
+    "decode": "initialsample to finalfinish; includes capture,checkpoint,lookup,verification,sampling,all scans,settlement,replay,hash/counter formatting",
+    "request": "promptStart through decodeEnd including interphase memory guard and CPU read",
+    "settlement": "sum actual rejection spans,broken down by fullReplay/recurrentOnly; appendCalls/keptInputs/normalizedBytes reported",
+    "excluded": "load beforeprompt; final golden assertion/numerical-state readback/hash afterdecode",
+    "CPU": "process getrusage user/system; not additive stage proof"
+  },
+  "commands": {
+    "prepare": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/prepare.py"
+    ],
+    "build": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/build.py"
+    ],
+    "compare": [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/compare.py",
+      "REGISTRATION.json"
+    ],
+    "binary": [
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/build/release/TurboFieldfareRecurrentPrefixRecovery",
+      "REGISTRATION.json",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/request.json",
+      "UNIQUE_REPORT.json",
+      "serial|legacy|new"
+    ]
+  },
+  "wrapperHashes": {
+    "run.py": "6a360e37e40eb1bf127b4a6a9a34c3031cc213d5f7beee72d379fc886a4ac3cd",
+    "compare.py": "b086e814185f28e70d59340e89fbad6aa055acaf04723a89dec45300e5e21c79",
+    "analyze.py": "42950e38231e7fe8240f52a1f9b137d2139745a022311a908fc57c3c2398ddc0",
+    "wrapper-handoff.json": "b686f39f07a8de200c721de0b584eeb38d401c32a55f49b8017042bf651946b3"
+  },
+  "SwiftFairy": "skill read and Metal lifetime query attempted; no active scroll content; unrelated Charts trial was not started; no verification claimed",
+  "staticChecks": "source/root equality, PythonAST, forward applicability and owned-copy application/inverse exactroundtrip only",
+  "builds": false,
+  "tests": false,
+  "unitTestCode": false,
+  "modelRuns": false,
+  "liveSourceWrites": false,
+  "commits": false
+}

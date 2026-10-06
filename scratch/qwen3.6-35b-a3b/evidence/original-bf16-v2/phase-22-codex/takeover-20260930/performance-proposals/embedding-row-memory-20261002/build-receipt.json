@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareBaselineMemoryProbe"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "caaa2d8341e203c07dab30f055ee45fee800ed7f44ad0e3f53480b14eddd87f8",
+  "binarySHA256": "bfe33519fa27cd7d7c513cbedf8d37db37526c4b74590a3a50897c064822234b",
+  "stageHashesSHA256": "9a7f268c3188f9abf15d4e6deb5f88f6137e153bb2fab9d6b95c4fd4bcb8c6d4"
+}

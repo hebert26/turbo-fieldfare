@@ -1,0 +1,47 @@
+{
+  "torch": "2.10.0",
+  "torchGit": "449b1768410104d3ed79d3bcfe4ba1d65c7f22c0",
+  "threads": 1,
+  "stateShape": [
+    32,
+    128,
+    128
+  ],
+  "queryShape": [
+    32,
+    128
+  ],
+  "outputCount": 4096,
+  "expectedOutputSHA256": "c62646c2ba966e4886b4560f9cbd946ca8eb6b53705730a2655297149d3c4139",
+  "sequentialControlSHA256": "a0a9386aa829d28d8af6d103220913426c211a9312de309ba30f5a7e665112d3",
+  "stateProbeIndices": [
+    0,
+    1,
+    127,
+    128,
+    16383,
+    16384,
+    32767,
+    65535,
+    131071,
+    262143,
+    524287
+  ],
+  "stateProbeBits": [
+    1077480515,
+    3228249082,
+    1060696711,
+    3220465163,
+    1076090970,
+    3224720486,
+    1072994075,
+    3222145728,
+    1077826352,
+    3214444102,
+    1073297389
+  ],
+  "block16FrozenMismatches": 0,
+  "block16StateFrozenMismatches": 0,
+  "oldSequentialFrozenMismatches": 1,
+  "frozenTolerance": "1e-7 + 1e-6 * abs(reference)"
+}

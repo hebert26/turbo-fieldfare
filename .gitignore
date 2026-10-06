@@ -56,3 +56,5 @@ __pycache__/
 
 # Local workflow guide may contain credentials
 /workflow-guide.md
+/.../venv
+/.codex-tmp

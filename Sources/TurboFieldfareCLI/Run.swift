@@ -47,7 +47,658 @@ public struct RunResult: Equatable, Sendable {
     public init(exitCode: Int32) { self.exitCode = exitCode }
 }
 
-public func run(args: Args,
+func routedExpertCacheFooter(_ summary: RoutedExpertCacheSummary) -> String {
+    "\n[expert-cache scope=lifetime configured-slots=\(summary.configuredSlots) "
+        + "effective-slots=\(summary.effectiveSlots) policy=\(summary.policy) "
+        + "allocated-bytes=\(summary.allocatedBytes) "
+        + "peak-allocated-bytes=\(summary.peakAllocatedBytes) "
+        + "hits=\(summary.hits) misses=\(summary.misses)]\n"
+}
+
+protocol CLIGenerationSession: Sendable {
+    var family: LoadedRuntimeFamily { get }
+    var verifiedIdentity: LoadedRuntimeIdentity? { get }
+    var sourceIdentity: LoadedRuntimeSourceIdentity? { get }
+    func preflightLoadedSource(
+        prompt: ModelFamilyGenerationPrompt,
+        imagesByID: [String: URL],
+        visionResidency: VisionResidencyPolicy
+    ) async throws -> ModelFamilyGenerationPreflight
+    func generate(
+        _ request: ModelFamilyGenerationRequest,
+        onEvent: @escaping @Sendable (ModelFamilyGenerationEvent) -> Void
+    ) async throws -> ModelFamilyGenerationResult
+}
+
+extension ModelFamilyGenerationSession: CLIGenerationSession {}
+
+struct CLIRunDependencies: Sendable {
+    var inspect: @Sendable (URL) throws -> ModelFamilyGenerationAdmission
+    var preflightQwen: @Sendable (
+        URL, ModelFamilyGenerationPrompt, [String: URL], URL?,
+        VisionResidencyPolicy, Int
+    ) throws -> ModelFamilyGenerationPreflight
+    var loadSession: @Sendable (
+        URL, Int, RuntimeConfiguration, URL?, ModelIntegrityPolicy
+    ) throws -> any CLIGenerationSession
+
+    static let live = CLIRunDependencies(
+        inspect: ModelFamilyGenerationSession.inspect,
+        preflightQwen: { directory, prompt, images, visionPack, residency, maximum in
+            try ModelFamilyGenerationSession.preflightQwen(
+                directoryURL: directory,
+                prompt: prompt,
+                imagesByID: images,
+                visionPackURL: visionPack,
+                visionResidency: residency,
+                maxContext: maximum)
+        },
+        loadSession: { directory, maxContext, runtime, visionPack, integrity in
+            try ModelFamilyGenerationSession.load(
+                directoryURL: directory,
+                maxContext: maxContext,
+                runtimeConfiguration: runtime,
+                visionPackURL: visionPack,
+                integrityPolicy: integrity)
+        })
+}
+
+public func run(
+    args: Args,
+    stdout: FileHandle = .standardOutput,
+    stderr: FileHandle = .standardError
+) async -> RunResult {
+    await run(args: args, dependencies: .live, stdout: stdout, stderr: stderr)
+}
+
+func run(
+    args: Args,
+    dependencies: CLIRunDependencies,
+    stdout: FileHandle,
+    stderr: FileHandle
+) async -> RunResult {
+    do {
+        let modelURL = URL(fileURLWithPath: args.model)
+        let parsed = try parseFamilyRequest(args: args)
+        if !parsed.imagesByID.isEmpty {
+            guard let device = MetalContext.makeSystemDefaultDevice() else {
+                return errored(stderr, "no Metal device", 1)
+            }
+            try VisionRuntime.requireSupportedDevice(device)
+        }
+        let admission = try dependencies.inspect(modelURL)
+        if admission.family == .gemma4 {
+            guard args.sourceIntegrity == nil else {
+                return errored(stderr, "--source-integrity requires an original BF16 source", 2)
+            }
+            // Preserve the legacy parser's exact role/content acceptance before
+            // its tokenizer or model is opened.
+            _ = try parseInput(args: args)
+            guard args.thinking == .auto else {
+                return errored(
+                    stderr,
+                    "explicit --thinking is available only for verified Qwen models",
+                    2)
+            }
+            guard args.toolsFile == nil else {
+                return errored(
+                    stderr,
+                    "--tools-file is available only for verified Qwen models",
+                    2)
+            }
+            return await legacyRun(
+                args: args,
+                showModelIdentity: args.showModelIdentity,
+                stdout: stdout,
+                stderr: stderr)
+        }
+
+        var effectiveArgs = args
+        if args.prefillChunkTokensAuto {
+            // Qwen's current runner uses its native scalar/prepared prefill.
+            // Resolve the CLI's runtime value deterministically without
+            // changing Gemma's prompt-sized auto path above.
+            effectiveArgs.prefillChunkTokens =
+                PrefillRuntimeConfig.autoChunkTokens(promptTokens: args.maxContext)
+        }
+        let visionPackURL = args.visionPack.map { URL(fileURLWithPath: $0) }
+        let sourceBacking = admission.verifiedIdentity == nil
+        guard sourceBacking || args.sourceIntegrity == nil else {
+            return errored(stderr, "--source-integrity requires an original BF16 source", 2)
+        }
+        let runtime = try effectiveArgs.resolvedRuntimeConfiguration(
+            forceLogitsHead: true,
+            imagePrompt: !parsed.imagesByID.isEmpty)
+        let preflight: ModelFamilyGenerationPreflight
+        let session: any CLIGenerationSession
+        if sourceBacking {
+            // Obvious missing companions fail before source payload verification.
+            // A present companion is admitted against the loaded source below.
+            if !parsed.imagesByID.isEmpty {
+                let companion = try visionPackURL
+                    ?? VisionPackLocation.companionURL(forTextModel: modelURL)
+                guard FileManager.default.fileExists(atPath: companion.path) else {
+                    throw ModelFamilyGenerationError.sourceVisionUnavailable
+                }
+            }
+            session = try dependencies.loadSession(
+                modelURL, args.maxContext, runtime, visionPackURL,
+                (args.sourceIntegrity ?? .fullSHA256).policy)
+            guard session.family == .qwen3_6,
+                  session.verifiedIdentity == nil,
+                  session.sourceIdentity != nil else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+            preflight = try await session.preflightLoadedSource(
+                prompt: parsed.prompt, imagesByID: parsed.imagesByID,
+                visionResidency: args.visionResidency)
+        } else {
+            preflight = try dependencies.preflightQwen(
+                modelURL, parsed.prompt, parsed.imagesByID,
+                visionPackURL, args.visionResidency, args.maxContext)
+            session = try dependencies.loadSession(
+                modelURL, args.maxContext, runtime, visionPackURL, .fullSha256)
+            guard session.family == .qwen3_6,
+                  session.verifiedIdentity != nil,
+                  session.sourceIdentity == nil else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+        }
+        if args.prefillChunkTokensAuto, !args.quiet {
+            stderr.write(Data(
+                "[prefill chunk auto: verified Qwen uses native prefill]\n".utf8))
+        }
+        let config = GenerationConfig(
+            maxNewTokens: min(args.maxNew, args.maxContext - preflight.promptTokens),
+            temperature: args.temperature,
+            topK: args.topK,
+            topP: args.topP,
+            repetitionPenalty: args.repetitionPenalty,
+            seed: args.seed,
+            stopStrings: args.stops,
+            extraStopTokens: [])
+        try config.validate()
+        if args.showModelIdentity {
+            if let identity = session.sourceIdentity {
+                let line = sourceIdentityLine(
+                    contentSHA256: identity.descriptorContentSHA256,
+                    integrity: args.sourceIntegrity ?? .fullSHA256)
+                stderr.write(Data(line.utf8))
+            } else if let identity = session.verifiedIdentity {
+                let line = "[model family=\(identity.family.rawValue) id=\(identity.modelID) "
+                    + "revision=\(identity.sourceRevision) "
+                    + "format=\(identity.formatMajor).\(identity.formatMinor)]\n"
+                stderr.write(Data(line.utf8))
+            } else {
+                throw ModelFamilyGenerationError.modelIdentityChanged
+            }
+        }
+        let result = try await session.generate(
+            ModelFamilyGenerationRequest(
+                prompt: parsed.prompt,
+                imagesByID: parsed.imagesByID,
+                visionResidency: args.visionResidency,
+                config: config)
+        ) { event in
+            switch event {
+            case .prefill:
+                break
+            case .text(let text):
+                if !text.isEmpty { stdout.write(Data(text.utf8)) }
+            case .toolCall(let call):
+                stdout.write(Data((renderToolCall(call) + "\n").utf8))
+            }
+        }
+        if !args.quiet {
+            if sourceBacking, let rows = result.producedVisionFeatureRows {
+                stderr.write(Data(
+                    "[vision images=\(parsed.imagesByID.count) feature-rows=\(rows) source=official-bf16]\n".utf8))
+            }
+            if let summary = result.cacheSummary {
+                stderr.write(Data(routedExpertCacheFooter(summary).utf8))
+            }
+            let rate = result.decodeSeconds > 0
+                ? Double(result.newTokens) / result.decodeSeconds : 0
+            let footer = "\n[stop=\(String(describing: result.reason)) "
+                + "prefill=\(result.promptTokens)tok new=\(result.newTokens)tok "
+                + "decode=\(String(format: "%.2f", result.decodeSeconds))s "
+                + "tok/s=\(String(format: "%.3f", rate))]\n"
+            stderr.write(Data(footer.utf8))
+        }
+        return RunResult(exitCode: 0)
+    } catch let error as ArgsError {
+        return errored(stderr, "\(error)", 2)
+    } catch is CancellationError {
+        stdout.write(Data("\n".utf8))
+        return RunResult(exitCode: 130)
+    } catch {
+        return errored(stderr, "\(error)", 1)
+    }
+}
+
+func sourceIdentityLine(contentSHA256: String, integrity: CLISourceIntegrityMode) -> String {
+    "[model family=qwen3_6 backing=official-safetensors-bf16-v1 "
+        + "content-sha256=\(contentSHA256) verification=\(integrity.rawValue)]\n"
+}
+
+private struct ParsedFamilyRequest {
+    let prompt: ModelFamilyGenerationPrompt
+    let imagesByID: [String: URL]
+}
+
+private func parseFamilyRequest(args: Args) throws -> ParsedFamilyRequest {
+    if let raw = args.prompt {
+        return ParsedFamilyRequest(prompt: .raw(raw), imagesByID: [:])
+    }
+    let tools = try args.toolsFile.map(parseToolsFile) ?? []
+    let thinking: ModelFamilyThinkingMode = switch args.thinking {
+    case .auto: .automatic
+    case .on: .enabled
+    case .off: .disabled
+    }
+    if let text = args.chatPrompt {
+        var images: [String: URL] = [:]
+        var parts: [ModelChatContentPart] = []
+        for (offset, path) in args.images.enumerated() {
+            let id = "cli-image-\(offset + 1)"
+            images[id] = URL(fileURLWithPath: path)
+            parts.append(.image(.init(id: id)))
+        }
+        if !text.isEmpty { parts.append(.text(text)) }
+        let content: ModelChatContent = parts.isEmpty ? .text("") : .parts(parts)
+        return ParsedFamilyRequest(
+            prompt: .chat(
+                messages: [.init(role: .user, content: content)],
+                tools: tools,
+                thinking: thinking),
+            imagesByID: images)
+    }
+    guard let path = args.messagesFile else { throw ArgsError.modeMissing }
+    let documentURL = URL(fileURLWithPath: path)
+    let root = try OrderedModelJSON.parse(
+        readCLIJSON(documentURL, flag: "--messages-file", maximumBytes: 4 * 1_024 * 1_024))
+    guard case .array(let rows) = root else {
+        throw invalidMessages("top level must be an array")
+    }
+    let base = documentURL.deletingLastPathComponent()
+    var images: [String: URL] = [:]
+    var nextImage = 1
+    let messages = try rows.map { row -> ModelChatMessage in
+        let members = try objectMembers(row, label: "message")
+        let roleText = try requiredString("role", in: members)
+        let role: ModelChatRole = switch roleText {
+        case "system": .system
+        case "developer": .developer
+        case "user": .user
+        case "assistant": .assistant
+        case "tool": .tool
+        default: throw invalidMessages("unknown role: \(roleText)")
+        }
+        let content: ModelChatContent?
+        if let value = try optionalUnique("content", in: members) {
+            switch value {
+            case .null:
+                content = nil
+            case .string(let text):
+                content = .text(text)
+            case .array(let values):
+                content = .parts(try values.map { value in
+                    let part = try objectMembers(value, label: "content part")
+                    let type = try requiredString("type", in: part)
+                    switch type {
+                    case "text":
+                        return .text(try requiredString("text", in: part))
+                    case "image_file":
+                        guard role == .user else {
+                            throw invalidMessages("image_file requires a user role")
+                        }
+                        let path = try requiredString("path", in: part)
+                        let id = "messages-image-\(nextImage)"
+                        nextImage += 1
+                        images[id] = path.hasPrefix("/")
+                            ? URL(fileURLWithPath: path)
+                            : base.appendingPathComponent(path)
+                        return .image(.init(id: id))
+                    case "video_file":
+                        throw invalidMessages("video input is not supported")
+                    case "audio_file":
+                        throw invalidMessages("audio input is not supported")
+                    default:
+                        throw invalidMessages("unknown content type: \(type)")
+                    }
+                })
+            default:
+                throw invalidMessages("content must be a string, array, or null")
+            }
+        } else {
+            content = nil
+        }
+        let reasoning = try optionalString("reasoning_content", in: members)
+        let toolCallID = try optionalString("tool_call_id", in: members)
+        let name = try optionalString("name", in: members)
+        let calls: [ModelChatToolCall]
+        if let value = try optionalUnique("tool_calls", in: members) {
+            guard case .array(let rows) = value else {
+                throw invalidMessages("tool_calls must be an array")
+            }
+            calls = try rows.map(parseHistoricalToolCall)
+        } else {
+            calls = []
+        }
+        return ModelChatMessage(
+            role: role, content: content,
+            reasoningContent: reasoning, toolCalls: calls,
+            toolCallID: toolCallID, name: name)
+    }
+    return ParsedFamilyRequest(
+        prompt: .chat(messages: messages, tools: tools, thinking: thinking),
+        imagesByID: images)
+}
+
+private func parseToolsFile(_ path: String) throws -> [ModelChatToolDefinition] {
+    let value = try OrderedModelJSON.parse(readCLIJSON(
+        URL(fileURLWithPath: path),
+        flag: "--tools-file",
+        maximumBytes: 4 * 1_024 * 1_024))
+    guard case .array(let rows) = value else {
+        throw ArgsError.invalidValue(flag: "--tools-file", value: "top level must be an array")
+    }
+    return try rows.map { row in
+        let members = try objectMembers(
+            row, label: "tool", flag: "--tools-file")
+        let type = try requiredString(
+            "type", in: members, flag: "--tools-file")
+        guard type == "function" else {
+            throw ArgsError.invalidValue(flag: "--tools-file", value: "tool type must be function")
+        }
+        let functionValue = try requiredUnique(
+            "function", in: members, flag: "--tools-file")
+        let function = try objectMembers(
+            functionValue, label: "function", flag: "--tools-file")
+        let name = try requiredString(
+            "name", in: function, flag: "--tools-file")
+        let description = try optionalString(
+            "description", in: function, flag: "--tools-file") ?? ""
+        let parameters = try requiredUnique(
+            "parameters", in: function, flag: "--tools-file")
+        guard case .object = parameters else {
+            throw ArgsError.invalidValue(flag: "--tools-file", value: "parameters must be an object")
+        }
+        return ModelChatToolDefinition(
+            type: type,
+            function: .init(
+                name: name, description: description, parameters: parameters))
+    }
+}
+
+private func parseHistoricalToolCall(_ value: ModelChatJSONValue) throws -> ModelChatToolCall {
+    let members = try objectMembers(value, label: "tool call")
+    if let type = try optionalString("type", in: members), type != "function" {
+        throw invalidMessages("tool call type must be function")
+    }
+    let function = try objectMembers(
+        try requiredUnique("function", in: members), label: "tool call function")
+    let rawArguments = try requiredUnique("arguments", in: function)
+    let arguments: ModelChatJSONValue
+    if case .string(let encoded) = rawArguments {
+        arguments = try OrderedModelJSON.parse(Data(encoded.utf8))
+    } else {
+        arguments = rawArguments
+    }
+    guard case .object = arguments else {
+        throw invalidMessages("tool call arguments must be an object")
+    }
+    return ModelChatToolCall(
+        id: try optionalString("id", in: members),
+        name: try requiredString("name", in: function),
+        arguments: arguments)
+}
+
+private func renderToolCall(_ call: ParsedToolCall) -> String {
+    "{\"tool_call\":{\"id\":\(jsonString(call.id)),"
+        + "\"name\":\(jsonString(call.name)),"
+        + "\"arguments\":\(call.argumentsJSON)}}"
+}
+
+private func jsonString(_ value: String) -> String {
+    var output = "\""
+    for scalar in value.unicodeScalars {
+        switch scalar.value {
+        case 0x08: output += "\\b"
+        case 0x09: output += "\\t"
+        case 0x0A: output += "\\n"
+        case 0x0C: output += "\\f"
+        case 0x0D: output += "\\r"
+        case 0x22: output += "\\\""
+        case 0x5C: output += "\\\\"
+        case 0x00...0x1F:
+            output += String(format: "\\u%04x", scalar.value)
+        default:
+            output.unicodeScalars.append(scalar)
+        }
+    }
+    return output + "\""
+}
+
+private func invalidMessages(_ detail: String) -> ArgsError {
+    invalidInput(flag: "--messages-file", detail)
+}
+
+private func invalidInput(flag: String, _ detail: String) -> ArgsError {
+    .invalidValue(flag: flag, value: detail)
+}
+
+private func readCLIJSON(
+    _ url: URL,
+    flag: String,
+    maximumBytes: UInt64
+) throws -> Data {
+    let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+    let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+    guard size <= maximumBytes else {
+        throw ArgsError.invalidValue(
+            flag: flag,
+            value: "file exceeds \(maximumBytes) bytes")
+    }
+    return try Data(contentsOf: url)
+}
+
+private func objectMembers(
+    _ value: ModelChatJSONValue,
+    label: String,
+    flag: String = "--messages-file"
+) throws -> [ModelChatJSONMember] {
+    guard case .object(let members) = value else {
+        throw invalidInput(flag: flag, "\(label) must be an object")
+    }
+    return members
+}
+
+private func optionalUnique(
+    _ name: String,
+    in members: [ModelChatJSONMember],
+    flag: String = "--messages-file"
+) throws -> ModelChatJSONValue? {
+    let values = members.filter { $0.name == name }
+    guard values.count <= 1 else {
+        throw invalidInput(flag: flag, "duplicate key: \(name)")
+    }
+    return values.first?.value
+}
+
+private func requiredUnique(
+    _ name: String,
+    in members: [ModelChatJSONMember],
+    flag: String = "--messages-file"
+) throws -> ModelChatJSONValue {
+    guard let value = try optionalUnique(name, in: members, flag: flag) else {
+        throw invalidInput(flag: flag, "missing field: \(name)")
+    }
+    return value
+}
+
+private func requiredString(
+    _ name: String,
+    in members: [ModelChatJSONMember],
+    flag: String = "--messages-file"
+) throws -> String {
+    guard case .string(let value) = try requiredUnique(
+        name, in: members, flag: flag) else {
+        throw invalidInput(flag: flag, "\(name) must be a string")
+    }
+    return value
+}
+
+private func optionalString(
+    _ name: String,
+    in members: [ModelChatJSONMember],
+    flag: String = "--messages-file"
+) throws -> String? {
+    guard let raw = try optionalUnique(name, in: members, flag: flag) else { return nil }
+    if case .null = raw { return nil }
+    guard case .string(let value) = raw else {
+        throw invalidInput(flag: flag, "\(name) must be a string or null")
+    }
+    return value
+}
+
+private enum OrderedModelJSON {
+    enum ParseError: Error, CustomStringConvertible {
+        case invalid(String)
+        var description: String {
+            switch self { case .invalid(let detail): "invalid JSON: \(detail)" }
+        }
+    }
+
+    static func parse(_ data: Data) throws -> ModelChatJSONValue {
+        do {
+            _ = try JSONSerialization.jsonObject(
+                with: data, options: [.fragmentsAllowed])
+        } catch {
+            throw ParseError.invalid("\(error)")
+        }
+        var parser = Parser(bytes: Array(data))
+        let value = try parser.value()
+        parser.whitespace()
+        guard parser.index == parser.bytes.count else {
+            throw ParseError.invalid("trailing bytes")
+        }
+        return value
+    }
+
+    struct Parser {
+        let bytes: [UInt8]
+        var index = 0
+
+        mutating func value() throws -> ModelChatJSONValue {
+            whitespace()
+            guard index < bytes.count else { throw ParseError.invalid("unexpected end") }
+            switch bytes[index] {
+            case 0x7B: return try object()
+            case 0x5B: return try array()
+            case 0x22: return .string(try string())
+            case 0x74: try literal("true"); return .bool(true)
+            case 0x66: try literal("false"); return .bool(false)
+            case 0x6E: try literal("null"); return .null
+            case 0x2D, 0x30...0x39: return try number()
+            default: throw ParseError.invalid("unexpected byte at \(index)")
+            }
+        }
+
+        mutating func object() throws -> ModelChatJSONValue {
+            index += 1
+            whitespace()
+            var members: [ModelChatJSONMember] = []
+            if take(0x7D) { return .object(members) }
+            while true {
+                whitespace()
+                guard index < bytes.count, bytes[index] == 0x22 else {
+                    throw ParseError.invalid("object key is not a string")
+                }
+                let key = try string()
+                whitespace()
+                guard take(0x3A) else { throw ParseError.invalid("missing colon") }
+                members.append(.init(key, try value()))
+                whitespace()
+                if take(0x7D) { return .object(members) }
+                guard take(0x2C) else { throw ParseError.invalid("missing comma") }
+            }
+        }
+
+        mutating func array() throws -> ModelChatJSONValue {
+            index += 1
+            whitespace()
+            var values: [ModelChatJSONValue] = []
+            if take(0x5D) { return .array(values) }
+            while true {
+                values.append(try value())
+                whitespace()
+                if take(0x5D) { return .array(values) }
+                guard take(0x2C) else { throw ParseError.invalid("missing comma") }
+            }
+        }
+
+        mutating func string() throws -> String {
+            let start = index
+            index += 1
+            var escaped = false
+            while index < bytes.count {
+                let byte = bytes[index]
+                index += 1
+                if escaped { escaped = false; continue }
+                if byte == 0x5C { escaped = true; continue }
+                if byte == 0x22 {
+                    let data = Data(bytes[start..<index])
+                    do { return try JSONDecoder().decode(String.self, from: data) }
+                    catch { throw ParseError.invalid("invalid string escape") }
+                }
+                guard byte >= 0x20 else {
+                    throw ParseError.invalid("control byte in string")
+                }
+            }
+            throw ParseError.invalid("unterminated string")
+        }
+
+        mutating func number() throws -> ModelChatJSONValue {
+            let start = index
+            while index < bytes.count,
+                  "-+0123456789.eE".utf8.contains(bytes[index]) { index += 1 }
+            let text = String(decoding: bytes[start..<index], as: UTF8.self)
+            if !text.contains(".") && !text.contains("e") && !text.contains("E") {
+                if let signed = Int64(text) { return .integer(signed) }
+                if let unsigned = UInt64(text) { return .unsignedInteger(unsigned) }
+            }
+            guard let value = Double(text), value.isFinite else {
+                throw ParseError.invalid("invalid number")
+            }
+            return .number(value)
+        }
+
+        mutating func literal(_ text: String) throws {
+            let expected = Array(text.utf8)
+            guard index + expected.count <= bytes.count,
+                  Array(bytes[index..<(index + expected.count)]) == expected else {
+                throw ParseError.invalid("invalid literal")
+            }
+            index += expected.count
+        }
+
+        mutating func whitespace() {
+            while index < bytes.count,
+                  bytes[index] == 0x20 || bytes[index] == 0x0A
+                    || bytes[index] == 0x0D || bytes[index] == 0x09 { index += 1 }
+        }
+
+        mutating func take(_ byte: UInt8) -> Bool {
+            guard index < bytes.count, bytes[index] == byte else { return false }
+            index += 1
+            return true
+        }
+    }
+}
+
+private func legacyRun(args: Args,
+                showModelIdentity: Bool,
                 stdout: FileHandle = .standardOutput,
                 stderr: FileHandle = .standardError) async -> RunResult {
     do {
@@ -181,6 +832,10 @@ public func run(args: Args,
             streamingMode: .pread(slotCount: runtime.expertCacheSlots),
             expertCachePolicy: runtime.modelExpertCachePolicy,
             integrityPolicy: .fullSha256)
+        if showModelIdentity {
+            stderr.write(Data(
+                "[model family=gemma4 format=1 legacy-unverified]\n".utf8))
+        }
         let runner = try RealForwardRunner(
             model: model,
             context: context,
@@ -259,6 +914,7 @@ public func run(args: Args,
             }
 
         if !args.quiet {
+            stderr.write(Data(routedExpertCacheFooter(model.routedExpertCacheSummary).utf8))
             let tokensPerSecond = stats.decodeSeconds > 0
                 ? Double(stats.newTokens) / stats.decodeSeconds
                 : 0

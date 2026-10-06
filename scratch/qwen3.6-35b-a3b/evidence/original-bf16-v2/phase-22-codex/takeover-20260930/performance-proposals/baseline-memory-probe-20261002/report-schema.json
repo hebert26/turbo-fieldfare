@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "product": "TurboFieldfareBaselineMemoryProbe",
+  "cli": [
+    "REGISTRATION",
+    "REQUEST",
+    "REPORT"
+  ],
+  "mode": "serial",
+  "stdout": "One complete result JSON. Existing serial output, accepted-route/raw-row and final numeric-state checks remain.",
+  "stderrPhase": {
+    "type": "memoryPhase",
+    "schema": 1,
+    "clock": "DispatchTime.uptimeNanoseconds",
+    "fields": [
+      "uptimeNanoseconds",
+      "pid",
+      "requestID",
+      "phase",
+      "layer",
+      "currentAllocatedSizeBytes",
+      "cachedLayerCount",
+      "allocatedCacheBytes",
+      "residencyRegisteredLayers",
+      "residencyAllocationCount",
+      "residencyAllocatedSizeBytes",
+      "residencyRequested"
+    ],
+    "phases": [
+      "beforeModelLoad",
+      "afterModelLoad",
+      "runnerReady",
+      "prefillEmbeddingDone",
+      "prefillLayerDone",
+      "residencyRequestBefore",
+      "residencyRequestAfter",
+      "prefillDone",
+      "decodeDone",
+      "diagnosticsStart",
+      "diagnosticsEnd"
+    ],
+    "missing": "Unavailable owner state is null. Missing phase lines do not prove completion.",
+    "maximumSuccessfulRunRecords": 50,
+    "maximumLineBytes": 4096,
+    "writes": "Unbuffered stderr writes with partial-write and EINTR handling. No fsync claim."
+  },
+  "allocationMeaning": "MTLDevice.currentAllocatedSize is device resource allocation size. It is not process footprint or physically resident bytes.",
+  "boundaryMeaning": "Layer markers follow layer settlement. Residency markers bracket commit/request/queue attachment. Return does not prove physical residency. Model-load markers follow MetalContext construction.",
+  "reportTiming": "Request starts at prompt and excludes model load. Final readback and golden checks are outside decode. No speed claim."
+}

@@ -1,5 +1,7 @@
 import Foundation
 import Metal
+import TurboFieldfareFormat
+import TurboFieldfareOfficialQwenSource
 
 /// Compile-time architecture baseline. `manifest.json -> arch` must match this
 /// field-by-field at load time; mismatches throw `ModelError.archMismatch`.
@@ -106,6 +108,238 @@ public struct ArchConfig: Sendable, Equatable {
     }
 }
 
+/// Runtime configuration for Qwen 3.6. Fields retain their native Qwen
+/// meaning instead of being forced into Gemma's `ArchConfig` vocabulary.
+public struct QwenArchConfig: Sendable, Equatable {
+    public let hiddenSize: Int
+    public let numLayers: Int
+    public let fullAttentionLayerMask: [UInt8]
+    public let numAttentionHeads: Int
+    public let numKeyValueHeads: Int
+    public let headDimension: Int
+    public let attentionOutputGate: Bool
+    public let linearConvolutionKernel: Int
+    public let linearKeyHeads: Int
+    public let linearKeyHeadDimension: Int
+    public let linearValueHeads: Int
+    public let linearValueHeadDimension: Int
+    public let recurrentStateIsFP32: Bool
+    public let partialRotaryFactor: Double
+    public let ropeTheta: Double
+    public let mropeSections: [Int]
+    public let numberOfExperts: Int
+    public let expertsPerToken: Int
+    public let routedExpertIntermediateSize: Int
+    public let sharedExpertIntermediateSize: Int
+    public let vocabularySize: Int
+    public let tiedWordEmbeddings: Bool
+    public let hiddenActivation: String
+    public let bosTokenID: Int
+    public let eosTokenID: Int
+    public let imageTokenID: Int
+    public let videoTokenID: Int
+    public let visionStartTokenID: Int
+    public let visionEndTokenID: Int
+
+    /// Source sidecar geometry, without synthesizing a packed v2 wire value.
+    /// Physical authentication and descriptor binding belong to the caller.
+    init(officialConfigJSON data: Data) throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let source = try decoder.decode(OfficialQwenConfig.self, from: data)
+        let text = source.textConfig
+        guard source.modelType == "qwen3_5_moe",
+              text.modelType.hasPrefix("qwen3_5_moe"),
+              text.dtype == "bfloat16", text.mambaSsmDtype == "float32",
+              text.numHiddenLayers > 0,
+              text.layerTypes.count == text.numHiddenLayers,
+              text.layerTypes.allSatisfy({ $0 == "linear_attention" || $0 == "full_attention" }),
+              !text.tieWordEmbeddings, text.hiddenAct == "silu",
+              text.attnOutputGate, text.ropeParameters.ropeTheta.isFinite,
+              text.ropeParameters.ropeTheta > 0,
+              text.rmsNormEps == 1e-6 else {
+            throw ModelError.indexCorrupt(detail: "invalid official Qwen source configuration")
+        }
+        hiddenSize = text.hiddenSize
+        numLayers = text.numHiddenLayers
+        fullAttentionLayerMask = text.layerTypes.map { $0 == "full_attention" ? 1 : 0 }
+        numAttentionHeads = text.numAttentionHeads
+        numKeyValueHeads = text.numKeyValueHeads
+        headDimension = text.headDim
+        attentionOutputGate = text.attnOutputGate
+        linearConvolutionKernel = text.linearConvKernelDim
+        linearKeyHeads = text.linearNumKeyHeads
+        linearKeyHeadDimension = text.linearKeyHeadDim
+        linearValueHeads = text.linearNumValueHeads
+        linearValueHeadDimension = text.linearValueHeadDim
+        recurrentStateIsFP32 = true
+        partialRotaryFactor = text.partialRotaryFactor
+        ropeTheta = text.ropeParameters.ropeTheta
+        mropeSections = text.ropeParameters.mropeSection
+        numberOfExperts = text.numExperts
+        expertsPerToken = text.numExpertsPerTok
+        routedExpertIntermediateSize = text.moeIntermediateSize
+        sharedExpertIntermediateSize = text.sharedExpertIntermediateSize
+        vocabularySize = text.vocabSize
+        tiedWordEmbeddings = text.tieWordEmbeddings
+        hiddenActivation = text.hiddenAct
+        bosTokenID = text.bosTokenId
+        eosTokenID = text.eosTokenId
+        imageTokenID = source.imageTokenId
+        videoTokenID = source.videoTokenId
+        visionStartTokenID = source.visionStartTokenId
+        visionEndTokenID = source.visionEndTokenId
+    }
+
+    init(wire: GTurboQwenArchitectureV2) {
+        hiddenSize = wire.hiddenSize
+        numLayers = wire.numLayers
+        fullAttentionLayerMask = wire.layerTypes.map { $0 == .fullAttention ? 1 : 0 }
+        numAttentionHeads = wire.numAttentionHeads
+        numKeyValueHeads = wire.numKeyValueHeads
+        headDimension = wire.headDimension
+        attentionOutputGate = wire.attentionOutputGate
+        linearConvolutionKernel = wire.linearConvolutionKernel
+        linearKeyHeads = wire.linearKeyHeads
+        linearKeyHeadDimension = wire.linearKeyHeadDimension
+        linearValueHeads = wire.linearValueHeads
+        linearValueHeadDimension = wire.linearValueHeadDimension
+        recurrentStateIsFP32 = wire.recurrentStateType == .fp32
+        partialRotaryFactor = wire.partialRotaryFactor
+        ropeTheta = wire.ropeTheta
+        mropeSections = wire.mropeSections
+        numberOfExperts = wire.numberOfExperts
+        expertsPerToken = wire.expertsPerToken
+        routedExpertIntermediateSize = wire.routedExpertIntermediateSize
+        sharedExpertIntermediateSize = wire.sharedExpertIntermediateSize
+        vocabularySize = wire.vocabularySize
+        tiedWordEmbeddings = wire.tiedWordEmbeddings
+        hiddenActivation = wire.hiddenActivation
+        bosTokenID = wire.bosTokenID
+        eosTokenID = wire.eosTokenID
+        imageTokenID = wire.imageTokenID
+        videoTokenID = wire.videoTokenID
+        visionStartTokenID = wire.visionStartTokenID
+        visionEndTokenID = wire.visionEndTokenID
+    }
+}
+
+private struct OfficialQwenConfig: Decodable {
+    struct Rope: Decodable {
+        let ropeTheta: Double
+        let mropeSection: [Int]
+    }
+    struct Text: Decodable {
+        let modelType: String
+        let dtype: String
+        let mambaSsmDtype: String
+        let hiddenSize: Int
+        let numHiddenLayers: Int
+        let layerTypes: [String]
+        let numAttentionHeads: Int
+        let numKeyValueHeads: Int
+        let headDim: Int
+        let attnOutputGate: Bool
+        let linearConvKernelDim: Int
+        let linearNumKeyHeads: Int
+        let linearKeyHeadDim: Int
+        let linearNumValueHeads: Int
+        let linearValueHeadDim: Int
+        let partialRotaryFactor: Double
+        let ropeParameters: Rope
+        let numExperts: Int
+        let numExpertsPerTok: Int
+        let moeIntermediateSize: Int
+        let sharedExpertIntermediateSize: Int
+        let vocabSize: Int
+        let tieWordEmbeddings: Bool
+        let hiddenAct: String
+        let rmsNormEps: Double
+        let bosTokenId: Int
+        let eosTokenId: Int
+    }
+    let modelType: String
+    let textConfig: Text
+    let imageTokenId: Int
+    let videoTokenId: Int
+    let visionStartTokenId: Int
+    let visionEndTokenId: Int
+}
+
+public enum LoadedModelArchitecture: Sendable, Equatable {
+    case gemma4(ArchConfig)
+    case qwen3_6(QwenArchConfig)
+}
+
+public enum LoadedTensorStorage: String, Sendable, Equatable {
+    case bf16
+    case fp32
+    case affineInt4
+    case affineInt8
+}
+
+public struct LoadedTensorRegion: Sendable, Equatable {
+    public let name: String
+    public let file: String
+    public let offset: UInt64
+    public let size: UInt64
+    public let shape: [UInt64]
+    public let storage: LoadedTensorStorage
+    public let quantizationCategory: String?
+
+    /// An observed BF16 source header region. An actual protected handle
+    /// issued the token; this initializer cannot invent a shard or offset.
+    init(admittedSourceTensor token: OfficialSourceHandle.TensorRange) {
+        name = token.admittedTensorName
+        file = token.admittedShardName
+        offset = token.admittedAbsoluteOffset
+        size = token.admittedByteCount
+        shape = token.shape
+        storage = .bf16
+        quantizationCategory = nil
+    }
+
+    init(wire: GTurboTensorRegionV2) {
+        name = wire.name
+        file = wire.file
+        offset = wire.offset
+        size = wire.size
+        shape = wire.shape
+        storage = switch wire.storage {
+        case .bf16: .bf16
+        case .fp32: .fp32
+        case .affineInt4: .affineInt4
+        case .affineInt8: .affineInt8
+        }
+        quantizationCategory = wire.quantizationCategory?.rawValue
+    }
+}
+
+/// A format-verified v2 manifest ready for a later family runtime factory.
+public struct LoadedModelManifest: Sendable, Equatable {
+    public let descriptor: InstalledModelDescriptor
+    public let architecture: LoadedModelArchitecture
+    public let files: [String: ManifestFileEntry]
+    public let tensorRegions: [LoadedTensorRegion]
+    public let expertsPerLayer: Int
+    public let numLayers: Int
+    public let expertStride: UInt64
+
+    init(descriptor: InstalledModelDescriptor,
+         architecture: LoadedModelArchitecture,
+         files: [String: ManifestFileEntry],
+         tensorRegions: [LoadedTensorRegion],
+         expertsPerLayer: Int, numLayers: Int, expertStride: UInt64) {
+        self.descriptor = descriptor
+        self.architecture = architecture
+        self.files = files
+        self.tensorRegions = tensorRegions
+        self.expertsPerLayer = expertsPerLayer
+        self.numLayers = numLayers
+        self.expertStride = expertStride
+    }
+}
+
 /// Failure modes for the validation gates in `Model.load`.
 enum ModelError: Error, CustomStringConvertible, Equatable {
     case partialInstall(path: String)
@@ -122,6 +356,7 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
     case indexCorrupt(detail: String)
     case posixFailed(call: String, errno: Int32)
     case trustedReceiptInvalid(detail: String)
+    case sourceBackingUnsupported
 
     public var description: String {
         switch self {
@@ -153,6 +388,8 @@ enum ModelError: Error, CustomStringConvertible, Equatable {
             return "\(c) failed with errno \(e)"
         case .trustedReceiptInvalid(let detail):
             return "trusted install receipt invalid: \(detail)"
+        case .sourceBackingUnsupported:
+            return "official BF16 source is admitted as metadata only; loading is not supported yet"
         }
     }
 }

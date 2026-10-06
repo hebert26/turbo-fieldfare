@@ -1,0 +1,16 @@
+{
+  "time": "2026-10-02T19:46:12.523866+00:00",
+  "runPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/residency-off-001/run-20261002T194046.297918Z-1ce275b1ad5c472bb2e94ffb2fc6c967",
+  "runExit": 0,
+  "childExit": 0,
+  "observedMinimumFreePercent": 30,
+  "wallSeconds": 205.93585195811465,
+  "exactOutputIDsMatchPriorReference": true,
+  "acceptedRouteCount": 1120,
+  "independentlyEncodedPriorRouteSHA256": "95a3771000bbcc77b3848b5dbdaae0fd7b9bee66d5806414af9e58cf0d5019c5",
+  "acceptedRawRowSHA256": "212502f111d598174e971a9c6eddcc6fc09f0129a8f58f7fc5da5332db29705f",
+  "rawRowsAndFinalState": "First completed full-chain capture; no prior full-chain digest equality claim. Use as baseline for future exact comparisons.",
+  "noResidencyRequest": true,
+  "speedClaim": false,
+  "next": "Protected embedding row reads, residency remains OFF in both compared arms, other request settings unchanged. Needed margin is not yet proven."
+}

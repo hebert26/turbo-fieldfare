@@ -1,0 +1,21 @@
+{
+  "baseline-hashes.json": "85b914e664c1842e90be773f9f86bd4d0947c039f7cf058a92cf5a5a373d5767",
+  "build.py": "26efdf8bb377bb4569abdd48d9901004e019954fd3daccec66f907cc0d680d33",
+  "candidate/Package.swift": "a8f5a832a3a5573a86c7d059477b7bbe9a13748d6209c89354fe52a8d7154374",
+  "candidate/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift": "ec7ca99260123597e60ba860493b8363fdf3a5e4e04be69157a7d8c1e030bec1",
+  "candidate/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift": "bc01449b0db5af3044a401251e38da7cc30bfa7f704b0ad5516503c41db5c10b",
+  "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift": "6edae3cec52c39dfd5a5698c821ee4d304e2fc4537c0c1e74289c43e2f2dcf09",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift": "3d3cd53edda790496e7419601ca6b507553a96004a4a66ac528c9b366e912d98",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift": "883250021f4dbfe893922f5875d5374f6799f6fe066e3319944a0beff28633d0",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": "9ce0cee60eb542d41c18ab94b40a7fd9a262c50ac78f8a83ddda2ca737dc588e",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift": "82006005a9c1bcd550fefeac70fcc57c16735851f3117d3bb5746c5fc6997d51",
+  "candidate/Sources/TurboFieldfareExactBlockProbe/Command.swift": "3d71b433c0b9ff6459cd7caf59e63e1ede8494052e2d358c0e1b4d3311d5bbe3",
+  "evidence_helpers.py": "edb42e483d4255df6800aa2208807e45a380436cd86750fb598d24b62b2288f4",
+  "patch/forward.diff": "2f7eb28c0276ddd022ce3fff8226671df462f304ae77c5494180d8fc175a1a26",
+  "patch/inverse.diff": "d5265d43534fcb54a15ab2d2e5eb33408fc11fafe7a5140ae063056fe20f2c0b",
+  "patch/vs-rejected-inverse.diff": "e2c6e1c7e0782c03f02952a7066ce9aa670c0ea009d5e8be315ef23a3854562b",
+  "patch/vs-rejected.diff": "a5ce52c18e5ba95e3fd3c494910ee0ca3f7de3341325d74201ffcd205995a337",
+  "prepare.py": "b66a81fab5a57144feae65ae1297bd892611aaa30beab2bbf1e9ce3d1d59d129",
+  "request.json": "a9d120c3e25bfedfa7634162c2f28dd94202bdbfe015cd242933d946b678dd16",
+  "run.py": "74d8eed389f35c1f22c2afee13a36a78ab72f069004f026406acc7aa2f0aa7cb"
+}

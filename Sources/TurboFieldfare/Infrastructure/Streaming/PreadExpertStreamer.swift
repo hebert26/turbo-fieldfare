@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import Metal
+import TurboFieldfareOfficialQwenSource
 
 public struct ExpertIOAdviceResult: Sendable, Equatable {
     public let requested: Int
@@ -48,7 +49,7 @@ public struct ExpertCachePlan: Sendable, Equatable {
     }
 }
 
-public enum ExpertCachePolicy: String, Sendable {
+public enum ExpertCachePolicy: String, Sendable, Equatable {
     case lru
     case lfu
 }
@@ -60,12 +61,12 @@ public final class PreadExpertStreamer: @unchecked Sendable {
 
     public let layout: StreamLayout
     public let slotCount: Int
-    private let slotAllocationSize: Int
     public let cachePolicy: ExpertCachePolicy
 
     private let fd: Int32
     private let slotPointers: [UnsafeMutableRawPointer]
     private let slotBuffers: [MTLBuffer]
+    private let slotHeap: MTLHeap?
 
     private var nextSlot = 0
     private let cursorLock = NSLock()
@@ -74,7 +75,82 @@ public final class PreadExpertStreamer: @unchecked Sendable {
     private var slotLastUse: [Int]
     private var expertUseCount: [Int]
     private var useClock = 0
+    private var successfulPlanHits: UInt64 = 0
+    private var successfulPlanMisses: UInt64 = 0
     private let cacheLock = NSLock()
+    private var gpuReadActive = false
+    private var activeLoads = 0
+
+    /// Keeps cache slots fixed until the command buffer finishes.
+    final class GPUReadLease {
+        let buffers: [MTLBuffer]
+        let experts: [Int]
+        let populatedBuffers: [MTLBuffer]
+        let heap: MTLHeap?
+        private let owner: PreadExpertStreamer
+        private var released = false
+        private var recordedHits = false
+
+        fileprivate init(owner: PreadExpertStreamer, experts: [Int]) {
+            self.owner = owner
+            self.heap = owner.slotHeap
+            self.buffers = owner.slotBuffers
+            self.experts = experts
+            self.populatedBuffers = zip(owner.slotBuffers, experts).compactMap { buffer, expert in
+                expert >= 0 && expert < owner.layout.expertsPerLayer ? buffer : nil
+            }
+        }
+
+        func recordCompletedHits(_ selected: [Int]) throws {
+            try recordCompletedHitGroups([selected])
+        }
+
+        func recordCompletedHitGroups(_ groups: [[Int]]) throws {
+            owner.cacheLock.lock()
+            defer { owner.cacheLock.unlock() }
+            guard !released, !recordedHits, owner.gpuReadActive,
+                  (1...5).contains(groups.count), groups.allSatisfy({ selected in
+                      selected.count == 8 && Set(selected).count == 8 && selected.allSatisfy({
+                          $0 >= 0 && $0 < owner.expertUseCount.count && experts.contains($0)
+                      })
+                  }) else {
+                throw StreamerError.cacheInUse
+            }
+            recordedHits = true
+            for selected in groups {
+                owner.useClock += 1
+                for expert in selected {
+                    owner.expertUseCount[expert] &+= 1
+                    if let slot = experts.firstIndex(of: expert) {
+                        owner.slotLastUse[slot] = owner.useClock
+                    }
+                }
+                owner.successfulPlanHits &+= UInt64(selected.count)
+            }
+        }
+
+        /// Call only after GPU completion, or before submitting any work.
+        func release() {
+            owner.cacheLock.lock()
+            defer { owner.cacheLock.unlock() }
+            guard !released else { return }
+            released = true
+            owner.gpuReadActive = false
+        }
+
+        deinit { release() }
+    }
+
+    func beginGPURead() -> GPUReadLease? {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        guard !gpuReadActive, activeLoads == 0,
+              slotExpert.filter({ $0 >= 0 && $0 < layout.expertsPerLayer }).count >= 8 else {
+            return nil
+        }
+        gpuReadActive = true
+        return GPUReadLease(owner: self, experts: slotExpert)
+    }
 
     public convenience init(layout: StreamLayout,
                             device: MTLDevice,
@@ -128,7 +204,6 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
 
         let allocationSize = ((Int(layout.expertStride) + pageSize - 1) / pageSize) * pageSize
-        self.slotAllocationSize = allocationSize
         var pointers: [UnsafeMutableRawPointer] = []
         var buffers: [MTLBuffer] = []
         pointers.reserveCapacity(slotCount)
@@ -140,25 +215,32 @@ public final class PreadExpertStreamer: @unchecked Sendable {
             }
         }
 
-        for _ in 0..<slotCount {
-            var raw: UnsafeMutableRawPointer?
-            let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
-            guard result == 0, let pointer = raw else {
-                unwind()
-                throw StreamerError.allocFailed(errno: result)
+        if let cached = Self.makeHeapCache(device: device, slotCount: slotCount, allocationSize: allocationSize) {
+            self.slotHeap = cached.heap
+            buffers = cached.buffers
+            pointers = buffers.map { $0.contents() }
+        } else {
+            self.slotHeap = nil
+            for _ in 0..<slotCount {
+                var raw: UnsafeMutableRawPointer?
+                let result = posix_memalign(&raw, Self.scratchAlignment, allocationSize)
+                guard result == 0, let pointer = raw else {
+                    unwind()
+                    throw StreamerError.allocFailed(errno: result)
+                }
+                pointers.append(pointer)
+                nonisolated(unsafe) let capturedPointer = pointer
+                guard let buffer = device.makeBuffer(
+                    bytesNoCopy: pointer,
+                    length: allocationSize,
+                    options: .storageModeShared,
+                    deallocator: { _, _ in free(capturedPointer) })
+                else {
+                    unwind()
+                    throw StreamerError.bufferWrapFailed
+                }
+                buffers.append(buffer)
             }
-            pointers.append(pointer)
-            nonisolated(unsafe) let capturedPointer = pointer
-            guard let buffer = device.makeBuffer(
-                bytesNoCopy: pointer,
-                length: allocationSize,
-                options: .storageModeShared,
-                deallocator: { _, _ in free(capturedPointer) })
-            else {
-                unwind()
-                throw StreamerError.bufferWrapFailed
-            }
-            buffers.append(buffer)
         }
 
         self.slotPointers = pointers
@@ -167,6 +249,29 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         self.slotLastUse = [Int](repeating: 0, count: slotCount)
         self.expertUseCount = [Int](repeating: 0, count: max(1, layout.expertsPerLayer))
         closeFDOnFailure = false
+    }
+
+    private static func makeHeapCache(device: MTLDevice, slotCount: Int, allocationSize: Int)
+        -> (heap: MTLHeap, buffers: [MTLBuffer])? {
+        guard slotCount == 64, device.hasUnifiedMemory,
+              ProcessInfo.processInfo.physicalMemory >= 32 * 1_024 * 1_024 * 1_024 else { return nil }
+        let size = device.heapBufferSizeAndAlign(length: allocationSize, options: .storageModeShared)
+        guard size.align > 0, size.size <= Int.max - (size.align - 1) else { return nil }
+        let stride = (size.size + size.align - 1) / size.align * size.align
+        let (bytes, overflow) = stride.multipliedReportingOverflow(by: slotCount)
+        guard !overflow else { return nil }
+        let descriptor = MTLHeapDescriptor()
+        descriptor.size = bytes
+        descriptor.storageMode = .shared
+        descriptor.hazardTrackingMode = .tracked
+        guard let heap = device.makeHeap(descriptor: descriptor) else { return nil }
+        heap.label = "Gemma expert cache"
+        var buffers: [MTLBuffer] = []
+        for _ in 0..<slotCount {
+            guard let buffer = heap.makeBuffer(length: allocationSize, options: .storageModeShared) else { return nil }
+            buffers.append(buffer)
+        }
+        return (heap, buffers)
     }
 
     deinit {
@@ -186,6 +291,18 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         -> (buffer: MTLBuffer, offset: UInt64, size: UInt64) {
         guard slot >= 0 && slot < slotCount else {
             throw StreamerError.slotOutOfRange(slot)
+        }
+        cacheLock.lock()
+        guard !gpuReadActive else {
+            cacheLock.unlock()
+            throw StreamerError.cacheInUse
+        }
+        activeLoads += 1
+        cacheLock.unlock()
+        defer {
+            cacheLock.lock()
+            activeLoads -= 1
+            cacheLock.unlock()
         }
         let regionOffset = layout.expertOffset(layer: layer, expert: expert)
         guard regionOffset + layout.expertStride <= layout.streamSize else {
@@ -225,6 +342,7 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         cacheLock.lock()
         defer { cacheLock.unlock() }
 
+        guard !gpuReadActive else { return nil }
         let clock = useClock + 1
         var assignedSlots = [Int](repeating: -1, count: experts.count)
         var reserved = [Bool](repeating: false, count: slotCount)
@@ -308,9 +426,28 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         for index in plan.misses {
             slotExpert[plan.assignedSlots[index]] = plan.experts[index]
         }
+        successfulPlanHits += UInt64(plan.hits)
+        successfulPlanMisses += UInt64(plan.misses.count)
         cacheLock.unlock()
 
         return expertCachePlanBuffers(plan)
+    }
+
+    /// The model's all-hit fast path serves a successful plan without running
+    /// the executor. Raw buffer previews and planning alone do not count.
+    func recordSuccessfulCachePlan(_ plan: ExpertCachePlan) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        successfulPlanHits += UInt64(plan.hits)
+        successfulPlanMisses += UInt64(plan.misses.count)
+    }
+
+    /// Lifetime counts include only plans whose complete fetch succeeded.
+    /// A failed plan contributes neither hits nor partially completed misses.
+    var successfulCachePlanCounts: (hits: UInt64, misses: UInt64) {
+        cacheLock.lock()
+        defer { cacheLock.unlock() }
+        return (successfulPlanHits, successfulPlanMisses)
     }
 
     public func expertCachePlanBuffers(_ plan: ExpertCachePlan)
@@ -425,11 +562,19 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         }
     }
 
-    /// Model-derived CPU-side scratch owned by this streamer: its aligned
-    /// slot allocation. Diagnostic metadata for residency reporting, not an
-    /// ownership or lifetime API.
+    /// Bytes of the actual Metal cache buffers this streamer owns. Each slot
+    /// buffer is counted once; configured slot geometry is not used as a
+    /// substitute for the buffers that were successfully created.
+    public var allocatedCacheBytes: UInt64 {
+        slotBuffers.reduce(UInt64(0)) { total, buffer in
+            total + UInt64(buffer.length)
+        }
+    }
+
+    /// CPU-side scratch owned by this streamer. Diagnostic metadata for
+    /// residency reporting, not an ownership or lifetime API.
     public var diagnosticSlotScratchBytes: UInt64 {
-        UInt64(slotCount) * UInt64(slotAllocationSize)
+        allocatedCacheBytes
     }
 
     func recordMeasurementSnapshot(_ capture: RuntimeMeasurementCapture, layer: Int, reason: UInt64) {
@@ -438,5 +583,326 @@ public final class PreadExpertStreamer: @unchecked Sendable {
         capture.recordCacheLayer(layer: layer, reason: reason, slots: slotExpert,
                                  lastUse: slotLastUse, frequencies: expertUseCount,
                                  useClock: useClock, scratchBytes: diagnosticSlotScratchBytes)
+    }
+}
+
+
+/// Names alone cannot create an admissible range; each stream is separately
+/// resolved through the protected handle and may belong to a different shard.
+struct QwenBF16RoutedSourceNames: Sendable {
+    let gateUpShardName: String
+    let gateUpTensorName: String
+    let downShardName: String
+    let downTensorName: String
+}
+
+/// @testable-only deterministic gates around the REAL protected reads. No
+/// callback supplies bytes, file descriptors, offsets, identities or a token.
+struct QwenBF16ExpertReadHooks: Sendable {
+    enum Stream: Sendable { case gateUp, down }
+    enum Checkpoint: Sendable {
+        case beforeProtectedRead(expert: Int, stream: Stream)
+        case afterProtectedRead(expert: Int, stream: Stream)
+        case beforePairPublish(expert: Int)
+    }
+
+    let checkpoint: @Sendable (Checkpoint) throws -> Void
+    init(checkpoint: @escaping @Sendable (Checkpoint) throws -> Void = { _ in }) {
+        self.checkpoint = checkpoint
+    }
+    static let none = Self()
+}
+
+enum QwenBF16ExpertCacheError: Error, Equatable, Sendable {
+    case invalidGeometry
+    case invalidHeader(String)
+    case budgetExceeded
+    case allocationFailed
+    case invalidPlan
+}
+
+/// Private-to-runtime paired cache. The coordinator is the only production
+/// caller of plan/fetch; it serializes them against GPU slot reservations.
+/// No slot is valid unless BOTH independently admitted slices were read.
+final class QwenBF16PairedExpertCache: @unchecked Sendable {
+    struct MeasurementSnapshot: Sendable {
+        let expertIDs: [Int]
+        let useCounts: [UInt64]
+        let lastUse: [UInt64]
+        let clock: UInt64
+        let policy: ExpertCachePolicy
+    }
+    struct Buffers: @unchecked Sendable {
+        let gateUp: MTLBuffer
+        let down: MTLBuffer
+    }
+
+    /// Errors are ordered by requested pair, then gate/up before down, rather
+    /// than whichever protected read happens to finish first.
+    private final class ReadFailures: @unchecked Sendable {
+        private let lock = NSLock()
+        private var errors: [Error?]
+        init(count: Int) { errors = [Error?](repeating: nil, count: count) }
+        func record(_ error: Error, index: Int) {
+            lock.lock(); errors[index] = error; lock.unlock()
+        }
+        func first() -> Error? {
+            lock.lock(); defer { lock.unlock() }
+            return errors.first(where: { $0 != nil }) ?? nil
+        }
+    }
+
+    private static let maximumConcurrentMissPairs = 8
+
+    let slotCount: Int
+    let expertCount: Int
+    let gateUpBytes: Int
+    let downBytes: Int
+    let allocatedCacheBytes: UInt64
+
+    private let source: OfficialSourceHandle
+    private let gateUpRange: OfficialSourceHandle.TensorRange
+    private let downRange: OfficialSourceHandle.TensorRange
+    private let buffers: [Buffers]
+    /// Accessed only under the owning coordinator's serialized I/O lock.
+    private var slotExpert: [Int]
+    private var lastUse: [UInt64]
+    private var useCount: [UInt64]
+    private let cachePolicy: ExpertCachePolicy
+    private var clock: UInt64 = 0
+
+    /// Caller must hold the owning coordinator's I/O lock. Array values are
+    /// consumed synchronously before planning can mutate their backing storage.
+    func measurementSnapshot() -> MeasurementSnapshot {
+        MeasurementSnapshot(expertIDs: slotExpert, useCounts: useCount,
+                            lastUse: lastUse, clock: clock, policy: cachePolicy)
+    }
+
+    var measurementClock: UInt64 { clock }
+
+    /// Immutable slot allocations only. Payload/validity and replacement policy
+    /// remain private; residency registration never reads source or buffer data.
+    var residencyAllocations: [MTLBuffer] {
+        buffers.flatMap { [$0.gateUp, $0.down] }
+    }
+
+    init(source: OfficialSourceHandle, names: QwenBF16RoutedSourceNames,
+         expertCount: Int, hiddenSize: Int, intermediateSize: Int,
+         device: MTLDevice, slotCount: Int, residencyBudget: UInt64,
+         cachePolicy: ExpertCachePolicy = .lru) throws {
+        guard expertCount > 0, UInt32(exactly: expertCount) != nil,
+              hiddenSize > 0, UInt32(exactly: hiddenSize) != nil,
+              intermediateSize > 0, UInt32(exactly: intermediateSize) != nil,
+              slotCount > 0, slotCount <= expertCount else {
+            throw QwenBF16ExpertCacheError.invalidGeometry
+        }
+        func multiply(_ lhs: UInt64, _ rhs: UInt64) throws -> UInt64 {
+            let (value, overflow) = lhs.multipliedReportingOverflow(by: rhs)
+            guard !overflow else { throw QwenBF16ExpertCacheError.invalidGeometry }
+            return value
+        }
+        let doubleIntermediate = try multiply(UInt64(intermediateSize), 2)
+        guard doubleIntermediate <= UInt64(UInt32.max) else {
+            throw QwenBF16ExpertCacheError.invalidGeometry
+        }
+        let gateBytes = try multiply(
+            try multiply(doubleIntermediate, UInt64(hiddenSize)), 2)
+        let downBytes = try multiply(
+            try multiply(UInt64(hiddenSize), UInt64(intermediateSize)), 2)
+        let (pairBytes, sumOverflow) = gateBytes.addingReportingOverflow(downBytes)
+        guard !sumOverflow else { throw QwenBF16ExpertCacheError.invalidGeometry }
+        let gateTensorBytes = try multiply(gateBytes, UInt64(expertCount))
+        let downTensorBytes = try multiply(downBytes, UInt64(expertCount))
+        let total = try multiply(pairBytes, UInt64(slotCount))
+        guard gateBytes > 0, downBytes > 0,
+              gateTensorBytes <= UInt64(Int64.max), downTensorBytes <= UInt64(Int64.max),
+              gateBytes / 2 <= UInt64(UInt32.max),
+              downBytes / 2 <= UInt64(UInt32.max),
+              gateBytes <= UInt64(device.maxBufferLength),
+              downBytes <= UInt64(device.maxBufferLength),
+              gateBytes <= UInt64(Int.max), downBytes <= UInt64(Int.max) else {
+            throw QwenBF16ExpertCacheError.invalidGeometry
+        }
+        guard total <= residencyBudget else { throw QwenBF16ExpertCacheError.budgetExceeded }
+        let gate = try source.admitTensor(
+            shardName: names.gateUpShardName, tensorName: names.gateUpTensorName)
+        let down = try source.admitTensor(
+            shardName: names.downShardName, tensorName: names.downTensorName)
+        guard gate.shape == [UInt64(expertCount), doubleIntermediate, UInt64(hiddenSize)] else {
+            throw QwenBF16ExpertCacheError.invalidHeader(names.gateUpTensorName)
+        }
+        guard down.shape == [UInt64(expertCount), UInt64(hiddenSize), UInt64(intermediateSize)] else {
+            throw QwenBF16ExpertCacheError.invalidHeader(names.downTensorName)
+        }
+        // Both tokens validate their issuer, root, marker and retained shard
+        // identity before the first GPU allocation. No payload is read here.
+        try Self.validate(source: source, range: gate)
+        try Self.validate(source: source, range: down)
+        var slots: [Buffers] = []
+        slots.reserveCapacity(slotCount)
+        for _ in 0..<slotCount {
+            try Task.checkCancellation()
+            guard let gateBuffer = device.makeBuffer(length: Int(gateBytes),
+                                                      options: .storageModeShared),
+                  let downBuffer = device.makeBuffer(length: Int(downBytes),
+                                                      options: .storageModeShared) else {
+                throw QwenBF16ExpertCacheError.allocationFailed
+            }
+            slots.append(Buffers(gateUp: gateBuffer, down: downBuffer))
+        }
+        self.source = source
+        gateUpRange = gate
+        downRange = down
+        buffers = slots
+        self.slotCount = slotCount
+        self.expertCount = expertCount
+        gateUpBytes = Int(gateBytes)
+        self.downBytes = Int(downBytes)
+        allocatedCacheBytes = total
+        slotExpert = [Int](repeating: -1, count: slotCount)
+        lastUse = [UInt64](repeating: 0, count: slotCount)
+        useCount = [UInt64](repeating: 0, count: slotCount)
+        self.cachePolicy = cachePolicy
+    }
+
+    /// Pure plan over ONE validity array. Active slots remain eligible only
+    /// when they already contain the requested expert; misses cannot evict one.
+    func plan(expertIDs: [Int], avoidingSlots: Set<Int>) -> ExpertCachePlan? {
+        guard expertIDs.count <= slotCount,
+              Set(expertIDs).count == expertIDs.count,
+              expertIDs.allSatisfy({ $0 >= 0 && $0 < expertCount }) else { return nil }
+        var assigned = [Int](repeating: -1, count: expertIDs.count)
+        var reserved = avoidingSlots
+        for (index, expert) in expertIDs.enumerated() {
+            if let hit = slotExpert.indices.first(where: {
+                slotExpert[$0] == expert && !assigned.contains($0)
+            }) {
+                assigned[index] = hit
+                reserved.insert(hit)
+            }
+        }
+        let misses = expertIDs.indices.filter { assigned[$0] < 0 }
+        let victims = slotExpert.indices.filter { !reserved.contains($0) }
+            .sorted { lhs, rhs in
+                if cachePolicy == .lfu, useCount[lhs] != useCount[rhs] {
+                    return useCount[lhs] < useCount[rhs]
+                }
+                return lastUse[lhs] == lastUse[rhs] ? lhs < rhs : lastUse[lhs] < lastUse[rhs]
+            }
+        guard misses.count <= victims.count else { return nil }
+        clock &+= 1
+        for (offset, index) in misses.enumerated() {
+            assigned[index] = victims[offset]
+        }
+        for (index, slot) in assigned.enumerated() {
+            if misses.contains(index) { useCount[slot] = 0 }
+            useCount[slot] &+= 1
+            lastUse[slot] = clock
+        }
+        return ExpertCachePlan(experts: expertIDs, assignedSlots: assigned,
+                               misses: misses, hits: expertIDs.count - misses.count)
+    }
+
+    func load(_ plan: ExpertCachePlan, hooks: QwenBF16ExpertReadHooks,
+              canceled: @Sendable () -> Bool) throws -> [Buffers] {
+        guard plan.experts.count == plan.assignedSlots.count,
+              Set(plan.assignedSlots).count == plan.assignedSlots.count,
+              Set(plan.misses).count == plan.misses.count,
+              plan.assignedSlots.allSatisfy({ buffers.indices.contains($0) }),
+              plan.misses.allSatisfy({ plan.experts.indices.contains($0) }) else {
+            throw QwenBF16ExpertCacheError.invalidPlan
+        }
+        let missSet = Set(plan.misses)
+        for index in plan.experts.indices where !missSet.contains(index) {
+            let slot = plan.assignedSlots[index]
+            guard slotExpert[slot] == plan.experts[index] else {
+                throw QwenBF16ExpertCacheError.invalidPlan
+            }
+            do {
+                try validateBoth()
+            } catch {
+                slotExpert[slot] = -1
+                throw error
+            }
+        }
+        var missOffset = 0
+        while missOffset < plan.misses.count {
+            if canceled() { throw CancellationError() }
+            let pairCount = min(Self.maximumConcurrentMissPairs, plan.misses.count - missOffset)
+            let batch = Array(plan.misses[missOffset..<(missOffset + pairCount)])
+            for index in batch {
+                // All destinations are distinct reserved victims. Invalidate
+                // them serially before any worker can overwrite either stream.
+                slotExpert[plan.assignedSlots[index]] = -1
+            }
+            let failures = ReadFailures(count: pairCount * 2)
+            DispatchQueue.concurrentPerform(iterations: pairCount * 2) { worker in
+                let index = batch[worker / 2]
+                let expert = plan.experts[index]
+                let pair = self.buffers[plan.assignedSlots[index]]
+                let stream = worker % 2
+                do {
+                    let kind: QwenBF16ExpertReadHooks.Stream = stream == 0 ? .gateUp : .down
+                    try hooks.checkpoint(.beforeProtectedRead(expert: expert, stream: kind))
+                    if stream == 0 {
+                        try self.read(expert: expert, range: self.gateUpRange,
+                                      into: pair.gateUp, sliceBytes: self.gateUpBytes)
+                    } else {
+                        try self.read(expert: expert, range: self.downRange,
+                                      into: pair.down, sliceBytes: self.downBytes)
+                    }
+                    try hooks.checkpoint(.afterProtectedRead(expert: expert, stream: kind))
+                } catch { failures.record(error, index: worker) }
+            }
+            // Join every launched stream even on failure or cancellation.
+            // Failed/partial victims remain invalid; no pair is published yet.
+            if let error = failures.first() { throw error }
+            if canceled() { throw CancellationError() }
+            missOffset += pairCount
+        }
+        // All requested miss reads have settled before publication. Keep hooks,
+        // identity checks and paired validity updates serial in request order.
+        for index in plan.misses {
+            let slot = plan.assignedSlots[index]
+            let expert = plan.experts[index]
+            if canceled() { throw CancellationError() }
+            try hooks.checkpoint(.beforePairPublish(expert: expert))
+            if canceled() { throw CancellationError() }
+            // The hook may mutate a retained shard or marker. Revalidate both
+            // tokens after it, immediately before making this pair a cache hit.
+            try validateBoth()
+            if canceled() { throw CancellationError() }
+            slotExpert[slot] = expert
+        }
+        if canceled() { throw CancellationError() }
+        return plan.assignedSlots.map { buffers[$0] }
+    }
+
+    private func validateBoth() throws {
+        try Self.validate(source: source, range: gateUpRange)
+        try Self.validate(source: source, range: downRange)
+    }
+
+    private static func validate(source: OfficialSourceHandle,
+                                 range: OfficialSourceHandle.TensorRange) throws {
+        try source.preadTensorRange(
+            range, byteOffset: 0, byteCount: 0, expectedByteCount: 0,
+            into: UnsafeMutableRawBufferPointer(start: nil, count: 0))
+    }
+
+    private func read(expert: Int, range: OfficialSourceHandle.TensorRange,
+                      into buffer: MTLBuffer, sliceBytes: Int) throws {
+        let base = UInt64(expert) * UInt64(sliceBytes) // admitted total shape checked
+        var copied = 0
+        while copied < sliceBytes {
+            let count = min(sliceBytes - copied,
+                            Int(OfficialSourceHandle.maximumTensorReadBytes))
+            let destination = UnsafeMutableRawBufferPointer(
+                start: buffer.contents().advanced(by: copied), count: count)
+            try source.preadTensorRange(
+                range, byteOffset: base + UInt64(copied), byteCount: UInt64(count),
+                expectedByteCount: UInt64(count), into: destination)
+            copied += count
+        }
     }
 }

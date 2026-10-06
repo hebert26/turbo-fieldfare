@@ -13,20 +13,26 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
         var droppedMeasurementBytes: UInt64 = 0
         var measurementReceivers: Set<UUID> = []
         var streamClosed = false
+        var terminalDominatesPending = false
+        var transportShutdownRequested = false
+        var transportClosed = false
+        var output: FileHandle?
     }
 
     private let condition = NSCondition()
     private var state = State()
-    private let output: FileHandle
     private let onTerminate: @Sendable (DecodeServiceResponseRouter, Error) -> Void
+    private let onEventQueued: @Sendable (UUID) -> Void
 
     init(
         output: FileHandle,
         onTerminate: @escaping @Sendable (DecodeServiceResponseRouter, Error) -> Void
-            = { _, _ in }
+            = { _, _ in },
+        onEventQueued: @escaping @Sendable (UUID) -> Void = { _ in }
     ) {
-        self.output = output
         self.onTerminate = onTerminate
+        self.onEventQueued = onEventQueued
+        state.output = output
         let reader = Thread { [weak self] in
             self?.readFrames(from: output)
         }
@@ -41,13 +47,45 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
         return state.terminalError != nil
     }
 
-    func closeStream() {
+    /// Logically terminates this owner without touching its descriptor.
+    /// Owner termination dominates events queued before retirement.
+    func terminateWaiters(with error: Error = DecodeFrameError.unexpectedEOF) {
         condition.lock()
+        guard !state.streamClosed else {
+            condition.unlock()
+            return
+        }
         state.streamClosed = true
+        state.terminalError = error
+        state.terminalDominatesPending = true
+        state.pending.removeAll()
+        state.measurementBytes = 0
+        state.measurementBatches = 0
+        state.droppedGenerationID = nil
+        state.droppedMeasurementBatches = 0
+        state.droppedMeasurementBytes = 0
+        state.measurementReceivers.removeAll()
         condition.broadcast()
         condition.unlock()
-        shutdown(output.fileDescriptor, SHUT_RDWR)
-        try? output.close()
+    }
+
+    /// Physical abort, guarded against reader retirement and descriptor reuse.
+    func requestTransportShutdown() {
+        condition.lock()
+        guard !state.transportClosed, !state.transportShutdownRequested,
+              let output = state.output else {
+            condition.unlock()
+            return
+        }
+        state.transportShutdownRequested = true
+        _ = Darwin.shutdown(output.fileDescriptor, SHUT_RDWR)
+        condition.unlock()
+    }
+
+    func waitUntilTransportClosed() {
+        condition.lock()
+        while !state.transportClosed { condition.wait() }
+        condition.unlock()
     }
 
     func beginMeasurementReception(_ generationID: UUID) -> Bool {
@@ -118,6 +156,9 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
               state.terminalError == nil {
             condition.wait()
         }
+        if state.terminalDominatesPending {
+            throw state.terminalError ?? DecodeFrameError.unexpectedEOF
+        }
         if var events = state.pending[requestID], !events.isEmpty {
             let event = events.removeFirst()
             if let json = event.measurementBatchJSON {
@@ -136,6 +177,15 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
     }
 
     private func readFrames(from output: FileHandle) {
+        defer {
+            condition.lock()
+            state.transportClosed = true
+            let retired = state.output
+            state.output = nil
+            condition.broadcast()
+            condition.unlock()
+            try? retired?.close()
+        }
         do {
             while true {
                 // This thread lives for the service connection. Drain Foundation's
@@ -144,6 +194,10 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
                     var event = try DecodeFrameCodec.read(
                         DecodeServiceEvent.self, from: output)
                     condition.lock()
+                    guard !state.streamClosed, state.terminalError == nil else {
+                        condition.unlock()
+                        throw DecodeFrameError.unexpectedEOF
+                    }
                     // Only measurement payloads have this extra queue budget.
                     // Inference text, progress, terminal order and sequence stay intact.
                     if let json = event.measurementBatchJSON {
@@ -190,6 +244,7 @@ final class DecodeServiceResponseRouter: @unchecked Sendable {
                     state.pending[event.generationID, default: []].append(event)
                     condition.broadcast()
                     condition.unlock()
+                    onEventQueued(event.generationID)
                 }
             }
         } catch {

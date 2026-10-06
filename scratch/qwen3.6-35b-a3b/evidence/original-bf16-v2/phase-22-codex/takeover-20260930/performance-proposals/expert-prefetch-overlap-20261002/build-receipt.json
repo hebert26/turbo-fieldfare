@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-prefetch-overlap-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/expert-prefetch-overlap-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareExpertPrefetchOverlap"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "4460ba4728417f5c1b4ba7c776933639113e320f57399ecbfcfbbef13868a450",
+  "binarySHA256": "e94be377410c5cd68df08656625ffa7f61706d643847e74861160176ad1068cc",
+  "stageHashesSHA256": "c60b678a52c10c055ccf318975ab7a7bee0751c11e4885def03cd0cd5f76a200"
+}

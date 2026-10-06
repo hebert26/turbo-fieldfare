@@ -77,20 +77,45 @@ public enum ManifestReader {
     public static func load(directoryURL: URL,
                             expecting: ArchConfig,
                             maxBytes: UInt64 = defaultMaxBytes) throws -> Manifest {
-        let directory = try GTurboModelDirectory(rootURL: directoryURL)
-        let data: Data
-        do {
-            data = try directory.readMetadata("manifest.json", maxBytes: maxBytes)
-        } catch ModelError.missingFile {
-            throw ModelError.partialInstall(path: directoryURL.path)
-        }
+        let data = try readManifest(directoryURL: directoryURL, maxBytes: maxBytes)
         return try decode(data: data, expecting: expecting)
+    }
+
+    /// Loads a v2 manifest without accepting a caller-supplied family or model
+    /// label. Identity and runtime configuration are derived from its bytes.
+    public static func loadVerified(directoryURL: URL,
+                                    maxBytes: UInt64 = defaultMaxBytes) throws
+        -> LoadedModelManifest {
+        let data = try readManifest(directoryURL: directoryURL, maxBytes: maxBytes)
+        return try decodeVerified(data: data)
+    }
+
+    public static func decodeVerified(data: Data) throws -> LoadedModelManifest {
+        do {
+            let version = try GTurboManifestHeaderCodec.version(in: data)
+            guard version.major == GTurboFormatV2.versionMajor else {
+                throw ModelError.unsupportedVersion(
+                    major: version.major, minor: version.minor)
+            }
+            guard case let .v2(verified) = try GTurboManifestDocumentCodec.decode(data) else {
+                throw ModelError.unsupportedVersion(
+                    major: version.major, minor: version.minor)
+            }
+            return try LoadedModelManifest(verified: verified)
+        } catch let error as ModelError {
+            throw error
+        } catch {
+            throw ModelError.indexCorrupt(detail: "manifest.json: \(error)")
+        }
     }
 
     package static func decode(data: Data,
                                expecting: ArchConfig) throws -> Manifest {
         let manifest: Manifest
         do {
+            // The legacy adapter deliberately preserves its established
+            // v1-specific ModelError mapping. Family-neutral callers use the
+            // format-owned document dispatcher through `decodeVerified`.
             let wire = try GTurboManifestCodec.decodeUnchecked(data)
             guard wire.magic == GTurboFormatV1.magic else {
                 throw ModelError.notAGTurboDirectory
@@ -118,6 +143,16 @@ public enum ManifestReader {
 
         try validate(manifest, against: expecting)
         return manifest
+    }
+
+    private static func readManifest(directoryURL: URL,
+                                     maxBytes: UInt64) throws -> Data {
+        let directory = try GTurboModelDirectory(rootURL: directoryURL)
+        do {
+            return try directory.readMetadata("manifest.json", maxBytes: maxBytes)
+        } catch ModelError.missingFile {
+            throw ModelError.partialInstall(path: directoryURL.path)
+        }
     }
 
     static func validate(_ m: Manifest,
@@ -191,6 +226,54 @@ public enum ManifestReader {
         try check("fullAttentionLayerMask",
                   actualMask.description,
                   e.fullAttentionLayerMask.description)
+    }
+}
+
+private extension LoadedModelManifest {
+    init(verified: GTurboVerifiedManifestV2) throws {
+        let wire = verified.manifest
+        let architecture: LoadedModelArchitecture
+        switch wire.architecture {
+        case let .gemma4(gemma):
+            architecture = .gemma4(ArchConfig(wire: gemma))
+        case let .qwen3_6(qwen):
+            architecture = .qwen3_6(QwenArchConfig(wire: qwen))
+        }
+        self.init(
+            descriptor: verified.descriptor,
+            architecture: architecture,
+            files: wire.files.mapValues(ManifestFileEntry.init(wire:)),
+            tensorRegions: wire.tensorRegions.map(LoadedTensorRegion.init(wire:)),
+            expertsPerLayer: wire.expertsPerLayer,
+            numLayers: wire.numLayers,
+            expertStride: wire.expertStride)
+    }
+}
+
+private extension ArchConfig {
+    init(wire: GTurboManifestArchV1) {
+        self.init(
+            hiddenSize: wire.hiddenSize,
+            intermediateSize: wire.ffnIntermediate,
+            moeIntermediateSize: wire.moeIntermediateSize,
+            numHeads: wire.numHeads,
+            numKVHeads: wire.numKVHeads,
+            numFullKVHeads: wire.numFullKVHeads,
+            headDim: wire.headDim,
+            fullHeadDim: wire.fullHeadDim,
+            vocabSize: wire.vocabSize,
+            slidingWindow: wire.slidingWindow,
+            finalLogitSoftcap: wire.finalLogitSoftcap,
+            ropeTheta: wire.ropeTheta,
+            fullRopeTheta: wire.fullRopeTheta,
+            partialRotaryFactor: wire.partialRotaryFactor,
+            numLayers: wire.numLayers,
+            numExperts: wire.numExperts,
+            topKExperts: wire.topKExperts,
+            tieWordEmbeddings: wire.tieWordEmbeddings,
+            attentionKEqV: wire.attentionKEqV,
+            fullAttentionLayerMask: wire.fullAttentionLayerMask.map(UInt8.init),
+            hiddenActivation: wire.hiddenActivation)
     }
 }
 

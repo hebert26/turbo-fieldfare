@@ -18,6 +18,11 @@ Usage:
                        --vision-output <model.vision.gturbo>
   TurboFieldfareRepack --discard-partial
                        --vision-output <model.vision.gturbo>
+  TurboFieldfareRepack --local-source <official-snapshot>
+                       --output <model.gturbo> [--preflight-only]
+                       [--resume] [--text-only]
+  TurboFieldfareRepack --local-source <official-snapshot>
+                       --output <model.gturbo> --discard-partial [--text-only]
   TurboFieldfareRepack --help
 
 The installer streams the supported Gemma 4 checkpoint from Hugging Face and
@@ -28,6 +33,13 @@ download can be continued with --resume or removed with --discard-partial.
 The optional image companion pack installs beside an existing text model and
 is bound to it. Without the pack the text runtime is unchanged; image input is
 simply unavailable.
+
+The local Qwen converter reads the pinned official snapshot in place and
+publishes deterministic text and matching image packs together. It never
+downloads source files and never replaces a completed destination. The image
+pack defaults to <model>.vision.gturbo; use --text-only to omit it. Use
+--preflight-only to authenticate the source and report exact capacity without
+creating output paths.
 """
 
 private struct Arguments {
@@ -201,6 +213,79 @@ private func printError(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+private func printLocalQwenPreflight(
+    _ preflight: LocalQwenStreamingRepackPreflight,
+    reserveBytes: UInt64
+) {
+    var lines = [
+        "Local Qwen preflight",
+        "Source repository: \(preflight.sourceRepository)",
+        "Source revision: \(preflight.sourceRevision)",
+        "Source index SHA-256: \(preflight.sourceIndexSHA256)",
+        "Source payload SHA-256: \(preflight.sourcePayloadSHA256)",
+        "Plan fingerprint: \(preflight.planFingerprint)",
+        "Quantization policy SHA-256: \(preflight.quantizationPolicySHA256)",
+        "Converter version: \(preflight.converterVersion)",
+        "Text output: \(preflight.textOutputDirectory)",
+        "Image output: \(preflight.visionOutputDirectory ?? "none")",
+        "Planned artifact bytes: \(preflight.artifactBytes)",
+        "Required bytes: \(preflight.requiredBytes)",
+        "Available bytes: \(preflight.availableBytes)",
+        "Protected reserve bytes: \(reserveBytes)",
+    ]
+    for (index, requirement) in preflight.diskRequirements.enumerated() {
+        let number = index + 1
+        lines.append("Volume \(number) probe: \(requirement.probePath)")
+        lines.append("Volume \(number) outputs: \(requirement.paths.joined(separator: ", "))")
+        lines.append("Volume \(number) required bytes: \(requirement.requiredBytes)")
+        lines.append("Volume \(number) available bytes: \(requirement.availableBytes)")
+    }
+    FileHandle.standardOutput.write(Data((lines.joined(separator: "\n") + "\n").utf8))
+}
+
+private func printLocalQwenProgress(_ progress: LocalQwenStreamingRepackProgress) {
+    guard progress.stage == .converting,
+          let completed = progress.durableCompletedUnitCount else { return }
+    FileHandle.standardOutput.write(
+        Data("Durable completed units: \(completed)\n".utf8))
+}
+
+private func runLocalQwen(_ command: LocalQwenRepackCommand) -> Int32 {
+    do {
+        switch command {
+        case .preflight(let options):
+            let preflight = try LocalQwenStreamingRepacker.preflight(options: options)
+            printLocalQwenPreflight(preflight, reserveBytes: options.reserveBytes)
+        case .discard(let options):
+            try LocalQwenStreamingRepacker.discardPartial(options: options)
+            print("Discarded owned Qwen partial for \(options.outputDirectory)")
+        case .run(let options):
+            let result = try LocalQwenStreamingRepacker.run(
+                options: options,
+                preflightReport: {
+                    printLocalQwenPreflight($0, reserveBytes: options.reserveBytes)
+                },
+                progress: printLocalQwenProgress)
+            print("Converted official local Qwen snapshot")
+            print("Source revision: \(result.preflight.sourceRevision)")
+            print("Completed units: \(result.completedUnitCount)")
+            print("Maximum observed transform scratch bytes: "
+                + "\(result.maximumObservedTransformScratchBytes)")
+            print("Text model: \(result.textOutputDirectory)")
+            print("Text receipt: \(result.textReceiptPath)")
+            if let vision = result.visionOutputDirectory,
+               let receipt = result.visionReceiptPath {
+                print("Image model: \(vision)")
+                print("Image receipt: \(receipt)")
+            }
+        }
+        return 0
+    } catch {
+        printError("local Qwen operation failed: \(error)")
+        return 1
+    }
+}
+
 private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
     guard let visionOutput = arguments.visionOutput else { return nil }
 
@@ -282,6 +367,16 @@ private func runVisionInstall(_ arguments: Arguments) async -> Int32? {
 }
 
 private func run(_ values: [String]) async -> Int32 {
+    let localArguments = Array(values.dropFirst())
+    if LocalQwenRepackCommandParser.isLocalMode(localArguments) {
+        do {
+            return runLocalQwen(try LocalQwenRepackCommandParser.parse(localArguments))
+        } catch {
+            printError("error: \(error)\n\n\(usage)")
+            return 2
+        }
+    }
+
     let arguments: Arguments
     do {
         arguments = try Arguments.parse(values)

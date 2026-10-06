@@ -54,13 +54,14 @@ final class RMSNorm {
                             weight: MTLBuffer, weightOffset: Int = 0,
                             out: MTLBuffer, outOffset: Int = 0,
                             d: UInt32,
-                            eps: Float) {
+                            eps: Float,
+                            conditional: DecodeDispatch? = nil) {
         encodeWeighted(commandBuffer: commandBuffer,
                        pso: d == 2816 ? psoBF16D2816 : psoBF16,
                        x: x, xOffset: xOffset,
                        weight: weight, weightOffset: weightOffset,
                        out: out, outOffset: outOffset,
-                       d: d, eps: eps)
+                       d: d, eps: eps, conditional: conditional)
     }
 
     /// Encode the no-scale variant (v_norm, router internal norm).
@@ -141,7 +142,8 @@ final class RMSNorm {
                                 weight: MTLBuffer, weightOffset: Int,
                                 out: MTLBuffer, outOffset: Int,
                                 d: UInt32,
-                                eps: Float) {
+                                eps: Float,
+                                conditional: DecodeDispatch?) {
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(x,      offset: xOffset,      index: 0)
@@ -151,7 +153,10 @@ final class RMSNorm {
         var epsVar = eps
         enc.setBytes(&dVar,   length: MemoryLayout<UInt32>.size, index: 3)
         enc.setBytes(&epsVar, length: MemoryLayout<Float>.size,  index: 4)
-        dispatchOneRow(enc: enc, pso: pso)
+        enc.dispatchDecode(MTLSize(width: 1, height: 1, depth: 1),
+                           threads: MTLSize(width: min(pso.maxTotalThreadsPerThreadgroup, 256),
+                                            height: 1, depth: 1),
+                           conditional: conditional)
         enc.endEncoding()
     }
 

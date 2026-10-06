@@ -20,13 +20,33 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     }
 
     public let descriptor: AppModelInstallDescriptor
+    public let expectedTextModelDirectory: URL?
     private let runInstall: InstallRunner
     private let runDiscard: MutationRunner
     private let runRemove: MutationRunner
     private let taskState = InstallTaskState()
 
-    public init(descriptor: AppModelInstallDescriptor = .visionCompanion) {
+    public convenience init(entry: AppModelCatalogEntry) throws {
+        guard entry.id == .gemma4, entry.family == .gemma4,
+              case let .remoteRepack(_, vision) = entry.installRoute,
+              vision == .visionCompanion else {
+            throw AppModelInstallerRoutingError.remoteInstallUnavailable(entry.id)
+        }
+        self.init(
+            descriptor: vision,
+            expectedTextModelDirectory: entry.location.textModelURL)
+    }
+
+    public convenience init(descriptor: AppModelInstallDescriptor = .visionCompanion) {
+        self.init(descriptor: descriptor, expectedTextModelDirectory: nil)
+    }
+
+    private init(
+        descriptor: AppModelInstallDescriptor,
+        expectedTextModelDirectory: URL?
+    ) {
         self.descriptor = descriptor
+        self.expectedTextModelDirectory = expectedTextModelDirectory?.standardizedFileURL
         self.runInstall = { textModelDirectory, progress in
             let output = try VisionPackLocation.companionURL(
                 forTextModel: textModelDirectory)
@@ -66,6 +86,7 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         runRemove: @escaping MutationRunner = { _ in }
     ) {
         self.descriptor = descriptor
+        self.expectedTextModelDirectory = nil
         self.runInstall = runInstall
         self.runDiscard = runDiscard
         self.runRemove = runRemove
@@ -74,6 +95,7 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     public func checkInstallRequirement(
         textModelDirectory: URL
     ) throws -> AppModelInstallRequirement {
+        let textModelDirectory = try validated(textModelDirectory)
         let output = try VisionPackLocation.companionURL(
             forTextModel: textModelDirectory)
         let saved = try RemoteVisionPackInstaller.inspectPersistentInstall(
@@ -108,6 +130,7 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
             let id = UUID()
             let task = Task { [runInstall] in
                 do {
+                    let textModelDirectory = try validated(textModelDirectory)
                     continuation.yield(.checking)
                     let directory = try await runInstall(textModelDirectory) { progress in
                         continuation.yield(RepackModelInstallerClient.event(for: progress))
@@ -147,12 +170,13 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     }
 
     public func discardPartialInstall(textModelDirectory: URL) async throws {
-        try await mutate(textModelDirectory, using: runDiscard)
+        try await mutate(try validated(textModelDirectory), using: runDiscard)
     }
 
     public func preparedInstallIsValid(textModelDirectory: URL) -> Bool {
-        guard let output = try? VisionPackLocation.companionURL(
-            forTextModel: textModelDirectory) else { return false }
+        guard let textModelDirectory = try? validated(textModelDirectory),
+              let output = try? VisionPackLocation.companionURL(
+                forTextModel: textModelDirectory) else { return false }
         return RemoteVisionPackInstaller.preparedInstallIsValid(
             outputDirectory: output.path,
             textModelDirectory: textModelDirectory.path)
@@ -162,7 +186,7 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         textModelDirectory: URL,
         onVerifyProgress: (@Sendable (Double) -> Void)? = nil
     ) async throws -> URL {
-        let textModelDirectory = textModelDirectory.standardizedFileURL
+        let textModelDirectory = try validated(textModelDirectory)
         let output = try VisionPackLocation.companionURL(
             forTextModel: textModelDirectory)
         try await runCancellableDetached { [descriptor] in
@@ -172,9 +196,6 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
                 repoID: descriptor.repoID,
                 requestedRevision: descriptor.revision,
                 onVerifyProgress: { hashed, total in
-                    // Cancellation rides the progress callback: verification is
-                    // the only phase that can be abandoned safely, and it is the
-                    // only one that takes minutes.
                     try Task.checkCancellation()
                     guard let onVerifyProgress, total > 0 else { return }
                     onVerifyProgress(min(max(Double(hashed) / Double(total), 0), 1))
@@ -184,18 +205,9 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
     }
 
     public func removeInstalled(textModelDirectory: URL) async throws {
-        try await mutate(textModelDirectory, using: runRemove)
+        try await mutate(try validated(textModelDirectory), using: runRemove)
     }
 
-    /// Runs blocking work off the calling task, with cancellation forwarded.
-    ///
-    /// `Task.detached` inherits nothing, cancellation included, so a detached
-    /// body that cooperatively checks `Task.isCancelled` is checking a flag
-    /// nobody ever sets: cancelling the caller left the vision pack's
-    /// multi-minute verification hash running to completion and activating the
-    /// pack anyway, while the UI sat on "Cancelling" with every model action
-    /// disabled. Extracted so the forwarding itself can be tested; inline, the
-    /// only way to exercise it was a real 1.14 GB pack.
     func runCancellableDetached<T: Sendable>(
         priority: TaskPriority = .utility,
         _ body: @escaping @Sendable () throws -> T
@@ -206,6 +218,17 @@ public final class RepackVisionPackInstallerClient: AppVisionPackInstallerClient
         } onCancel: {
             work.cancel()
         }
+    }
+
+    private func validated(_ textModelDirectory: URL) throws -> URL {
+        let directory = textModelDirectory.standardizedFileURL
+        if let expectedTextModelDirectory,
+           directory.path != expectedTextModelDirectory.path {
+            throw AppModelInstallerRoutingError.destinationMismatch(
+                expected: expectedTextModelDirectory.path,
+                actual: directory.path)
+        }
+        return directory
     }
 
     private func mutate(_ directory: URL, using runner: @escaping MutationRunner) async throws {

@@ -6,15 +6,26 @@ import Metal
 ///   z'[i] = softcap * tanh(z[i] / softcap)
 ///   p[i]  = exp(z'[i] - max_j z'[j]) / sum_j exp(z'[j] - max_j z'[j])
 ///
-/// One threadgroup, single online-softmax pass (Milakov & Gimelshein). FP16
-/// storage in and out, FP32 accumulation. The softcap value lives in the
-/// kernel signature instead of being hardcoded so that downstream callers
-/// (and tests) can disable it by passing a very large number.
+/// Uses eight groups for large vocabularies and one group for small ones.
+/// Both paths keep the same sums, with FP16 storage and FP32 calculation.
 final class LogitSoftcapSoftmax {
     private let pso: MTLComputePipelineState
+    private let partialPSO, mergePSO, normalizePSO: MTLComputePipelineState
+    private let partials, total: MTLBuffer
+    private let useParallel: Bool
 
-    init(context: MetalContext) throws {
+    init(context: MetalContext, useParallel: Bool = true) throws {
         self.pso = try context.pipeline("logit_softcap_softmax")
+        partialPSO = try context.pipeline("logit_softcap_partials")
+        mergePSO = try context.pipeline("logit_softcap_merge")
+        normalizePSO = try context.pipeline("logit_softcap_normalize")
+        guard let partials = context.device.makeBuffer(length: 64, options: .storageModePrivate),
+              let total = context.device.makeBuffer(length: 8, options: .storageModePrivate) else {
+            throw MetalError.noDevice
+        }
+        self.partials = partials
+        self.total = total
+        self.useParallel = useParallel
     }
 
     /// Encodes the kernel onto `commandBuffer`. `logits` and `probs` are FP16
@@ -24,6 +35,11 @@ final class LogitSoftcapSoftmax {
                        probs: MTLBuffer,
                        v: UInt32,
                        softcap: Float = 30.0) {
+        if useParallel, v >= 16_384, pso.maxTotalThreadsPerThreadgroup >= 256 {
+            encodeParallel(commandBuffer: commandBuffer, logits: logits, probs: probs,
+                           v: v, softcap: softcap)
+            return
+        }
         guard let enc = commandBuffer.makeComputeCommandEncoder() else { return }
         enc.setComputePipelineState(pso)
         enc.setBuffer(logits, offset: 0, index: 0)
@@ -38,6 +54,39 @@ final class LogitSoftcapSoftmax {
         let tgSize   = MTLSize(width: threadsPerGroup, height: 1, depth: 1)
         enc.dispatchThreads(gridSize, threadsPerThreadgroup: tgSize)
         enc.endEncoding()
+    }
+
+    private func encodeParallel(commandBuffer: MTLCommandBuffer, logits: MTLBuffer,
+                                probs: MTLBuffer, v: UInt32, softcap: Float) {
+        var count = v
+        var cap = softcap
+        let laneGroup = MTLSize(width: 32, height: 1, depth: 1)
+        guard let partial = commandBuffer.makeComputeCommandEncoder() else { return }
+        partial.setComputePipelineState(partialPSO)
+        partial.setBuffer(logits, offset: 0, index: 0)
+        partial.setBuffer(partials, offset: 0, index: 1)
+        partial.setBytes(&count, length: 4, index: 2)
+        partial.setBytes(&cap, length: 4, index: 3)
+        partial.dispatchThreadgroups(MTLSize(width: 8, height: 1, depth: 1), threadsPerThreadgroup: laneGroup)
+        partial.endEncoding()
+
+        guard let merge = commandBuffer.makeComputeCommandEncoder() else { return }
+        merge.setComputePipelineState(mergePSO)
+        merge.setBuffer(partials, offset: 0, index: 0)
+        merge.setBuffer(total, offset: 0, index: 1)
+        merge.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: laneGroup)
+        merge.endEncoding()
+
+        guard let normalize = commandBuffer.makeComputeCommandEncoder() else { return }
+        normalize.setComputePipelineState(normalizePSO)
+        normalize.setBuffer(logits, offset: 0, index: 0)
+        normalize.setBuffer(probs, offset: 0, index: 1)
+        normalize.setBytes(&count, length: 4, index: 2)
+        normalize.setBytes(&cap, length: 4, index: 3)
+        normalize.setBuffer(total, offset: 0, index: 4)
+        normalize.dispatchThreadgroups(MTLSize(width: (Int(v) + 255) / 256, height: 1, depth: 1),
+                                       threadsPerThreadgroup: MTLSize(width: 256, height: 1, depth: 1))
+        normalize.endEncoding()
     }
 }
 

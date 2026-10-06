@@ -1,0 +1,6 @@
+/Downloads/
+/Artifacts/*
+!/Artifacts/LibJPEG.xcframework/
+!/Artifacts/LibJPEG.xcframework/**/*.a
+!/Artifacts/built-files-sha256.txt
+!/Artifacts/build-receipt.json

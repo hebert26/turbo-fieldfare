@@ -1,0 +1,298 @@
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,7 +8,7 @@
+         .iOS(.v26),
+     ],
+     products: [
+-        .executable(name: "TurboFieldfareRecurrentPrefixRecovery", targets: ["TurboFieldfareRecurrentPrefixRecovery"]),
++        .executable(name: "TurboFieldfareBaselineMemoryProbe", targets: ["TurboFieldfareBaselineMemoryProbe"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -27,7 +27,7 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
+-        .executableTarget(name: "TurboFieldfareRecurrentPrefixRecovery", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareRecurrentPrefixRecovery"),
++        .executableTarget(name: "TurboFieldfareBaselineMemoryProbe", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareBaselineMemoryProbe"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+--- a/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
++++ b/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift
+@@ -685,6 +685,7 @@
+ final class QwenBF16CacheResidency: @unchecked Sendable {
+     private let queue: MTLCommandQueue
+     private let set: MTLResidencySet
++    private let memoryPhaseProbe: QwenBaselineMemoryPhaseProbe?
+     private let layerCount: Int
+     private let allocationsPerLayer: Int
+     private let expectedAllocationCount: Int
+@@ -694,7 +695,8 @@
+     private var retainedAllocations: [MTLBuffer] = []
+     private var requested = false
+ 
+-    init(queue: MTLCommandQueue, layerCount: Int, slotCount: Int) throws {
++    init(queue: MTLCommandQueue, layerCount: Int, slotCount: Int,
++         memoryPhaseProbe: QwenBaselineMemoryPhaseProbe? = nil) throws {
+         let (perLayer, perLayerOverflow) = slotCount.multipliedReportingOverflow(by: 2)
+         let (count, countOverflow) = layerCount.multipliedReportingOverflow(by: perLayer)
+         guard layerCount > 0, slotCount > 0, !perLayerOverflow, !countOverflow,
+@@ -706,6 +708,7 @@
+         // produce an ordinary run labeled as a residency trial.
+         set = try queue.device.makeResidencySet(descriptor: descriptor)
+         self.queue = queue
++        self.memoryPhaseProbe = memoryPhaseProbe
+         self.layerCount = layerCount
+         allocationsPerLayer = perLayer
+         expectedAllocationCount = count
+@@ -732,19 +735,27 @@
+         allocationIDs.formUnion(ids)
+         layers.insert(layer)
+         if layers.count == layerCount {
++            memoryPhaseProbe?.record(.residencyRequestBefore, device: queue.device, layer: layer,
++                residency: phaseSnapshot())
+             set.commit()
+             set.requestResidency()
+             queue.addResidencySet(set)
+             requested = true
+-        }
+-    }
+-
+-    func snapshot() -> QwenBF16CacheResidencySnapshot {
+-        lock.lock(); defer { lock.unlock() }
+-        return QwenBF16CacheResidencySnapshot(
++            memoryPhaseProbe?.record(.residencyRequestAfter, device: queue.device, layer: layer,
++                residency: phaseSnapshot())
++        }
++    }
++
++    private func phaseSnapshot() -> QwenBF16CacheResidencySnapshot {
++        QwenBF16CacheResidencySnapshot(
+             registeredLayerCount: layers.count, expectedLayerCount: layerCount,
+             allocationCount: set.allocationCount, expectedAllocationCount: expectedAllocationCount,
+             allocatedSize: set.allocatedSize, requested: requested)
++    }
++
++    func snapshot() -> QwenBF16CacheResidencySnapshot {
++        lock.lock(); defer { lock.unlock() }
++        return phaseSnapshot()
+     }
+ 
+     deinit {
+--- /dev/null
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenBaselineMemoryPhaseProbe.swift
+@@ -0,0 +1,50 @@
++import Foundation
++import Darwin
++import Metal
++
++enum QwenBaselineMemoryPhase: String, Sendable {
++    case beforeModelLoad, afterModelLoad, runnerReady, prefillEmbeddingDone
++    case prefillLayerDone, residencyRequestBefore, residencyRequestAfter
++    case prefillDone, decodeDone, diagnosticsStart, diagnosticsEnd
++}
++
++// Immutable diagnostic owner. No callbacks, tensor reads, or shared recording lock.
++struct QwenBaselineMemoryPhaseProbe: Sendable {
++    let requestID: String
++
++    func record(_ phase: QwenBaselineMemoryPhase, device: MTLDevice,
++                layer: Int? = nil, cachedLayerCount: Int? = nil,
++                allocatedCacheBytes: UInt64? = nil,
++                residency: QwenBF16CacheResidencySnapshot? = nil) {
++        func value<T>(_ optional: T?) -> Any {
++            if let optional { return optional }
++            return NSNull()
++        }
++        let record: [String: Any] = [
++            "type": "memoryPhase", "schema": 1, "requestID": requestID,
++            "pid": getpid(), "uptimeNanoseconds": DispatchTime.now().uptimeNanoseconds,
++            "phase": phase.rawValue, "layer": value(layer),
++            "currentAllocatedSizeBytes": device.currentAllocatedSize,
++            "cachedLayerCount": value(cachedLayerCount),
++            "allocatedCacheBytes": value(allocatedCacheBytes),
++            "residencyRegisteredLayers": value(residency?.registeredLayerCount),
++            "residencyAllocationCount": value(residency?.allocationCount),
++            "residencyAllocatedSizeBytes": value(residency?.allocatedSize),
++            "residencyRequested": value(residency?.requested)
++        ]
++        // Each bounded line reaches stderr without stdio buffering. Missing lines stay unknown.
++        guard var data = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys]),
++              data.count < 4095 else { return }
++        data.append(10)
++        data.withUnsafeBytes { bytes in
++            guard let base = bytes.baseAddress else { return }
++            var offset = 0
++            while offset < bytes.count {
++                let count = Darwin.write(STDERR_FILENO, base.advanced(by: offset), bytes.count - offset)
++                if count < 0 && errno == EINTR { continue }
++                guard count > 0 else { return }
++                offset += count
++            }
++        }
++    }
++}
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+@@ -50,8 +50,8 @@
+ 
+ /// Isolated causal lookup comparison. Saved output IDs are checked only at the end.
+ public enum QwenExactBlockProbe {
+-    @MainActor public static func run(registrationURL: URL, requestURL: URL, mode: String) async throws -> Data {
+-        try probeRequire(["serial", "legacy", "new"].contains(mode), "invalid mode")
++    @MainActor public static func run(registrationURL: URL, requestURL: URL) async throws -> Data {
++        let mode = "serial"
+         let raw = try Data(contentsOf: requestURL)
+         try probeRequire(raw.count < 128 * 1024 && probeSHA(raw) == "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285", "capture identity")
+         guard let request = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+@@ -81,15 +81,20 @@
+         var minimumFree = try memoryGuard()
+         try probeRequire(minimumFree >= 50, "launch free memory below50%")
+         let context = try MetalContext()
++        let phaseProbe = QwenBaselineMemoryPhaseProbe(requestID: request["requestID"] as? String ?? "missing")
++        phaseProbe.record(.beforeModelLoad, device: context.device)
+         let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
+             integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
+             expertCachePolicy: .lfu, residencyBudgetBytes: 12 * 1024 * 1024 * 1024)
++        phaseProbe.record(.afterModelLoad, device: context.device)
+         guard let source = model.sourceIdentity else { throw ExactProbeError(detail: "missing source identity") }
+         try probeRequire(source.descriptorContentSHA256 == (request["sourceDescriptorSHA256"] as? String)
+             && source.markerSHA256 == (request["sourceMarkerSHA256"] as? String)
+             && source.checksumManifestSHA256 == (request["sourceManifestSHA256"] as? String)
+             && source.shardSetSHA256 == (request["sourceShardSetSHA256"] as? String), "source identity mismatch")
+-        let runner = try QwenOfficialSourceRunner(model: model, maxContext: maxContext, expertSlotCount: 16, hooks: .none)
++        let runner = try QwenOfficialSourceRunner(model: model, maxContext: maxContext,
++            expertSlotCount: 16, hooks: .none, memoryPhaseProbe: phaseProbe)
++        await runner.recordMemoryPhase(.runnerReady)
+         let scratch = try RawCompletionScratch(context: context, vocab: model.architecture.vocabularySize)
+         var activeTurn = false
+         func clock() -> UInt64 { DispatchTime.now().uptimeNanoseconds }
+@@ -128,6 +133,7 @@
+             let promptStart = clock()
+             let promptLogits = try await runner.prefill(tokenIDs: prefix, position: 0)
+             let promptWall = clock() - promptStart
++            await runner.recordMemoryPhase(.prefillDone)
+             minimumFree = min(minimumFree, try memoryGuard())
+             let cpuBefore = try cpu()
+             let decodeStart = clock()
+@@ -270,6 +276,7 @@
+             let decodeEnd = clock()
+             let decodeWall = decodeEnd - decodeStart
+             let requestWall = decodeEnd - promptStart
++            await runner.recordMemoryPhase(.decodeDone)
+             let cpuAfter = try cpu()
+             minimumFree = min(minimumFree, try memoryGuard())
+             // Golden output is unavailable to every proposal and sampling decision above.
+@@ -277,6 +284,7 @@
+             try probeRequire(outputs.map(Int.init) == expected && outputs.count == maximumOutputs
+                 && pending == eos, "generated outputs or terminal mismatch")
+             try probeRequire(acceptedRouteCount == 1120 && acceptedRawRowCount == 28, "accepted chain completeness")
++            await runner.recordMemoryPhase(.diagnosticsStart)
+             let liveSavedInputBytesAtEnd = await runner.diagnosticRecurrentInputBytes()
+             try probeRequire(liveSavedInputBytesAtEnd == 0, "recurrent input cleanup")
+             let state = try await runner.diagnosticSnapshot()
+@@ -313,8 +321,10 @@
+                 "processCPUSystemBeforeMicroseconds": cpuBefore.1, "processCPUUserAfterMicroseconds": cpuAfter.0,
+                 "processCPUSystemAfterMicroseconds": cpuAfter.1,
+                 "terminal": "sampled EOS remains pending and unconsumed",
+-                "timingLimits": "Isolated schedule; decode includes checkpoints, lookup, sampling, recovery and cycle diagnostics. Final state readback is excluded. Serial owns one turn; legacy/new own per-cycle turns. New replaces only exact4 rejection settlement; short proposals retain charged full replay. Outer conversation integration is not implemented. Not app or native MTP qualification."]
+-            return try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
++                "timingLimits": "Serial memory attribution only; sparse stderr phases added. Decode includes checkpoints, sampling and cycle diagnostics. Final state readback is excluded. Serial owns one turn; legacy/new own per-cycle turns. New replaces only exact4 rejection settlement; short proposals retain charged full replay. Outer conversation integration is not implemented. Not app or native MTP qualification."]
++            let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
++            await runner.recordMemoryPhase(.diagnosticsEnd)
++            return data
+         } catch let operation {
+             do { try await rollback() }
+             catch { throw ExactProbeError(detail: "operation \(operation); rollback \(error)") }
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -61,6 +61,7 @@
+     private let moeConfiguration: QwenMoEConfiguration
+     private let expertSlotCount: Int
+     private let hooks: QwenOfficialSourceTransactionHooks
++    private let memoryPhaseProbe: QwenBaselineMemoryPhaseProbe?
+     private let useGPULinearPreparation: Bool
+     private let useGroupedLinearPrefill: Bool
+     /// Only this actor mutates the dictionary. A GPU lease can independently
+@@ -112,7 +113,8 @@
+     init(model: QwenOfficialSourceModel, maxContext: Int,
+          expertSlotCount: Int,
+          hooks: QwenOfficialSourceTransactionHooks = .none,
+-         useExpertCacheResidency: Bool? = nil) throws {
++         useExpertCacheResidency: Bool? = nil,
++         memoryPhaseProbe: QwenBaselineMemoryPhaseProbe? = nil) throws {
+         let architecture = model.architecture
+         let context = model.context
+         let useGroupedLinearPrefill = ProcessInfo.processInfo.environment[
+@@ -142,7 +144,8 @@
+         let residencyEnabled = useExpertCacheResidency ?? (ProcessInfo.processInfo.environment[
+             "TURBO_QWEN_EXPERT_CACHE_RESIDENCY"] == "1")
+         let residency = residencyEnabled ? try QwenBF16CacheResidency(
+-            queue: context.queue, layerCount: architecture.layers, slotCount: expertSlotCount) : nil
++            queue: context.queue, layerCount: architecture.layers, slotCount: expertSlotCount,
++            memoryPhaseProbe: memoryPhaseProbe) : nil
+         let expertCacheStorage = ExpertCacheStorage(reservation: reservation, residency: residency)
+         let linearState = try QwenLinearAttentionState(
+             device: context.device,
+@@ -230,6 +233,7 @@
+             topK: architecture.expertsPerToken,
+             routedIntermediateSize: architecture.routedIntermediateSize,
+             sharedIntermediateSize: architecture.sharedIntermediateSize)
++        self.memoryPhaseProbe = memoryPhaseProbe
+         self.model = model
+         self.context = context
+         self.hooks = hooks
+@@ -255,6 +259,14 @@
+                 policy: model.expertCachePolicy.rawValue, allocatedBytes: 0,
+                 peakAllocatedBytes: 0, hits: 0, misses: 0)
+         }
++    }
++
++    func recordMemoryPhase(_ phase: QwenBaselineMemoryPhase, layer: Int? = nil) {
++        guard let memoryPhaseProbe else { return }
++        memoryPhaseProbe.record(phase, device: context.device, layer: layer,
++            cachedLayerCount: expertCacheStorage.coordinators.count,
++            allocatedCacheBytes: allocatedCacheBytes,
++            residency: expertCacheStorage.residency?.snapshot())
+     }
+ 
+     func cacheDiagnostics() -> QwenOfficialSourceCacheDiagnostics {
+@@ -568,6 +580,7 @@
+                 groupedCapture?.observeConsumedInput?(
+                     position + index, token, feature, mropePositions?[index])
+             }
++            recordMemoryPhase(.prefillEmbeddingDone)
+             for layer in model.layers.indices {
+                 try Task.checkCancellation()
+                 let row = model.layers[layer]
+@@ -837,6 +850,7 @@
+                     }
+                 }
+                 lastPrefillDiagnostics?.completedLayers += 1
++                recordMemoryPhase(.prefillLayerDone, layer: layer)
+             }
+             var logits: [Float] = []
+             let finalIndices = exactBlock == nil ? [tokenIDs.count - 1] : Array(tokenIDs.indices)
+--- a/Sources/TurboFieldfareBaselineMemoryProbe/Command.swift
++++ b/Sources/TurboFieldfareBaselineMemoryProbe/Command.swift
+@@ -4,8 +4,8 @@
+ 
+ @main struct ExactBlockCommand {
+     @MainActor static func main() async {
+-        guard CommandLine.arguments.count == 5 else {
+-            FileHandle.standardError.write(Data("usage: TurboFieldfareRecurrentPrefixRecovery registration.json request.json report.json serial|legacy|new\n".utf8))
++        guard CommandLine.arguments.count == 4 else {
++            FileHandle.standardError.write(Data("usage: TurboFieldfareBaselineMemoryProbe registration.json request.json report.json\n".utf8))
+             exit(2)
+         }
+         let output = URL(fileURLWithPath: CommandLine.arguments[3])
+@@ -15,7 +15,7 @@
+             }
+             let data = try await QwenExactBlockProbe.run(
+                 registrationURL: URL(fileURLWithPath: CommandLine.arguments[1]),
+-                requestURL: URL(fileURLWithPath: CommandLine.arguments[2]), mode: CommandLine.arguments[4])
++                requestURL: URL(fileURLWithPath: CommandLine.arguments[2]))
+             try data.write(to: output, options: .atomic)
+             print(String(decoding: data, as: UTF8.self))
+         } catch {

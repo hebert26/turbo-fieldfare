@@ -1,0 +1,187 @@
+{
+  "schema": 1,
+  "runPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run-20261002T195800.631823Z-da4cd4d8aa864a78b4377fdd86cfd6b5",
+  "validEvidence": true,
+  "completeCorrectnessResult": false,
+  "baselineMatched": false,
+  "speedClaim": false,
+  "exit": 2,
+  "errors": [
+    "Candidate stopped. No complete comparison result."
+  ],
+  "limitations": [
+    "One candidate uses an earlier saved baseline.",
+    "Timing and sampled memory differences are observations only.",
+    "Request timing excludes load. No app speed claim.",
+    "Allocated Metal bytes and process footprint are different measures.",
+    "The last saved phase does not prove the active phase at stop."
+  ],
+  "runReceiptSHA256": "24bf19fc923646bd04b63f7650a5e74d3aa8c9c70bb477822a0498008e35d2ee",
+  "candidateMemory": {
+    "phaseRecordCount": 45,
+    "lastDurablePhase": {
+      "allocatedCacheBytes": 4026531840,
+      "cachedLayerCount": 40,
+      "currentAllocatedSizeBytes": 8312946688,
+      "layer": null,
+      "phase": "prefillDone",
+      "pid": 86009,
+      "requestID": "8C783D56-FE53-4687-AAD2-EC2CBA167C0D",
+      "residencyAllocatedSizeBytes": null,
+      "residencyAllocationCount": null,
+      "residencyRegisteredLayers": null,
+      "residencyRequested": null,
+      "schema": 1,
+      "type": "memoryPhase",
+      "uptimeNanoseconds": 2122584635458458
+    },
+    "stopUptimeNanoseconds": 2122602439962083,
+    "peakMetalAllocatedSizeAtMarkersBytes": 8342044672,
+    "processSampleCount": 91,
+    "processCounters": {
+      "ri_phys_footprint": {
+        "first": 81992,
+        "last": 8163908232,
+        "peakSampled": 8183536288,
+        "change": 8163826240,
+        "firstUptimeNanoseconds": 2122420473542125,
+        "lastUptimeNanoseconds": 2122600479270916
+      },
+      "ri_lifetime_max_phys_footprint": {
+        "first": 98376,
+        "last": 8195742368,
+        "peakSampled": 8195742368,
+        "change": 8195643992,
+        "firstUptimeNanoseconds": 2122420473542125,
+        "lastUptimeNanoseconds": 2122600479270916
+      },
+      "ri_wired_size": {
+        "first": 0,
+        "last": 0,
+        "peakSampled": 0,
+        "change": 0,
+        "firstUptimeNanoseconds": 2122420473542125,
+        "lastUptimeNanoseconds": 2122600479270916
+      },
+      "ri_resident_size": {
+        "first": 32768,
+        "last": 1722990592,
+        "peakSampled": 2287845376,
+        "change": 1722957824,
+        "firstUptimeNanoseconds": 2122420473542125,
+        "lastUptimeNanoseconds": 2122600479270916
+      },
+      "ri_diskio_bytesread": {
+        "first": 0,
+        "last": 78210523136,
+        "peakSampled": 78210523136,
+        "change": 78210523136,
+        "firstUptimeNanoseconds": 2122420473542125,
+        "lastUptimeNanoseconds": 2122600479270916
+      }
+    },
+    "systemSampleCount": 91,
+    "systemVMChanges": {
+      "Pages wired down": {
+        "first": 447423,
+        "last": 856139,
+        "change": 408716,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      },
+      "Pages occupied by compressor": {
+        "first": 108336,
+        "last": 565469,
+        "change": 457133,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      },
+      "Pages stored in compressor": {
+        "first": 2676281,
+        "last": 3400966,
+        "change": 724685,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      },
+      "Compressions": {
+        "first": 5644391768,
+        "last": 5649870809,
+        "change": 5479041,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      },
+      "Decompressions": {
+        "first": 5087412621,
+        "last": 5091901743,
+        "change": 4489122,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      },
+      "Swapins": {
+        "first": 29995445,
+        "last": 30036462,
+        "change": 41017,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      },
+      "Swapouts": {
+        "first": 49875532,
+        "last": 49931924,
+        "change": 56392,
+        "firstUptimeNanoseconds": 2122420473732791,
+        "lastUptimeNanoseconds": 2122600479500125
+      }
+    },
+    "systemPageSizeBytes": 16384,
+    "missingCounters": [],
+    "errors": [
+      "Process sample unavailable: -1"
+    ],
+    "phaseRecordErrors": [],
+    "notes": [],
+    "stopReason": "memory below 30% or unavailable",
+    "launchFreePercent": 73,
+    "minimumFreePercent": 29,
+    "childExit": -15,
+    "wallSeconds": 182.04904562514275
+  },
+  "afterModelLoadMetal": {
+    "baselineMarker": {
+      "allocatedCacheBytes": null,
+      "cachedLayerCount": null,
+      "currentAllocatedSizeBytes": 4894752768,
+      "layer": null,
+      "phase": "afterModelLoad",
+      "pid": 92779,
+      "requestID": "8C783D56-FE53-4687-AAD2-EC2CBA167C0D",
+      "residencyAllocatedSizeBytes": null,
+      "residencyAllocationCount": null,
+      "residencyRegisteredLayers": null,
+      "residencyRequested": null,
+      "schema": 1,
+      "type": "memoryPhase",
+      "uptimeNanoseconds": 2121391169892958
+    },
+    "candidateMarker": {
+      "allocatedCacheBytes": null,
+      "cachedLayerCount": null,
+      "currentAllocatedSizeBytes": 3877634048,
+      "layer": null,
+      "phase": "afterModelLoad",
+      "pid": 86009,
+      "requestID": "8C783D56-FE53-4687-AAD2-EC2CBA167C0D",
+      "residencyAllocatedSizeBytes": null,
+      "residencyAllocationCount": null,
+      "residencyRegisteredLayers": null,
+      "residencyRequested": null,
+      "schema": 1,
+      "type": "memoryPhase",
+      "uptimeNanoseconds": 2122423799090083
+    },
+    "measuredReductionBytes": 1017118720,
+    "staticEmbeddingTableBytes": 1017118720,
+    "matchesStaticExpectedReduction": true,
+    "missingMarkerOrCounter": false,
+    "limit": "This uses actual Metal markers. The removed table report field is a geometry assertion."
+  }
+}

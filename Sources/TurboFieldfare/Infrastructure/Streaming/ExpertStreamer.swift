@@ -8,6 +8,7 @@ enum StreamerError: Error, CustomStringConvertible {
     case preadFailed(errno: Int32)
     case allocFailed(errno: Int32)
     case slotOutOfRange(Int)
+    case cacheInUse
     case invalidIOSplitConfiguration(String)
 
     public var description: String {
@@ -26,6 +27,8 @@ enum StreamerError: Error, CustomStringConvertible {
             return "posix_memalign failed: errno \(error)"
         case .slotOutOfRange(let slot):
             return "expert cache slot \(slot) is out of range"
+        case .cacheInUse:
+            return "expert cache is in use by the GPU"
         case .invalidIOSplitConfiguration(let detail):
             return "invalid expert I/O split configuration: \(detail)"
         }

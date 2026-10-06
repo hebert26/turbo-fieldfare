@@ -5,6 +5,25 @@ import Testing
 @testable import TurboFieldfareRepackCore
 
 extension RemotePayloadCopyTests {
+  /// Task 5.5: the remote Gemma path still resolves through the closed catalog's
+  /// Gemma entry, with no local/Qwen choice involved. The install behaviour
+  /// itself stays covered by `remotePayloadCopyCompletes` below, unchanged.
+  @Test func gemmaRemoteSourceIsStillTheCatalogGemmaEntry() {
+    #expect(SupportedModelSource.displayName == ModelSourceCatalog.gemma.displayName)
+    #expect(SupportedModelSource.repoID == ModelSourceCatalog.gemma.repository)
+    #expect(SupportedModelSource.revision == ModelSourceCatalog.gemma.revision)
+    #expect(SupportedModelSource.sourceIndexSHA256
+      == ModelSourceCatalog.gemma.sourceIndexSHA256)
+    #expect(SupportedModelSource.approximateDownloadBytes
+      == ModelSourceCatalog.gemma.approximateDownloadBytes)
+    #expect(SupportedModelSource.installedBytes == ModelSourceCatalog.gemma.installedBytes)
+    #expect(SupportedModelSource.reserveBytes == ModelSourceCatalog.gemma.reserveBytes)
+    // The local snapshot entry is Qwen-only and must never resolve for Gemma.
+    #expect(ModelSourceCatalog.localSnapshotSource(
+      repository: SupportedModelSource.repoID,
+      revision: SupportedModelSource.revision) == nil)
+  }
+
   @Test func remotePayloadCopyCompletes() async throws {
     let snapshotDir = tmpDirForRemote("snap")
     let remoteOutput = tmpPathForRemote("remote")

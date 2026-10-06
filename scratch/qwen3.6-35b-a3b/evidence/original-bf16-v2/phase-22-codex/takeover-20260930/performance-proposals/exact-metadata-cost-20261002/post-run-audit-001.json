@@ -1,0 +1,10 @@
+{
+  "overlayFilesMatched": 5294,
+  "frozenFilesMatched": 15,
+  "binaryMatched": true,
+  "resultSHA256": "140b898a14d3c220932dd75cb2320f296c38cc8d70cf061b9509a9d0d498629a",
+  "receiptSHA256": "113029884f03eb637269418670ef5e4e703c5290d901f489f66850f476593a5f",
+  "buildReceiptSHA256": "88f092e71cfcc077c0ef1060da89425875030ec9c6ad20a9356bb0dd110e4113",
+  "rootStatus": "",
+  "probeExited": true
+}

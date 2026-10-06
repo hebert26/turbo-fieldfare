@@ -1,0 +1,25 @@
+{
+  "head": "82a1266a005b0602ec368201c9f3d27a970d6c92",
+  "productionEqual3fe": true,
+  "liveStatus": "",
+  "forwardCheckExit": 0,
+  "requestSHA256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285",
+  "unchangedSourceDependencies": {
+    "Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift": true,
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift": true,
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift": true,
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": true,
+    "Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift": true
+  },
+  "SDK": {
+    "path": "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLDevice.h",
+    "lines": [
+      625,
+      626,
+      628
+    ],
+    "API": "currentAllocatedSize: readonlyNSUInteger, sizebytesofresourcesallocatedbydevice;availablemacOS10.13",
+    "readOnlyQuery": true
+  },
+  "noBuildsOrRuns": true
+}

@@ -1,0 +1,16 @@
+# Pair schedule
+
+Scoped PASS for the frozen pair schedule, its counters, and the unchanged probe gate. The receipt is staged, unbuilt, and unrun. Root and the installed app stay at `3fe330585beb148cb1954419a0c41cb70ebbd672`.
+
+`frozen-hashes.json` matches all 19 files. `baseline-hashes.json` matches its six baseline files at that commit. Against rejected `exact-block-probe-20261002`, the candidate delta is four sources. `run.py` `74d8eed389f35c1f22c2afee13a36a78ab72f069004f026406acc7aa2f0aa7cb` and `request.json` `a9d120c3e25bfedfa7634162c2f28dd94202bdbfe015cd242933d946b678dd16` are byte-identical. `patch/vs-rejected.diff` is `a5ce52c18e5ba95e3fd3c494910ee0ca3f7de3341325d74201ffcd205995a337`.
+
+- `QwenOfficialSourceRunner.swift` `82006005a9c1bcd550fefeac70fcc57c16735851f3117d3bb5746c5fc6997d51` (rejected `1e37e41c31bb6ec41152b492b928a1837464ab456316f9c3f01d047ac1a946b6`)
+- `QwenMoE.swift` `bc01449b0db5af3044a401251e38da7cc30bfa7f704b0ad5516503c41db5c10b` (rejected `7d4c312f5ceaab556f856728453f2b827e466a8a78ccbdc1ef05f1b30374817a`)
+- `QwenExactBlockProbe.swift` `3d3cd53edda790496e7419601ca6b507553a96004a4a66ac528c9b366e912d98` (rejected executed probe `7dddc4e5ed74c2559d691ffb54f986ae38ba46ee6ccf1e6824a724d53e70da8b`)
+- `QwenExactBlockTypes.swift` `883250021f4dbfe893922f5875d5374f6799f6fe066e3319944a0beff28633d0` (rejected `0fe3b08932961cff1b775cb348ff205baff2b5a5e66a596421c501dce6359401`)
+
+Known-none, four tokens, top-8, and 16 slots are required. Pairs are token indices `(0,1)` then `(2,3)`. The sorted union must be at most 16; a larger union throws before `map`. Work expands that union in token order, which is the kernel's expert-ID then token-index order, so each token keeps its eight original ranks and weights and accumulates in ascending expert ID. Pair A clears all four output rows (`tokenCount * hiddenSize`). Pair B passes `initializeOutput` false, and the kernel rejects the swapped clear flag. `complete` drops pair A's pins before the function returns, so pair B maps after that settlement. Each pair then blits its two rows through the existing single-row `encodeSharedBF16` before commit. The CPU residual read runs after both pair commands return.
+
+Grouped numerical counts, for the identity's 40 layers: `pairMaps` and `pairMoECommands` are 80; `layerAdmissions` and `preGPUChecks` are 160; `tokenAdmissions` and `finalChecks` are 4. `sharedChecks` and `separateSharedCommands` stay 0 because this path does not submit a later shared command. `pairMappedExperts + reusedPairChecks` is 16 contributions per pair, 32 per layer, 1280. `reusedPairChecks` counts a second logical use of one expert inside that command. Serial `produce` leaves these fields at zero; its checks remain in `moeStep`. Every arm records the fields. The hard require is the grouped numerical arm.
+
+`run.py` still strips ambient `TURBO_QWEN_` and `TURBOFIELDFARE_` variables and sets the same four flags to `1`. Projection batch, membership scan, known-none 4, and exact token capture stay `0`. Sampler, forced keeps 0/1/3/4, the ABBA/BAAB median, and the `ratio >= 1` stop are the rejected probe's gate. Offset 5 runs only when the grouped full-accept median is strictly below the serial median. Buffer order is Opus's review. Source admission is Astra's review. Main builds after this note.

@@ -24,6 +24,11 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
     public var rdadviseMegabytesPerToken: Double
     public var rdadviseSkippedPerToken: Double
     public var rdadviseFailures: UInt64
+    public var gpuExpertCacheEligibleForwards: UInt64
+    public var gpuExpertCacheBatches: UInt64
+    public var gpuExpertCacheHitExperts: UInt64
+    public var gpuExpertCacheFirstMisses: UInt64
+    public var gpuExpertCacheCPUFallbackLayers: UInt64
 
     public init(cb1MillisecondsPerToken: Double = 0,
                 routerWaitMillisecondsPerToken: Double? = nil,
@@ -35,7 +40,12 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
                 rdadviseCallsPerToken: Double = 0,
                 rdadviseMegabytesPerToken: Double = 0,
                 rdadviseSkippedPerToken: Double = 0,
-                rdadviseFailures: UInt64 = 0) {
+                rdadviseFailures: UInt64 = 0,
+                gpuExpertCacheEligibleForwards: UInt64 = 0,
+                gpuExpertCacheBatches: UInt64 = 0,
+                gpuExpertCacheHitExperts: UInt64 = 0,
+                gpuExpertCacheFirstMisses: UInt64 = 0,
+                gpuExpertCacheCPUFallbackLayers: UInt64 = 0) {
         self.cb1MillisecondsPerToken = cb1MillisecondsPerToken
         self.routerWaitMillisecondsPerToken = routerWaitMillisecondsPerToken
         self.gpuCompletionTiming = gpuCompletionTiming
@@ -47,6 +57,11 @@ public struct AppRunnerDiagnostics: Equatable, Sendable {
         self.rdadviseMegabytesPerToken = rdadviseMegabytesPerToken
         self.rdadviseSkippedPerToken = rdadviseSkippedPerToken
         self.rdadviseFailures = rdadviseFailures
+        self.gpuExpertCacheEligibleForwards = gpuExpertCacheEligibleForwards
+        self.gpuExpertCacheBatches = gpuExpertCacheBatches
+        self.gpuExpertCacheHitExperts = gpuExpertCacheHitExperts
+        self.gpuExpertCacheFirstMisses = gpuExpertCacheFirstMisses
+        self.gpuExpertCacheCPUFallbackLayers = gpuExpertCacheCPUFallbackLayers
     }
 }
 
@@ -70,6 +85,8 @@ public struct AppDiagnostics: Equatable, Sendable {
     public var tokensPerSecond: Double
     public var peakMemoryBytes: UInt64?
     public var visionTowerMappedBytes: UInt64?
+    public var conversationLogicalStateBytes: UInt64?
+    public var expertCacheBytes: UInt64?
     public var runtimeOptions: AppRuntimeOptions
     public var prefill: PrefillExecutionDiagnostics?
     public var runner: AppRunnerDiagnostics?
@@ -104,6 +121,8 @@ public struct AppDiagnostics: Equatable, Sendable {
                 tokensPerSecond: Double,
                 peakMemoryBytes: UInt64?,
                 visionTowerMappedBytes: UInt64? = nil,
+                conversationLogicalStateBytes: UInt64? = nil,
+                expertCacheBytes: UInt64? = nil,
                 runtimeOptions: AppRuntimeOptions,
                 prefill: PrefillExecutionDiagnostics? = nil,
                 runner: AppRunnerDiagnostics? = nil,
@@ -120,6 +139,8 @@ public struct AppDiagnostics: Equatable, Sendable {
         self.tokensPerSecond = tokensPerSecond
         self.peakMemoryBytes = peakMemoryBytes
         self.visionTowerMappedBytes = visionTowerMappedBytes
+        self.conversationLogicalStateBytes = conversationLogicalStateBytes
+        self.expertCacheBytes = expertCacheBytes
         self.runtimeOptions = runtimeOptions
         self.prefill = prefill
         self.runner = runner

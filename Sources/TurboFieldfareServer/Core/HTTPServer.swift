@@ -17,6 +17,8 @@ public actor TurboFieldfareHTTPServer {
 
     private let group: MultiThreadedEventLoopGroup
     private let modelID: String
+    private let modelFamily: LoadedRuntimeFamily
+    private let modelRevision: String?
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
@@ -32,11 +34,15 @@ public actor TurboFieldfareHTTPServer {
                 backend: any ServerInferenceBackend,
                 heartbeatInterval: TimeAmount = .seconds(5),
                 visionCapability: String = "missing",
+                modelFamily: LoadedRuntimeFamily = .gemma4,
+                modelRevision: String? = nil,
                 attachmentRoot: URL = ServerAttachmentDirectory.root,
                 idleTimeout: TimeAmount = TurboFieldfareHTTPServer.idleTimeout,
                 group: MultiThreadedEventLoopGroup = .init(numberOfThreads: 1)) {
         self.group = group
         self.modelID = modelID
+        self.modelFamily = modelFamily
+        self.modelRevision = modelRevision
         self.backend = backend
         self.coordinator = ServerCoordinator(queueLimit: queueLimit)
         self.heartbeatInterval = heartbeatInterval
@@ -48,6 +54,8 @@ public actor TurboFieldfareHTTPServer {
 
     public func start(port: Int) async throws -> Channel {
         let modelID = self.modelID
+        let modelFamily = self.modelFamily
+        let modelRevision = self.modelRevision
         let backend = self.backend
         let coordinator = self.coordinator
         let heartbeatInterval = self.heartbeatInterval
@@ -74,6 +82,8 @@ public actor TurboFieldfareHTTPServer {
                 }.flatMap {
                     channel.pipeline.addHandler(ServerHTTPHandler(
                         modelID: modelID,
+                        modelFamily: modelFamily,
+                        modelRevision: modelRevision,
                         backend: backend,
                         coordinator: coordinator,
                         heartbeatInterval: heartbeatInterval,
@@ -144,6 +154,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     typealias OutboundOut = HTTPServerResponsePart
 
     private let modelID: String
+    private let modelFamily: LoadedRuntimeFamily
+    private let modelRevision: String?
     private let backend: any ServerInferenceBackend
     private let coordinator: ServerCoordinator
     private let heartbeatInterval: TimeAmount
@@ -164,6 +176,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
     private var activeTask: Task<Void, Never>?
 
     init(modelID: String,
+         modelFamily: LoadedRuntimeFamily,
+         modelRevision: String?,
          backend: any ServerInferenceBackend,
          coordinator: ServerCoordinator,
          heartbeatInterval: TimeAmount,
@@ -171,6 +185,8 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
          attachmentRoot: URL,
          childChannels: ChildChannelRegistry) {
         self.modelID = modelID
+        self.modelFamily = modelFamily
+        self.modelRevision = modelRevision
         self.backend = backend
         self.coordinator = coordinator
         self.heartbeatInterval = heartbeatInterval
@@ -309,7 +325,11 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                              created: 0,
                              ownedBy: "turbofieldfare",
                              capabilities: visionCapability == "ready"
-                                ? ["text", "image"] : ["text"])])
+                                ? ["text", "image"] : ["text"],
+                             family: modelFamily == .qwen3_6
+                                ? modelFamily.rawValue : nil,
+                             revision: modelFamily == .qwen3_6
+                                ? modelRevision : nil)])
             writeCodable(context, status: .ok, response)
         case (.POST, "/v1/chat/completions"):
             guard head.headers.first(name: "content-type")?
@@ -339,7 +359,9 @@ private final class ServerHTTPHandler: ChannelInboundHandler, @unchecked Sendabl
                 decoded,
                 modelID: modelID,
                 preStagedImages: body.stagedImages,
-                attachmentLease: body.lease)
+                attachmentLease: body.lease,
+                family: modelFamily == .qwen3_6 ? .qwen : .gemma,
+                sanitizedJSON: body.json)
             let responseID = "chatcmpl-" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
             let created = Int(Date().timeIntervalSince1970)
             let contextBox = SendableContext(context)

@@ -1,0 +1,484 @@
+--- a/Package.swift
++++ b/Package.swift
+@@ -8,7 +8,7 @@
+         .iOS(.v26),
+     ],
+     products: [
+-        .executable(name: "TurboFieldfareCausalLookupDecode", targets: ["TurboFieldfareCausalLookupDecode"]),
++        .executable(name: "TurboFieldfareRecurrentPrefixRecovery", targets: ["TurboFieldfareRecurrentPrefixRecovery"]),
+         .library(name: "TurboFieldfare", targets: ["TurboFieldfare"]),
+         .executable(name: "TurboFieldfareRepack", targets: ["TurboFieldfareRepack"]),
+         .executable(name: "TurboFieldfareCLI", targets: ["TurboFieldfareCLI"]),
+@@ -27,7 +27,7 @@
+             revision: "1d2c90827e9c3908269d810d055fb03b7da5fd53"),
+     ],
+     targets: [
+-        .executableTarget(name: "TurboFieldfareCausalLookupDecode", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareCausalLookupDecode"),
++        .executableTarget(name: "TurboFieldfareRecurrentPrefixRecovery", dependencies: ["TurboFieldfare"], path: "Sources/TurboFieldfareRecurrentPrefixRecovery"),
+         .binaryTarget(
+             name: "TurboFieldfareLibJPEG",
+             path: "ThirdParty/libjpeg-turbo/Artifacts/LibJPEG.xcframework"
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift
+@@ -51,7 +51,7 @@
+ /// Isolated causal lookup comparison. Saved output IDs are checked only at the end.
+ public enum QwenExactBlockProbe {
+     @MainActor public static func run(registrationURL: URL, requestURL: URL, mode: String) async throws -> Data {
+-        try probeRequire(mode == "off" || mode == "on", "invalid mode")
++        try probeRequire(["serial", "legacy", "new"].contains(mode), "invalid mode")
+         let raw = try Data(contentsOf: requestURL)
+         try probeRequire(raw.count < 128 * 1024 && probeSHA(raw) == "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285", "capture identity")
+         guard let request = try JSONSerialization.jsonObject(with: raw) as? [String: Any],
+@@ -79,6 +79,7 @@
+         try config.validate()
+         try probeRequire(config.temperature == 0 && config.extraStopTokens == [eos], "greedy terminal configuration")
+         var minimumFree = try memoryGuard()
++        try probeRequire(minimumFree >= 50, "launch free memory below50%")
+         let context = try MetalContext()
+         let model = try QwenOfficialSourceModel.load(registrationURL: registrationURL, context: context,
+             integrityPolicy: .sizeCheckTrustedReceipt, expertCacheSlots: 16,
+@@ -133,7 +134,13 @@
+             var turnBegins = 0
+             var turnFinishes = 0
+             var turnRestores = 0
+-            if mode == "off" {
++            var settlementWall: UInt64 = 0
++            var rejectedCycles = 0
++            var replayedInputs = 0
++            var totalRecurrentAppendCalls = 0
++            var totalRecurrentKeptInputs = 0
++            var maximumSavedInputBytes = 0
++            if mode == "serial" {
+                 try await runner.beginTurn(); activeTurn = true; turnBegins += 1
+             }
+             var pending = try await sample(promptLogits, history: prefix, position: 0)
+@@ -150,23 +157,27 @@
+                 try Task.checkCancellation()
+                 // The budget depends on emitted outputs. It does not inspect saved termination length.
+                 let remaining = maximumOutputs - outputs.count
+-                let drafts = mode == "on" ? probeProposal(history + [pending],
++                let drafts = mode != "serial" ? probeProposal(history + [pending],
+                     maximum: min(3, remaining - 1), stops: config.extraStopTokens) : []
+                 let inputs = [pending] + drafts
+-                let capture = QwenExactBlockCapture()
++                let capture = QwenExactBlockCapture(enableRecurrentRecovery: mode == "new" && inputs.count == 4)
+                 let io = OfficialSourceIOMeasurement(); io.setPhase(.decode)
+                 try probeRequire(model.source.installIOMeasurement(io), "IO measurement already installed")
+                 let before = await runner.routedExpertCacheSummary()
+                 let cycleStart = clock()
+                 var replayWall: UInt64 = 0
++                var recoveryKind = "none"
++                var recurrentAppendCalls = 0
++                var recurrentKeptInputs = 0
++                var normalizedInputBytes = 0
+                 var samples: [Int32] = []
+                 var matched = 0
+                 var keep = 0
+                 do {
+-                    if mode == "on" {
++                    if mode != "serial" {
+                         try await runner.beginTurn(); activeTurn = true; turnBegins += 1
+                     }
+-                    if mode == "on" && inputs.count == 4 {
++                    if mode != "serial" && inputs.count == 4 {
+                         _ = try await runner.prefill(tokenIDs: inputs, position: history.count, exactBlock: capture)
+                     } else {
+                         // Short proposals retain the same policy. Verify their real inputs serially.
+@@ -187,15 +198,33 @@
+                         }
+                     }
+                     try probeRequire(keep == 1 + matched && !samples.isEmpty, "accepted prefix alignment")
++                    normalizedInputBytes = capture.savedInputBytes
++                    maximumSavedInputBytes = max(maximumSavedInputBytes, normalizedInputBytes)
+                     if keep < inputs.count {
+                         let replayStart = clock()
+-                        try await runner.restoreTurnBaseline(); turnRestores += 1
+-                        for index in 0..<keep {
+-                            _ = try await runner.produce(token: inputs[index], position: history.count + index)
++                        if mode == "new" && inputs.count == 4 {
++                            let settlement = try await runner.settleRecurrentPrefix(capture, keep: keep)
++                            recoveryKind = "recurrentOnly"
++                            recurrentAppendCalls = settlement.appendCalls
++                            recurrentKeptInputs = settlement.keptInputs
++                            try probeRequire(settlement.savedInputBytes == normalizedInputBytes,
++                                "saved recurrent input accounting")
++                        } else {
++                            recoveryKind = "fullReplay"
++                            try await runner.restoreTurnBaseline(); turnRestores += 1
++                            for index in 0..<keep {
++                                _ = try await runner.produce(token: inputs[index], position: history.count + index)
++                            }
++                            replayedInputs += keep
+                         }
+                         replayWall = clock() - replayStart
+-                    }
+-                    if mode == "on" {
++                        settlementWall += replayWall
++                        rejectedCycles += 1
++                        totalRecurrentAppendCalls += recurrentAppendCalls
++                        totalRecurrentKeptInputs += recurrentKeptInputs
++                    }
++                    try Task.checkCancellation()
++                    if mode != "serial" {
+                         try await runner.finishTurn(); activeTurn = false; turnFinishes += 1
+                     }
+                 } catch {
+@@ -225,6 +254,8 @@
+                     "pendingInput": inputs[0], "proposalIDs": drafts, "provisionalIDs": samples,
+                     "matchedDrafts": matched, "consumedInputs": keep, "verifiedInputs": inputs.count,
+                     "wallNanoseconds": cycleWall, "restoreReplayNanoseconds": replayWall,
++                    "recoveryKind": recoveryKind, "recurrentAppendCalls": recurrentAppendCalls,
++                    "recurrentKeptInputs": recurrentKeptInputs, "normalizedInputBytes": normalizedInputBytes,
+                     "hits": after.hits - before.hits, "misses": after.misses - before.misses,
+                     "routeSHA256": probeSHA(try routeEncoder.encode(probeRoutes(capture.routes))),
+                     "rawRowSHA256": probeRowSHA(capture.logits),
+@@ -233,10 +264,12 @@
+                         "preGPUChecks": capture.preGPUChecks, "sharedChecks": capture.sharedChecks,
+                         "finalChecks": capture.finalChecks], "io": ioJSON(snapshot)])
+             }
+-            if mode == "off" {
++            if mode == "serial" {
+                 try await runner.finishTurn(); activeTurn = false; turnFinishes += 1
+             }
+-            let decodeWall = clock() - decodeStart
++            let decodeEnd = clock()
++            let decodeWall = decodeEnd - decodeStart
++            let requestWall = decodeEnd - promptStart
+             let cpuAfter = try cpu()
+             minimumFree = min(minimumFree, try memoryGuard())
+             // Golden output is unavailable to every proposal and sampling decision above.
+@@ -244,6 +277,8 @@
+             try probeRequire(outputs.map(Int.init) == expected && outputs.count == maximumOutputs
+                 && pending == eos, "generated outputs or terminal mismatch")
+             try probeRequire(acceptedRouteCount == 1120 && acceptedRawRowCount == 28, "accepted chain completeness")
++            let liveSavedInputBytesAtEnd = await runner.diagnosticRecurrentInputBytes()
++            try probeRequire(liveSavedInputBytesAtEnd == 0, "recurrent input cleanup")
+             let state = try await runner.diagnosticSnapshot()
+             try probeRequire(state.position == 1203 && state.position == history.count
+                 && state.linear.positions.values.allSatisfy({ $0 == state.position })
+@@ -266,13 +301,19 @@
+                 "acceptedRouteSHA256": acceptedRouteHash.finalize().map { String(format: "%02x", $0) }.joined(),
+                 "acceptedRawRowSHA256": acceptedRawRowHash.finalize().map { String(format: "%02x", $0) }.joined(),
+                 "promptWallNanoseconds": promptWall,
+-                "decodeWallNanoseconds": decodeWall, "cycles": cycles, "finalState": final,
++                "decodeWallNanoseconds": decodeWall, "requestWallNanoseconds": requestWall,
++                "cycles": cycles, "finalState": final,
++                "settlement": ["wallNanoseconds": settlementWall, "rejectedCycles": rejectedCycles,
++                    "replayedInputs": replayedInputs, "recurrentAppendCalls": totalRecurrentAppendCalls,
++                    "recurrentKeptInputs": totalRecurrentKeptInputs,
++                    "maximumSavedInputBytes": maximumSavedInputBytes,
++                    "liveSavedInputBytesAtEnd": liveSavedInputBytesAtEnd],
+                 "transactions": ["begins": turnBegins, "finishes": turnFinishes, "restores": turnRestores],
+                 "minimumFreePercent": minimumFree, "processCPUUserBeforeMicroseconds": cpuBefore.0,
+                 "processCPUSystemBeforeMicroseconds": cpuBefore.1, "processCPUUserAfterMicroseconds": cpuAfter.0,
+                 "processCPUSystemAfterMicroseconds": cpuAfter.1,
+                 "terminal": "sampled EOS remains pending and unconsumed",
+-                "timingLimits": "Isolated schedule; decode includes checkpoints, lookup, sampling, recovery and cycle diagnostics. Final state readback is excluded. OFF owns one turn; ON owns per-cycle turns. Outer conversation integration is not implemented. Not app or native MTP qualification."]
++                "timingLimits": "Isolated schedule; decode includes checkpoints, lookup, sampling, recovery and cycle diagnostics. Final state readback is excluded. Serial owns one turn; legacy/new own per-cycle turns. New replaces only exact4 rejection settlement; short proposals retain charged full replay. Outer conversation integration is not implemented. Not app or native MTP qualification."]
+             return try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+         } catch let operation {
+             do { try await rollback() }
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift
+@@ -9,6 +9,59 @@
+ 
+ // Owned by one isolated, sequential diagnostic runner invocation. No callbacks.
+ final class QwenExactBlockCapture: @unchecked Sendable {
++    let wantsRecurrentRecovery: Bool
++    private var recurrentInputs: QwenRecurrentPrefixInputs?
++    private var recurrentSealed = false
++    private var recurrentConsumed = false
++    init(enableRecurrentRecovery: Bool = false) {
++        wantsRecurrentRecovery = enableRecurrentRecovery
++    }
++    var savedInputBytes: Int { recurrentInputs?.byteCount ?? 0 }
++
++    func bindRecurrent(owner: UUID, turn: UUID, base: Int, width: Int,
++                       layers: [Int], fullBaseline: QwenFullAttentionKVSnapshot) throws {
++        guard wantsRecurrentRecovery, recurrentInputs == nil, !recurrentConsumed,
++              width == 2048, layers.count == 30, Set(layers).count == 30 else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        recurrentInputs = QwenRecurrentPrefixInputs(owner: owner, turn: turn,
++            base: base, width: width, layers: layers.sorted(), fullBaseline: fullBaseline)
++    }
++    func saveRecurrentRows(layer: Int, start: Int, rows: [Float]) throws {
++        guard var inputs = recurrentInputs, !recurrentSealed, !recurrentConsumed,
++              inputs.layers.contains(layer), (0...4).contains(start),
++              rows.count > 0, rows.count <= 4 * inputs.width, rows.count.isMultiple(of: inputs.width),
++              rows.allSatisfy(\.isFinite) else { throw QwenTextRunnerError.invalidTransaction }
++        let existing = inputs.rows[layer] ?? []
++        guard existing.count == start * inputs.width,
++              existing.count + rows.count <= 4 * inputs.width else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        inputs.rows[layer] = existing + rows
++        recurrentInputs = inputs
++    }
++    func sealRecurrent() throws {
++        guard let inputs = recurrentInputs, !recurrentSealed, !recurrentConsumed,
++              Set(inputs.rows.keys) == Set(inputs.layers),
++              inputs.rows.values.allSatisfy({ $0.count == 4 * inputs.width }) else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        recurrentSealed = true
++    }
++    func takeRecurrent(owner: UUID, turn: UUID, base: Int,
++                       fullBaseline: QwenFullAttentionKVSnapshot) throws -> QwenRecurrentPrefixInputs {
++        guard let inputs = recurrentInputs, recurrentSealed, !recurrentConsumed,
++              inputs.owner == owner, inputs.turn == turn, inputs.base == base,
++              inputs.fullBaseline == fullBaseline else { throw QwenTextRunnerError.invalidTransaction }
++        recurrentConsumed = true
++        recurrentInputs = nil
++        return inputs
++    }
++    func discardRecurrent() {
++        recurrentConsumed = true
++        recurrentInputs = nil
++        recurrentSealed = false
++    }
+     var logits: [[Float]] = []
+     var routes: [QwenExactBlockRoute] = []
+     var tokenAdmissions = 0
+@@ -51,3 +104,20 @@
+         }
+     }
+ }
++
++// One actor-owned block. Arrays retain immutable normalized rows, not scratch aliases.
++struct QwenRecurrentPrefixInputs: Sendable {
++    let owner: UUID
++    let turn: UUID
++    let base: Int
++    let width: Int
++    let layers: [Int]
++    let fullBaseline: QwenFullAttentionKVSnapshot
++    var rows: [Int: [Float]] = [:]
++    var byteCount: Int { rows.values.reduce(0) { $0 + $1.count * MemoryLayout<Float>.stride } }
++}
++struct QwenRecurrentPrefixSettlement: Sendable {
++    let keptInputs: Int
++    let appendCalls: Int
++    let savedInputBytes: Int
++}
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift
+@@ -448,6 +448,45 @@
+         }
+     }
+ 
++    // Diagnostic prefix truncation. Return the ORIGINAL rollback position with refreshed lineage.
++    func truncateDiagnosticPrefix(position: Int, baseline: QwenFullAttentionKVSnapshot,
++                                  expected: QwenFullAttentionKVSnapshot) throws -> QwenFullAttentionKVSnapshot {
++        try withLock {
++            try requireNoActiveUse()
++            guard baseline.owner == owner, expected.owner == owner else {
++                throw QwenFullAttentionKVError.invalidSnapshotOwner
++            }
++            guard baseline.lineage == lineage, expected.lineage == lineage else {
++                throw QwenFullAttentionKVError.invalidSnapshotLineage
++            }
++            guard Set(baseline.positions.keys) == Set(fullLayerIndices),
++                  Set(expected.positions.keys) == Set(fullLayerIndices),
++                  baseline.position >= 0, position >= baseline.position,
++                  position <= expected.position,
++                  baseline.positions.values.allSatisfy({ $0 == baseline.position }),
++                  expected.positions.values.allSatisfy({ $0 == expected.position }) else {
++                throw QwenFullAttentionKVError.inconsistentCommittedPositions
++            }
++            for layer in fullLayerIndices {
++                guard try requireLayer(layer).committedPosition == expected.position else {
++                    throw QwenFullAttentionKVError.inconsistentCommittedPositions
++                }
++            }
++            let createsBranch = position < expected.position
++            guard !createsBranch || lineage < UInt64.max else {
++                throw QwenFullAttentionKVError.arithmeticOverflow(operation: "diagnostic prefix lineage")
++            }
++            for layer in fullLayerIndices {
++                var storage = layers[layer]!
++                storage.committedPosition = position
++                layers[layer] = storage
++            }
++            if createsBranch { lineage += 1 }
++            return QwenFullAttentionKVSnapshot(position: baseline.position,
++                owner: owner, lineage: lineage, positions: baseline.positions)
++        }
++    }
++
+     struct ReplacementCheckpoint: Sendable {
+         fileprivate let owner: UUID
+         fileprivate let identifier: UUID
+--- a/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
++++ b/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift
+@@ -80,12 +80,15 @@
+     }
+     private let expertCacheStorage: ExpertCacheStorage
+     private struct TurnCheckpoint {
++        let identifier = UUID()
+         let linear: QwenLinearAttentionSnapshot
+         var full: QwenFullAttentionKVSnapshot
+         let position: Int
+         var replacementFull: QwenFullAttentionKV.ReplacementCheckpoint? = nil
+     }
+     private var turnCheckpoint: TurnCheckpoint?
++    private let recurrentRecoveryOwner = UUID()
++    private var recurrentRecoveryCapture: QwenExactBlockCapture?
+     private var lastPrefillDiagnostics: QwenSourceGroupedPrefillDiagnostics?
+     private var committedPosition = 0
+     private var inFlight = false
+@@ -479,6 +482,15 @@
+ 
+         let ownsCheckpoint = turnCheckpoint == nil
+         if ownsCheckpoint { try beginTurn() }
++        if let capture = exactBlock, capture.wantsRecurrentRecovery {
++            guard recurrentRecoveryCapture == nil, let checkpoint = turnCheckpoint,
++                  checkpoint.position == position, checkpoint.replacementFull == nil else {
++                throw QwenTextRunnerError.invalidTransaction
++            }
++            try capture.bindRecurrent(owner: recurrentRecoveryOwner, turn: checkpoint.identifier,
++                base: position, width: width, layers: linearSteps.keys.sorted(), fullBaseline: checkpoint.full)
++            recurrentRecoveryCapture = capture
++        }
+         prefillInFlight = true
+         defer { prefillInFlight = false }
+         if !grouped {
+@@ -583,6 +595,9 @@
+                                 let inputRow = Array(UnsafeBufferPointer(
+                                     start: residual.advanced(by: tokenIndex * width), count: width))
+                                 normalizedRows += try qwenOfficialSourceRMSNorm(inputRow, row.inputNorm)
++                            }
++                            if let capture = exactBlock, capture.wantsRecurrentRecovery {
++                                try capture.saveRecurrentRows(layer: layer, start: index, rows: normalizedRows)
+                             }
+                             linearBatchOutput = []
+                             var consumed = 0
+@@ -616,6 +631,9 @@
+                                 mropePosition: mropePositions?[index],
+                                 mropeSections: model.architecture.mropeSections)
+                         } else if let linear = linearSteps[layer] {
++                            if let capture = exactBlock, capture.wantsRecurrentRecovery {
++                                try capture.saveRecurrentRows(layer: layer, start: index, rows: normalized)
++                            }
+                             mixer = try await linear.append(normalizedHidden: normalized, tokenCount: 1,
+                                 useGPUPreparation: useGPULinearPreparation)
+                         } else { throw QwenTextRunnerError.stateArchitectureMismatch }
+@@ -852,10 +870,12 @@
+             guard full.position == expected, linearPositionsMatch else {
+                 throw QwenTextRunnerError.invalidState(detail: "source prefill final layer positions")
+             }
++            if let capture = exactBlock, capture.wantsRecurrentRecovery { try capture.sealRecurrent() }
+             committedPosition = expected
+             if ownsCheckpoint { turnCheckpoint = nil }
+             return logits
+         } catch {
++            discardRecurrentCapture()
+             await linearState.waitUntilIdle()
+             do {
+                 guard let checkpoint = turnCheckpoint else {
+@@ -911,6 +931,7 @@
+               let checkpoint = turnCheckpoint else {
+             throw QwenTextRunnerError.invalidTransaction
+         }
++        discardRecurrentCapture()
+         await linearState.waitUntilIdle()
+         do {
+             try hooks.beforeRollbackRestore()
+@@ -925,6 +946,78 @@
+         }
+     }
+ 
++    func diagnosticRecurrentInputBytes() -> Int { recurrentRecoveryCapture?.savedInputBytes ?? 0 }
++
++    private func discardRecurrentCapture() {
++        recurrentRecoveryCapture?.discardRecurrent()
++        recurrentRecoveryCapture = nil
++    }
++
++    // Diagnostic only. Rebuild accepted recurrent state from this block's exact normalized inputs.
++    func settleRecurrentPrefix(_ capture: QwenExactBlockCapture, keep: Int) async throws -> QwenRecurrentPrefixSettlement {
++        guard !inFlight, !unusable, !prefillInFlight, hooks.isKnownNone,
++              let checkpoint = turnCheckpoint, checkpoint.replacementFull == nil,
++              recurrentRecoveryCapture === capture, (0...4).contains(keep),
++              committedPosition == checkpoint.position + 4 else {
++            throw QwenTextRunnerError.invalidTransaction
++        }
++        inFlight = true
++        defer { inFlight = false; discardRecurrentCapture() }
++        do {
++            try Task.checkCancellation()
++            try model.revalidateSource()
++            let inputs = try capture.takeRecurrent(owner: recurrentRecoveryOwner,
++                turn: checkpoint.identifier, base: checkpoint.position, fullBaseline: checkpoint.full)
++            let full = try fullKV.snapshot()
++            guard full.position == checkpoint.position + 4,
++                  linearSteps.keys.allSatisfy({ inputs.layers.contains($0) }),
++                  try linearSteps.keys.allSatisfy({ try linearState.committedPosition(layer: $0) == full.position }) else {
++                throw QwenTextRunnerError.invalidTransaction
++            }
++            await linearState.waitUntilIdle()
++            try Task.checkCancellation()
++            try linearState.restore(checkpoint.linear)
++            var appendCalls = 0
++            for layer in inputs.layers {
++                guard let step = linearSteps[layer], let rows = inputs.rows[layer],
++                      rows.count == 4 * inputs.width else { throw QwenTextRunnerError.invalidTransaction }
++                for index in 0..<keep {
++                    try Task.checkCancellation()
++                    // Fresh admission precedes every new linear submission. Existing projection checks remain.
++                    try model.revalidateSource()
++                    let start = index * inputs.width
++                    _ = try await step.append(normalizedHidden: Array(rows[start..<(start + inputs.width)]),
++                        tokenCount: 1, useGPUPreparation: useGPULinearPreparation)
++                    appendCalls += 1
++                }
++            }
++            let target = checkpoint.position + keep
++            guard try linearSteps.keys.allSatisfy({ try linearState.committedPosition(layer: $0) == target }) else {
++                throw QwenTextRunnerError.invalidState(detail: "recurrent prefix positions")
++            }
++            try Task.checkCancellation()
++            try model.revalidateSource()
++            // No await follows truncation. Preserve the original outer-turn rollback position.
++            let refreshed = try fullKV.truncateDiagnosticPrefix(position: target, baseline: checkpoint.full, expected: full)
++            turnCheckpoint?.full = refreshed
++            committedPosition = target
++            return QwenRecurrentPrefixSettlement(keptInputs: keep,
++                appendCalls: appendCalls, savedInputBytes: inputs.byteCount)
++        } catch let operation {
++            await linearState.waitUntilIdle()
++            do {
++                try linearState.restore(checkpoint.linear)
++                try restoreFullTurnCheckpoint(checkpoint)
++                committedPosition = checkpoint.position
++                turnCheckpoint?.full = try fullKV.snapshot()
++            } catch let rollbackError {
++                unusable = true
++                throw QwenTextRunnerError.execution(detail: "recurrent settlement failed: \(operation); rollback failed: \(rollbackError)")
++            }
++            throw operation
++        }
++    }
++
+     func rollbackTurn() async throws {
+         try await restoreTurnBaseline()
+         fullKV.discardReplacementCheckpoint()
+@@ -940,6 +1033,7 @@
+         }
+         try model.revalidateSource()
+         try validateCompanion()
++        discardRecurrentCapture()
+         fullKV.discardReplacementCheckpoint()
+         turnCheckpoint = nil
+     }
+--- a/Sources/TurboFieldfareRecurrentPrefixRecovery/Command.swift
++++ b/Sources/TurboFieldfareRecurrentPrefixRecovery/Command.swift
+@@ -5,7 +5,7 @@
+ @main struct ExactBlockCommand {
+     @MainActor static func main() async {
+         guard CommandLine.arguments.count == 5 else {
+-            FileHandle.standardError.write(Data("usage: TurboFieldfareCausalLookupDecode registration.json request.json report.json off|on\n".utf8))
++            FileHandle.standardError.write(Data("usage: TurboFieldfareRecurrentPrefixRecovery registration.json request.json report.json serial|legacy|new\n".utf8))
+             exit(2)
+         }
+         let output = URL(fileURLWithPath: CommandLine.arguments[3])

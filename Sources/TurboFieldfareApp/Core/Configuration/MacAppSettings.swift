@@ -1,12 +1,16 @@
+import Darwin
 import Foundation
 import TurboFieldfare
 
 struct MacAppSettings: Codable, Equatable, Sendable {
     static let fileName = "mac-app-settings.json"
-    static let currentVersion = 4
+    static let currentVersion = 7
 
     var version: Int = currentVersion
+    /// The legacy context key remains Gemma's choice. Older files also use it
+    /// for Qwen until a separate Qwen value is saved.
     var contextTokens: Int = AppContextLengthOption.eightK.tokens
+    var qwenContextTokens: Int? = nil
     var expertCacheSlots: Int = 16
     var temperature: Double = 0.2
     var topKEnabled: Bool = true
@@ -20,11 +24,23 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var rdadvisePolicy: AppRDAdvicePolicy = .off
     var loadModelOnLaunch: Bool = false
     var agentModeEnabled: Bool = false
+    /// The original settings key remains the Gemma choice so old files and old
+    /// call sites retain exactly the same default and encoding.
     var toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled
+    var selectedModelID: AppModelID = AppModelCatalog.defaultID
+    var qwenToolThinkingEnabled: Bool = true
+    var qwenSourceRoot: String? = nil
+    var qwenRegistrationPath: String? = nil
+
+    var gemmaToolThinkingEnabled: Bool {
+        get { toolThinkingEnabled }
+        set { toolThinkingEnabled = newValue }
+    }
 
     private enum CodingKeys: String, CodingKey {
         case version
         case contextTokens
+        case qwenContextTokens
         case expertCacheSlots
         case temperature
         case topKEnabled
@@ -39,10 +55,15 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case loadModelOnLaunch
         case agentModeEnabled
         case toolThinkingEnabled
+        case selectedModelID
+        case qwenToolThinkingEnabled
+        case qwenSourceRoot
+        case qwenRegistrationPath
     }
 
     init(version: Int = currentVersion,
          contextTokens: Int = AppContextLengthOption.eightK.tokens,
+         qwenContextTokens: Int? = nil,
          expertCacheSlots: Int = 16,
          temperature: Double = 0.2,
          topKEnabled: Bool = true,
@@ -56,9 +77,14 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          rdadvisePolicy: AppRDAdvicePolicy = .off,
          loadModelOnLaunch: Bool = false,
          agentModeEnabled: Bool = false,
-         toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled) {
+         toolThinkingEnabled: Bool = GFTokenizer.toolThinkingEnabled,
+         selectedModelID: AppModelID = AppModelCatalog.defaultID,
+         qwenToolThinkingEnabled: Bool = true,
+         qwenSourceRoot: String? = nil,
+         qwenRegistrationPath: String? = nil) {
         self.version = version
         self.contextTokens = contextTokens
+        self.qwenContextTokens = qwenContextTokens
         self.expertCacheSlots = expertCacheSlots
         self.temperature = temperature
         self.topKEnabled = topKEnabled
@@ -73,12 +99,17 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.loadModelOnLaunch = loadModelOnLaunch
         self.agentModeEnabled = agentModeEnabled
         self.toolThinkingEnabled = toolThinkingEnabled
+        self.selectedModelID = selectedModelID
+        self.qwenToolThinkingEnabled = qwenToolThinkingEnabled
+        self.qwenSourceRoot = qwenSourceRoot
+        self.qwenRegistrationPath = qwenRegistrationPath
     }
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         version = try container.decode(Int.self, forKey: .version)
         contextTokens = try container.decode(Int.self, forKey: .contextTokens)
+        qwenContextTokens = try container.decodeIfPresent(Int.self, forKey: .qwenContextTokens)
         expertCacheSlots = try container.decode(Int.self, forKey: .expertCacheSlots)
         temperature = try container.decode(Double.self, forKey: .temperature)
         topKEnabled = try container.decode(Bool.self, forKey: .topKEnabled)
@@ -107,14 +138,68 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         toolThinkingEnabled = try container.decodeIfPresent(
             Bool.self,
             forKey: .toolThinkingEnabled) ?? GFTokenizer.toolThinkingEnabled
+        let selectedRaw = try container.decodeIfPresent(
+            String.self,
+            forKey: .selectedModelID)
+        selectedModelID = selectedRaw.flatMap(AppModelID.init(rawValue:))
+            ?? AppModelCatalog.defaultID
+        qwenToolThinkingEnabled = try container.decodeIfPresent(
+            Bool.self,
+            forKey: .qwenToolThinkingEnabled) ?? true
+        qwenSourceRoot = try container.decodeIfPresent(String.self, forKey: .qwenSourceRoot)
+        qwenRegistrationPath = try container.decodeIfPresent(String.self, forKey: .qwenRegistrationPath)
+    }
+
+    func contextTokens(for modelID: AppModelID) -> Int {
+        switch modelID {
+        case .gemma4: contextTokens
+        case .qwen3_6: qwenContextTokens ?? contextTokens
+        }
+    }
+
+    mutating func setContextTokens(_ tokens: Int, for modelID: AppModelID) {
+        switch modelID {
+        case .gemma4:
+            // Preserve Qwen's inherited choice before changing the legacy key.
+            if qwenContextTokens == nil, tokens != contextTokens {
+                qwenContextTokens = contextTokens
+            }
+            contextTokens = tokens
+        case .qwen3_6:
+            qwenContextTokens = tokens
+        }
+    }
+
+    func toolThinkingEnabled(for modelID: AppModelID) -> Bool {
+        switch modelID {
+        case .gemma4: toolThinkingEnabled
+        case .qwen3_6: qwenToolThinkingEnabled
+        }
+    }
+
+    mutating func setToolThinkingEnabled(_ enabled: Bool, for modelID: AppModelID) {
+        switch modelID {
+        case .gemma4: toolThinkingEnabled = enabled
+        case .qwen3_6: qwenToolThinkingEnabled = enabled
+        }
     }
 
     func isValid() -> Bool {
         AppContextLengthOption.allCases.contains { $0.tokens == contextTokens }
+            && (qwenContextTokens.map { tokens in
+                AppContextLengthOption.allCases.contains { $0.tokens == tokens }
+            } ?? true)
             && AppRuntimeOptions.allowedSlotCounts.contains(expertCacheSlots)
             && temperature.isFinite && (0...2).contains(temperature)
             && (1...256).contains(topK)
             && topP.isFinite && (0.01...1).contains(topP)
+            && Self.validDirectoryPath(qwenSourceRoot)
+            && Self.validDirectoryPath(qwenRegistrationPath)
+    }
+
+    private static func validDirectoryPath(_ path: String?) -> Bool {
+        guard let path else { return true }
+        return path.hasPrefix("/") && !path.contains("\0")
     }
 }
 
@@ -124,8 +209,46 @@ private struct VersionStamp: Decodable {
     let version: Int
 }
 
+/// Validate an explicit settings location before the app creates its model.
+public enum AppSettingsLaunchConfiguration {
+    public static func validate(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) throws {
+        if let fileURL = try MacAppSettingsFileStore.explicitFileURL(environment: environment) {
+            _ = try MacAppSettingsFileStore.loadOrCreate(at: fileURL)
+        }
+    }
+}
+
 enum MacAppSettingsFileStore {
+    static let settingsPathEnvironmentKey = "TURBOFIELDFARE_SETTINGS_PATH"
+
+    // The chosen settings file stays fixed if the model path changes later.
+    private static let launchOverride: Result<URL?, Error> = Result {
+        try explicitFileURL(environment: ProcessInfo.processInfo.environment)
+    }
+
+    static func explicitFileURL(environment: [String: String]) throws -> URL? {
+        guard let path = environment[settingsPathEnvironmentKey] else { return nil }
+        guard path.hasPrefix("/"), !path.contains("\0"), !path.hasSuffix("/") else {
+            throw SettingsOverrideError.invalidPath
+        }
+        let fileURL = URL(fileURLWithPath: path, isDirectory: false).standardizedFileURL
+        try validateExplicitFileURL(fileURL)
+        return fileURL
+    }
+
+    static func fileURL(forModelDirectory modelDirectory: URL,
+                        environment: [String: String]) throws -> URL {
+        try explicitFileURL(environment: environment)
+            ?? defaultFileURL(forModelDirectory: modelDirectory)
+    }
+
     static func fileURL(forModelDirectory modelDirectory: URL) -> URL {
+        requireLaunchOverride() ?? defaultFileURL(forModelDirectory: modelDirectory)
+    }
+
+    private static func defaultFileURL(forModelDirectory modelDirectory: URL) -> URL {
         modelDirectory.standardizedFileURL
             .deletingLastPathComponent()
             .appendingPathComponent(MacAppSettings.fileName, isDirectory: false)
@@ -133,29 +256,31 @@ enum MacAppSettingsFileStore {
 
     static func loadOrCreate(forModelDirectory modelDirectory: URL,
                              fileManager: FileManager = .default) -> MacAppSettings {
-        let fileURL = fileURL(forModelDirectory: modelDirectory)
+        if let override = requireLaunchOverride() {
+            do {
+                return try loadOrCreate(at: override, fileManager: fileManager)
+            } catch {
+                stopForInvalidOverride(error)
+            }
+        }
+        let fileURL = defaultFileURL(forModelDirectory: modelDirectory)
         if fileManager.fileExists(atPath: fileURL.path) {
             do {
                 let data = try Data(contentsOf: fileURL)
-                // The version is read on its own, before the full decode, because
-                // nine keys decode with a hard `decode` and a newer build is
-                // entitled to have moved any of them. Decoding first threw on
-                // exactly the files this branch exists to protect, and the throw
-                // reached the `catch` below, which deletes the file - so an older
-                // build silently replaced a newer one's settings with its own
-                // defaults. A version gate that cannot survive a schema change
-                // gates nothing.
+                // Read the version before the full schema. A newer build may
+                // have renamed required keys, and trying the full decode first
+                // would reach the catch below and delete that newer file.
                 let stamp = try JSONDecoder().decode(VersionStamp.self, from: data)
-                // This build does not know what a later version means, so it runs
-                // on defaults and leaves the file exactly as its owner wrote it.
+                // This build cannot interpret later versions. Use defaults in
+                // memory while leaving the newer owner's file untouched.
                 guard stamp.version <= MacAppSettings.currentVersion else {
                     return MacAppSettings()
                 }
                 var settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
                 let needsMigration = settings.version < MacAppSettings.currentVersion
                 if needsMigration {
-                    // Version only: every existing value is still a deliberate
-                    // choice, and rewriting one here would silently discard it.
+                    // Existing values stay deliberate choices; only the schema
+                    // version and newly defaulted fields are added on rewrite.
                     settings.version = MacAppSettings.currentVersion
                 }
                 guard settings.isValid() else { throw InvalidSettings() }
@@ -177,8 +302,52 @@ enum MacAppSettingsFileStore {
     static func save(_ settings: MacAppSettings,
                      forModelDirectory modelDirectory: URL,
                      fileManager: FileManager = .default) throws {
+        if let override = requireLaunchOverride() {
+            do {
+                try save(settings, at: override, fileManager: fileManager)
+                return
+            } catch {
+                stopForInvalidOverride(error)
+            }
+        }
+        try write(settings, at: defaultFileURL(forModelDirectory: modelDirectory),
+                  fileManager: fileManager)
+    }
+
+    /// Explicit files are never deleted or replaced with defaults on read failure.
+    static func loadOrCreate(at fileURL: URL,
+                             fileManager: FileManager = .default) throws -> MacAppSettings {
+        try validateExplicitFileURL(fileURL, fileManager: fileManager)
+        guard fileManager.fileExists(atPath: fileURL.path) else {
+            let settings = MacAppSettings()
+            try save(settings, at: fileURL, fileManager: fileManager)
+            return settings
+        }
+        let data = try Data(contentsOf: fileURL)
+        let stamp = try JSONDecoder().decode(VersionStamp.self, from: data)
+        guard stamp.version <= MacAppSettings.currentVersion else {
+            throw SettingsOverrideError.newerVersion(stamp.version)
+        }
+        var settings = try JSONDecoder().decode(MacAppSettings.self, from: data)
         guard settings.isValid() else { throw InvalidSettings() }
-        let fileURL = fileURL(forModelDirectory: modelDirectory)
+        if settings.version < MacAppSettings.currentVersion {
+            settings.version = MacAppSettings.currentVersion
+            try save(settings, at: fileURL, fileManager: fileManager)
+        }
+        return settings
+    }
+
+    static func save(_ settings: MacAppSettings,
+                     at fileURL: URL,
+                     fileManager: FileManager = .default) throws {
+        try validateExplicitFileURL(fileURL, fileManager: fileManager)
+        try write(settings, at: fileURL, fileManager: fileManager)
+    }
+
+    private static func write(_ settings: MacAppSettings,
+                              at fileURL: URL,
+                              fileManager: FileManager) throws {
+        guard settings.isValid() else { throw InvalidSettings() }
         try fileManager.createDirectory(
             at: fileURL.deletingLastPathComponent(),
             withIntermediateDirectories: true)
@@ -189,5 +358,54 @@ enum MacAppSettingsFileStore {
         try data.write(to: fileURL, options: .atomic)
     }
 
-    private struct InvalidSettings: Error {}
+    private static func validateExplicitFileURL(
+        _ fileURL: URL, fileManager: FileManager = .default
+    ) throws {
+        guard fileURL.isFileURL, fileURL.path.hasPrefix("/"),
+              !fileURL.path.contains("\0"), fileURL.path != "/" else {
+            throw SettingsOverrideError.invalidPath
+        }
+        // Also reject dangling links, which fileExists reports as absent.
+        if (try? fileManager.destinationOfSymbolicLink(atPath: fileURL.path)) != nil {
+            throw SettingsOverrideError.invalidFileType
+        }
+        if fileManager.fileExists(atPath: fileURL.path) {
+            let attributes = try fileManager.attributesOfItem(atPath: fileURL.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular else {
+                throw SettingsOverrideError.invalidFileType
+            }
+        }
+    }
+
+    private static func requireLaunchOverride() -> URL? {
+        do { return try launchOverride.get() }
+        catch { stopForInvalidOverride(error) }
+    }
+
+    private static func stopForInvalidOverride(_ error: Error) -> Never {
+        FileHandle.standardError.write(Data(
+            "Invalid \(settingsPathEnvironmentKey): \(error.localizedDescription)\n".utf8))
+        exit(EXIT_FAILURE)
+    }
+
+    private enum SettingsOverrideError: LocalizedError {
+        case invalidPath
+        case invalidFileType
+        case newerVersion(Int)
+
+        var errorDescription: String? {
+            switch self {
+            case .invalidPath:
+                "The settings path must be an absolute file path without a trailing slash or a NUL character."
+            case .invalidFileType:
+                "The settings path must name a regular file, not a directory or symbolic link."
+            case .newerVersion(let version):
+                "Settings version \(version) is newer than this app supports."
+            }
+        }
+    }
+
+    private struct InvalidSettings: LocalizedError {
+        var errorDescription: String? { "The settings file contains invalid values." }
+    }
 }

@@ -129,29 +129,50 @@ public final class MetalContext: @unchecked Sendable {
     }
 
     /// Production shader modules compiled into the shared runtime library.
-    private static let shaderModules: [String] = [
+    static let shaderModules: [String] = [
         "dequant_int4",
+        "gemma_verify_int4",
         "dequant_int8",
         "rmsnorm",
         "rope",
         "attention",
         "moe",
+        "gemma_verify_moe",
         "logit",
         "utility",
         "fused",
+        "gemma_verify_fused",
         "prefill",
         "vision",
+        "qwen_common",
+        "qwen_bf16",
+        "qwen_full_attention",
+        "qwen_linear_attention",
+        "qwen_moe",
+        "qwen_vision",
     ]
 
     /// Bundle locations for runtime shader modules.
-    private static let shaderSubdirectories: [String: String] = [
+    static let shaderSubdirectories: [String: String] = [
         "attention": "Metal/Attention",
         "dequant_int4": "Metal/Quant",
+        "gemma_verify_int4": "Metal/Quant",
         "dequant_int8": "Metal/Quant",
         "fused": "Metal/Fusions",
+        "gemma_verify_fused": "Metal/Fusions",
         "logit": "Metal/Sampling",
         "moe": "Metal/MoE",
+        "gemma_verify_moe": "Metal/MoE",
         "prefill": "Metal/Prefill",
+        "qwen_common": "Metal/Qwen",
+        "qwen_bf16": "Metal/Qwen",
+        "qwen_bf16_small32_lanes": "Metal/Qwen",
+        "qwen_source_math": "Metal/Qwen",
+        "qwen_source_scalar_math": "Metal/Qwen",
+        "qwen_full_attention": "Metal/Qwen",
+        "qwen_linear_attention": "Metal/Qwen",
+        "qwen_moe": "Metal/Qwen",
+        "qwen_vision": "Metal/Qwen",
         "rmsnorm": "Metal/Primitives",
         "rope": "Metal/Primitives",
         "tensorops": "Metal/TensorCore",
@@ -167,12 +188,29 @@ public final class MetalContext: @unchecked Sendable {
                                  subdirectory: subdirectory)
     }
 
+    static func shaderSourceURLs() throws -> [URL] {
+        try shaderSourceURLs { module, _, _ in
+            shaderURL(module: module)
+        }
+    }
+
+    static func shaderSourceURLs(
+        resolvingWith resolve: (_ module: String, _ extension: String,
+                                _ subdirectory: String) -> URL?
+    ) throws -> [URL] {
+        try shaderModules.map { module in
+            guard let subdirectory = shaderSubdirectories[module],
+                  let url = resolve(module, "metal", subdirectory) else {
+                throw MetalError.missingShaderResource(module)
+            }
+            return url
+        }
+    }
+
     private static func compileShaderLibrary(device: MTLDevice) throws -> MTLLibrary {
         var combined = ""
-        for name in shaderModules {
-            guard let url = shaderURL(module: name) else {
-                throw MetalError.missingShaderResource(name)
-            }
+        let sourceURLs = try shaderSourceURLs()
+        for (name, url) in zip(shaderModules, sourceURLs) {
             let src = try String(contentsOf: url, encoding: .utf8)
             combined += "\n// ==== \(name).metal ====\n" + src + "\n"
         }
@@ -189,16 +227,19 @@ public final class MetalContext: @unchecked Sendable {
     /// Compile one shader module into its own library, leaving the shared
     /// runtime library untouched.
     ///
-    /// Cached per device, module, math mode and source variant: libraries are
+    /// Cached per device, module, math settings and source variant: libraries are
     /// immutable, and
     /// one `VisionRuntime` init otherwise compiles the identical tensorops
     /// source three times (linear, attention, projector) on every load.
     public static func privateLibrary(device: MTLDevice, module: String,
                                       mathMode: MTLMathMode? = nil,
+                                      mathFloatingPointFunctions: MTLMathFloatingPointFunctions? = nil,
+                                      includeQwenSourceMath: Bool = false,
                                       includeVisionTensorOps: Bool = false) throws
         -> MTLLibrary {
         let key = "\(ObjectIdentifier(device).hashValue)#\(module)"
-            + "#\(mathMode?.rawValue ?? -1)#\(includeVisionTensorOps)"
+            + "#\(mathMode?.rawValue ?? -1)#\(mathFloatingPointFunctions?.rawValue ?? -1)"
+            + "#\(includeQwenSourceMath)#\(includeVisionTensorOps)"
         privateLibraryLock.lock()
         defer { privateLibraryLock.unlock() }
         if let cached = privateLibraryCache[key] {
@@ -207,11 +248,25 @@ public final class MetalContext: @unchecked Sendable {
         guard let url = shaderURL(module: module) else {
             throw MetalError.missingShaderResource(module)
         }
-        let src = try String(contentsOf: url, encoding: .utf8)
+        var src = try String(contentsOf: url, encoding: .utf8)
+        if includeQwenSourceMath {
+            guard let sourceMathURL = shaderURL(module: "qwen_source_math") else {
+                throw MetalError.missingShaderResource("qwen_source_math")
+            }
+            guard let scalarMathURL = shaderURL(module: "qwen_source_scalar_math") else {
+                throw MetalError.missingShaderResource("qwen_source_scalar_math")
+            }
+            let sourceMath = try String(contentsOf: sourceMathURL, encoding: .utf8)
+            let scalarMath = try String(contentsOf: scalarMathURL, encoding: .utf8)
+            src = sourceMath + "\n" + scalarMath + "\n" + src
+        }
         let opts = MTLCompileOptions()
         opts.languageVersion = .version4_0
         if let mathMode {
             opts.mathMode = mathMode
+        }
+        if let mathFloatingPointFunctions {
+            opts.mathFloatingPointFunctions = mathFloatingPointFunctions
         }
         if includeVisionTensorOps {
             opts.preprocessorMacros = [

@@ -1,0 +1,12 @@
+{
+  "candidate/Package.swift": "86af6cde85ff708cac1df62d53ce47be72b20401dbbec08c3e5952f697eee5a2",
+  "candidate/Sources/TurboFieldfare/Infrastructure/Streaming/PreadExpertStreamer.swift": "ec7ca99260123597e60ba860493b8363fdf3a5e4e04be69157a7d8c1e030bec1",
+  "candidate/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift": "bc01449b0db5af3044a401251e38da7cc30bfa7f704b0ad5516503c41db5c10b",
+  "candidate/Sources/TurboFieldfare/Runtime/Inference/ModelExpertIO.swift": "6edae3cec52c39dfd5a5698c821ee4d304e2fc4537c0c1e74289c43e2f2dcf09",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift": "bd928c505de4f4a7f35ff8d3ee192edba7c78d06c34cd47d00c29c8bf08d1c31",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift": "22d9755f4881f400558bd7319edf700f2a152a0b65c52c5ab21651e3e5f37102",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenFullAttentionKV.swift": "2ede230134a9477179b3d4cfb9a0c3eeda4fa95bf3a873cf8df17b39be6eafe6",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceConversationState.swift": "9ce0cee60eb542d41c18ab94b40a7fd9a262c50ac78f8a83ddda2ca737dc588e",
+  "candidate/Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift": "d547eb710a3faf55da7658b309a8007e77838ad887957e1e0a612d4b644e6e94",
+  "candidate/Sources/TurboFieldfareRecurrentPrefixRecovery/Command.swift": "a28543cf82c939084fccfdca8ea55a3fec9ad8797a287eaadf5783ae5b064a5b"
+}

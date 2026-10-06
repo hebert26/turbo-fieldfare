@@ -1,0 +1,22 @@
+{
+  "command": [
+    "swift",
+    "build",
+    "-c",
+    "release",
+    "--package-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/overlay",
+    "--scratch-path",
+    "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/recurrent-prefix-recovery-20261002/build",
+    "--disable-automatic-resolution",
+    "--skip-update",
+    "--product",
+    "TurboFieldfareRecurrentPrefixRecovery"
+  ],
+  "exit": 0,
+  "modelRun": false,
+  "overlayStable": true,
+  "overlayHashesSHA256": "9a9ca9285934d6c241fbb1e98b18725117dd652db6a5d77fd6a757a517cc1135",
+  "binarySHA256": "659788d00badd1189c072b44019b896fb00269dec9e5d2db87aeb0460f7a7b04",
+  "stageHashesSHA256": "c9d9236bce1c184deb76f30a864e0cedb8369147604fe9c964829c88ab6aa8a5"
+}

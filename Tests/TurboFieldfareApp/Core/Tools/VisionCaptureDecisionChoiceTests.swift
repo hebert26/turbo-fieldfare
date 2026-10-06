@@ -5,6 +5,23 @@ import TurboFieldfare
 
 @Suite struct VisionCaptureDecisionChoiceTests {
     @Test
+    func proposalCorrectionPreservesChoicesAndListsOnlyPermittedActions() throws {
+        let packet: JSONValue = .object([
+            "allowed_next": .array([.string("back"), .string("swipe"), .string("tap")]),
+            "choices": .array([.object(["id": .string("c33"), "label": .string("return")])]),
+            "last_action": .object(["action": .string("observe"), "verdict": .string("not_sent")]),
+            "guidance": .string("Observation is not permitted."),
+        ])
+        let corrected = try VisionCaptureToolLoop.addingProposalCorrection(to: packet.encoded())
+        let result = try JSONDecoder().decode(JSONValue.self, from: Data(corrected.utf8))
+        #expect(result.objectValue?["choices"] == packet.objectValue?["choices"])
+        #expect(result.objectValue?["allowed_next"] == packet.objectValue?["allowed_next"])
+        #expect(result.objectValue?["last_action"] == packet.objectValue?["last_action"])
+        #expect(corrected.contains("Allowed actions now: [back, swipe, tap]"))
+        #expect(corrected.contains("without a tool call"))
+    }
+
+    @Test
     func editableFieldAliasesPublishOneIdentifierChoicePerElement() {
         let root: JSONValue = .object([
             "elements": .array([
@@ -209,6 +226,31 @@ import TurboFieldfare
         ])
         #expect(!appWithoutKeyboard.isLowValueSoftwareKeyboardControl(
             selector: "bottom-emoji", role: "button"))
+    }
+
+    @Test
+    func repeatedThinkingCanReuseOneCurrentScreenshot() throws {
+        let packet: JSONValue = .object([
+            "last_action": .object([
+                "action": .string("screenshot"),
+                "verdict": .string("observed"),
+            ]),
+            "observation": .object([
+                "current_image_evidence": .bool(true),
+                "state": .string("current"),
+            ]),
+        ])
+
+        let retry = try VisionCaptureToolLoop.repeatedThinkingRetryContent(
+            from: packet.encoded(), imageCount: 1)
+        let content = try #require(retry)
+        let recovered = try JSONDecoder().decode(
+            JSONValue.self, from: Data(content.utf8)).objectValue
+        #expect(recovered?["generation_recovery"] != nil)
+        #expect(recovered?["image_attachment_order"] != nil)
+        let missingImage = try VisionCaptureToolLoop.repeatedThinkingRetryContent(
+            from: packet.encoded(), imageCount: 0)
+        #expect(missingImage == nil)
     }
 
     private static func field(

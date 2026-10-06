@@ -1,0 +1,29 @@
+{
+  "kind": "qwen-source-vision-layernorm-row-fixture-v1",
+  "row": 54,
+  "width": 1152,
+  "epsilon": 1e-6,
+  "affine": "explicit unit gamma, zero beta",
+  "inputFile": "row54-input.fp32-le.bin",
+  "inputSHA256": "94ea1148f372f973f666518292fb447284541544fd84ba962deffd118e8087b2",
+  "expectedFile": "row54-expected-unit-affine.fp32-le.bin",
+  "expectedSHA256": "2d59df77b19ce661755e837f6f6eb06903be38a2b753ab8b91a29cf71a2c6c81",
+  "expectedNativeMeanBits": 3147055095,
+  "expectedNativeRstdBits": 1077235360,
+  "inputSource": {
+    "kind": "qwen-source-vision-first-block-cpu-v1",
+    "file": "natural-exif-1.block-0.attention-residual.fp32-le.bin",
+    "row": 54,
+    "shape": [308, 1152],
+    "sha256": "31aa5e246187d8607cf556024b93c0d941d8450570d35f04550993af6fb20199"
+  },
+  "expectedSource": {
+    "kind": "qwen-source-vision-norm2-same-input-cpu-v1",
+    "file": "unit-affine-normalized.fp32-le.bin",
+    "shape": [308, 1152],
+    "sha256": "be0bbe244bd6a09dcbff3cfda9e961228121d78c8428ae6294fa557b9e6c70a7",
+    "torch": "2.10.0",
+    "threads": 1,
+    "generatorSHA256": "97495ade44a953cb0350da75dc345d4669d1eaa73df49e72c0694ec3450443d3"
+  }
+}

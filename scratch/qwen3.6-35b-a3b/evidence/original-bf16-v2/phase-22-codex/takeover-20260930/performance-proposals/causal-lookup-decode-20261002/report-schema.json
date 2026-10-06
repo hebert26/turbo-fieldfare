@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "product": "TurboFieldfareCausalLookupDecode",
+  "cli": [
+    "registration.json",
+    "request.json",
+    "unique-report.json",
+    "off|on"
+  ],
+  "clock": "DispatchTime.uptimeNanoseconds; integer ns",
+  "modeFlag": "explicit CLI mode; no separate environment flag",
+  "topLevel": [
+    "schema",
+    "mode",
+    "outputIDs",
+    "expectedOutputIDsMatched",
+    "promptWallNanoseconds",
+    "decodeWallNanoseconds",
+    "cycles",
+    "finalState",
+    "acceptedRouteCount",
+    "acceptedRawRowCount",
+    "acceptedRouteSHA256",
+    "acceptedRawRowSHA256",
+    "transactions",
+    "minimumFreePercent",
+    "processCPUUserBeforeMicroseconds",
+    "processCPUSystemBeforeMicroseconds",
+    "processCPUUserAfterMicroseconds",
+    "processCPUSystemAfterMicroseconds"
+  ],
+  "cycleFields": [
+    "index",
+    "position",
+    "pendingInput",
+    "proposalIDs",
+    "provisionalIDs",
+    "matchedDrafts",
+    "consumedInputs",
+    "verifiedInputs",
+    "wallNanoseconds",
+    "restoreReplayNanoseconds",
+    "hits",
+    "misses",
+    "routeSHA256",
+    "rawRowSHA256",
+    "sourceChecks",
+    "io"
+  ],
+  "cycleMeaning": {
+    "proposalIDs": "frozen lookup drafts from consumed history plus current pending",
+    "provisionalIDs": "actual sampled next IDs through first mismatch or stop inclusive",
+    "consumedInputs": "pending plus matched drafts, not correction/bonus",
+    "verifiedInputs": "actual branch inputs evaluated; includes rejected suffix",
+    "wall": "begin/cycle verification/sampling/replay/finish; excludes cycle hash formatting",
+    "decodeWall": "includes cycle hash/counter formatting, all loop/transaction/sampler/recovery work"
+  },
+  "finalState": {
+    "position": 1203,
+    "pendingTokens": 1,
+    "runnerUsable": true,
+    "linearPositions": "30 layer keys, all1203",
+    "fullKVPositions": "10 other layer keys, all1203",
+    "linearStateSHA256": "actual convolution/recurrent Float bitPattern bytes by sorted layer",
+    "committedKeysSHA256": "validKV Float bitPattern bytes by sorted layer",
+    "committedValuesSHA256": "validKV Float bitPattern bytes by sorted layer"
+  },
+  "acceptedChain": {
+    "routes": 1120,
+    "rawRows": 28,
+    "routeEncoding": "sorted position/layer, JSONEncoder.sortedKeys per route plus newline, IDs and UInt32 weightbits",
+    "rawEncoding": "consumed input order; little-endian host Float.bitPattern bytes; excludes rejected suffix"
+  },
+  "io": {
+    "reads": 4,
+    "failedReads": 4,
+    "preads": 4,
+    "validations": 16,
+    "preadCounterFields": [
+      "count",
+      "bytes",
+      "errors"
+    ],
+    "validationCounterFields": [
+      "count",
+      "errors"
+    ],
+    "index": "phase0prefill/1decode; byteclass0zero/1payload; validation=phase*8+byteclass*4+site(initial0,beforeRead1,afterRead2,beforeReturn3), other=phase*2+byteclass"
+  },
+  "sourceChecks": [
+    "tokenAdmissions",
+    "layerAdmissions",
+    "reusedPairChecks",
+    "preGPUChecks",
+    "sharedChecks",
+    "finalChecks"
+  ],
+  "goldenPolicy": "raw capture hash fixed; goldenIDs are assertion only after complete generation",
+  "limits": [
+    "29 sampled IDs includes terminalEOS; EOS remains pending, never consumed",
+    "No parser or tool execution",
+    "OFF one turn; ON per-cycle turns; no outer conversation integration",
+    "CPU is process-level evidence, not additive timing",
+    "Same source checks and sampler boundary as original pair diagnostic"
+  ]
+}

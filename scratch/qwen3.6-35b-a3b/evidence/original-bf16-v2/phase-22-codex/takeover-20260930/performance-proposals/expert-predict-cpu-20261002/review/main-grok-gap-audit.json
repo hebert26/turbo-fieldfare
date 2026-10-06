@@ -1,0 +1,12 @@
+{
+  "commands": 4434,
+  "laterCommandsAfterPreviousGPUEnd": 4433,
+  "sumGapSeconds": 2.79026003475,
+  "firstThreePositionsGapSeconds": 1.567143864,
+  "steadyPositionsGapSeconds": 1.2227702955,
+  "steadyGapMillisecondsPerForward": 43.67036769642857,
+  "steadyPositions": 28,
+  "interpretation": "Observed serial command gaps in one trace. Neither CPU cause nor removable speed gain is proved. The2ms idle threshold is a trace association, not a proven universal threshold. No scheduler change selected.",
+  "auditScope": "Recomputed aggregate and temporal order from raw saved rows only. Did not independently rederive every per-stage median.",
+  "earlierAuditAttempt": "Raw batch parsing failed KeyError records; retried using the existing checked compressed-trace loader. No model run."
+}

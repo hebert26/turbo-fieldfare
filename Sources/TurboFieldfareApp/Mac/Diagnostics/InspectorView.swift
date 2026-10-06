@@ -2,15 +2,20 @@ import AppKit
 import TurboFieldfareAppCore
 import TurboFieldfareMacPresentation
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct InspectorView: View {
     @Bindable var model: AppModel
+    @State private var showingQwenSourceImporter = false
+    @State private var qwenSourceIncludesVision = true
+    @State private var qwenSourcePickerError: String?
 
     var body: some View {
         Form {
             agentModeSection
             thinkingSection
             modelSection
+            qwenSourceSection
             // Second, beside Model: image support is an install concern, not a
             // diagnostic. Last put it under the runner diagnostics and below the
             // fold, where the one screen that must mention it - the empty state
@@ -26,6 +31,29 @@ struct InspectorView: View {
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
         .background(Color(nsColor: .windowBackgroundColor))
+        .fileImporter(
+            isPresented: $showingQwenSourceImporter,
+            allowedContentTypes: [.folder],
+            allowsMultipleSelection: false
+        ) { result in
+            switch result {
+            case .success(let URLs):
+                guard let directory = URLs.first else { return }
+                qwenSourcePickerError = nil
+                model.configureQwenSourceDirectory(
+                    directory,
+                    includesVision: qwenSourceIncludesVision)
+            case .failure(let error):
+                if (error as NSError).code != NSUserCancelledError {
+                    qwenSourcePickerError = error.localizedDescription
+                }
+            }
+        }
+        .onAppear {
+            if model.qwenSourceDirectory != nil {
+                qwenSourceIncludesVision = model.qwenSourceIncludesVision
+            }
+        }
     }
 
     private var agentModeSection: some View {
@@ -59,7 +87,7 @@ struct InspectorView: View {
 
     private var thinkingSection: some View {
         Section("Thinking") {
-            Toggle("Enable Thinking", isOn: Binding {
+            Toggle("Enable \(model.selectedModelEntry.displayName) Thinking", isOn: Binding {
                 model.toolThinkingEnabled
             } set: { enabled in
                 model.setToolThinkingEnabled(enabled)
@@ -111,10 +139,11 @@ struct InspectorView: View {
                     .font(.caption)
                     .foregroundStyle(visionStatusColor)
             }
-            if model.isVisionRuntimeSupported && !model.isVisionPackInstalled {
+            if model.isVisionRuntimeSupported && !model.isVisionPackInstalled,
+               let descriptor = model.selectedVisionInstallDescriptor {
                 LabeledContent("Download") {
                     Text(MetricFormat.storage(
-                        model.visionInstallDescriptor.approximateDownloadBytes))
+                        descriptor.approximateDownloadBytes))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -163,6 +192,11 @@ struct InspectorView: View {
                     + "“<name>.gturbo”, which is where the companion pack lives.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } else if case .verificationUnavailable(let message) =
+                        model.visionInstallationStatus {
+                Text(message)
+                    .font(.caption)
+                    .foregroundStyle(.orange)
             } else if case .failed(let message) = model.visionInstallReadiness,
                       !model.isInstallingVisionPack {
                 Text(message)
@@ -188,7 +222,18 @@ struct InspectorView: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack {
+            if model.selectedModelID == .qwen3_6 {
+                Text("Qwen image support requires a valid adjacent .vision.gturbo pack.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                visionActions
+            }
+        }
+    }
+
+    private var visionActions: some View {
+        HStack {
                 if model.isInstallingVisionPack {
                     Button("Cancel", action: model.cancelVisionInstall)
                         .disabled(!model.canCancelVisionInstall)
@@ -229,7 +274,6 @@ struct InspectorView: View {
                     }
                 }
             }
-        }
     }
 
     private var visionInstallButtonLabel: String {
@@ -254,6 +298,7 @@ struct InspectorView: View {
         case .partial: return "Needs repair"
         case .complete: return "Installed"
         case .unsupportedLayout: return "Not available for this model"
+        case .verificationUnavailable(let message): return message
         }
     }
 
@@ -261,12 +306,55 @@ struct InspectorView: View {
         guard model.isVisionRuntimeSupported else { return .secondary }
         switch model.visionInstallationStatus {
         case .partial: return .orange
+        case .verificationUnavailable: return .orange
         case .missing, .complete, .unsupportedLayout: return .secondary
         }
     }
 
     private var modelSection: some View {
         Section("Model") {
+            LabeledContent("Selected") {
+                Text(modelIdentity.selectedName)
+                    .font(.caption)
+                    .multilineTextAlignment(.trailing)
+            }
+            LabeledContent("Selection state") {
+                Text(modelIdentity.selectedState)
+                    .font(.caption)
+                    .foregroundStyle(modelIdentityStateColor)
+                    .multilineTextAlignment(.trailing)
+            }
+            if let loadedName = modelIdentity.loadedName {
+                LabeledContent("Loaded identity") {
+                    Text(loadedName)
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                        .multilineTextAlignment(.trailing)
+                }
+                if let detail = modelIdentity.loadedDetail {
+                    Text(detail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+            } else {
+                LabeledContent("Loaded identity") {
+                    Text("None")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            LabeledContent("Text") {
+                Text(textInstallationStatusLabel)
+                    .font(.caption)
+                    .foregroundStyle(textInstallationStatusColor)
+            }
+            LabeledContent("Image support") {
+                Text(visionStatusLabel)
+                    .font(.caption)
+                    .foregroundStyle(visionStatusColor)
+                    .multilineTextAlignment(.trailing)
+            }
             LabeledContent("Path") {
                 HStack(spacing: 6) {
                     Text(model.modelPathText)
@@ -289,19 +377,15 @@ struct InspectorView: View {
             if model.canUnloadModel {
                 Button("Unload Model", action: model.unloadModel)
             }
-            LabeledContent("State") {
-                Text(model.presentation.label)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            if model.requiresModelInstallation {
+            if model.requiresModelInstallation,
+               let descriptor = model.selectedTextInstallDescriptor {
                 LabeledContent("Download") {
-                    Text(MetricFormat.storage(model.installDescriptor.approximateDownloadBytes))
+                    Text(MetricFormat.storage(descriptor.approximateDownloadBytes))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent("Installed size") {
-                    Text(MetricFormat.storage(model.installDescriptor.installedBytes))
+                    Text(MetricFormat.storage(descriptor.installedBytes))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
@@ -318,12 +402,130 @@ struct InspectorView: View {
             || model.isVisionCompanionOperationInProgress)
     }
 
+    private var modelIdentity: AppModelIdentityPresentation {
+        .resolve(
+            selected: model.selectedModelEntry,
+            installationStatus: model.installationStatus,
+            loadState: model.loadState,
+            transition: model.modelSelectionTransition,
+            readiness: model.loadedModelReadiness)
+    }
+
+    private var modelIdentityStateColor: Color {
+        if case .failed = model.modelSelectionTransition { return .red }
+        if model.loadState.isFailed { return .red }
+        if model.loadState.isReady, modelIdentity.loadedName == nil { return .orange }
+        switch model.installationStatus {
+        case .partial: return .orange
+        case .missing, .complete: return .secondary
+        }
+    }
+
+    private var textInstallationStatusLabel: String {
+        switch model.installationStatus {
+        case .missing: return "Not installed"
+        case .partial: return "Needs repair"
+        case .complete: return "Installed and verified"
+        }
+    }
+
+    private var textInstallationStatusColor: Color {
+        if case .partial = model.installationStatus { return .orange }
+        return .secondary
+    }
+
+    private var qwenSourceSection: some View {
+        Section("Local Qwen Source") {
+            Button("Choose Qwen Source Folder…") {
+                showingQwenSourceImporter = true
+            }
+            .disabled(!model.canSelectModel)
+            .keyboardShortcut("q", modifiers: [.command, .option])
+            .accessibilityIdentifier("qwen-source-folder-chooser")
+            .accessibilityHint("Choose the original BF16 Qwen source folder for verification and registration")
+
+            qwenSourceStatus
+
+            if let source = model.qwenSourceDirectory {
+                HStack(spacing: 6) {
+                    Text(source.path)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .help(source.path)
+                    Spacer(minLength: 6)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(source.path, forType: .string)
+                    } label: {
+                        Label("Copy Qwen source path", systemImage: "doc.on.doc")
+                            .labelStyle(.iconOnly)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                Button("Clear Source Selection") {
+                    model.clearQwenSourceDirectory()
+                }
+                .disabled(!model.canSelectModel)
+            }
+            Text("Image support requires a valid adjacent .vision.gturbo pack. Original source files are never removed by this control.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var qwenSourceStatus: some View {
+        if let qwenSourcePickerError {
+            Label(qwenSourcePickerError, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+        switch model.qwenSourceConfigurationState {
+        case .notConfigured:
+            Text("Choose the original BF16 source folder, then select Verify and Register. Registration does not copy model weights.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .checking:
+            HStack(spacing: 8) {
+                ProgressView().controlSize(.small)
+                Text("Checking the selected source folder")
+            }
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        case .ready:
+            Label(model.installationStatus(for: .qwen3_6) == .complete
+                  ? "BF16 source verified and registered."
+                  : "Source selected. Verify and Register to authenticate it.",
+                  systemImage: model.installationStatus(for: .qwen3_6) == .complete
+                    ? "checkmark.circle.fill" : "folder")
+                .font(.caption)
+                .foregroundStyle(model.installationStatus(for: .qwen3_6) == .complete
+                    ? Color.green : Color.secondary)
+        case .failed(let message):
+            Label(message, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.red)
+        }
+    }
+
     private var memorySection: some View {
         Section("Memory") {
+            LabeledContent("Conversation state") {
+                Text(runtimeByteText(model.conversationLogicalStateBytes))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            LabeledContent("Expert cache") {
+                Text(runtimeByteText(model.expertCacheBytes))
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
             LabeledContent("Context") {
                 Picker("Context", selection: $model.maxContextTokens) {
                     ForEach(AppContextLengthOption.allCases) { option in
-                        Text(option.menuLabel).tag(option.tokens)
+                        Text(option.menuLabel(for: model.selectedModelEntry.family)).tag(option.tokens)
                     }
                 }
                 .pickerStyle(.menu)
@@ -333,19 +535,27 @@ struct InspectorView: View {
             LabeledContent("Slots") {
                 Picker("Slots", selection: $model.runtimeOptions.expertCacheSlots) {
                     ForEach(AppRuntimeOptions.allowedSlotCounts, id: \.self) { slots in
-                        Text(AppRuntimeOptions.slotsLabel(for: slots)).tag(slots)
+                        Text(AppRuntimeOptions.slotsLabel(
+                            for: slots, family: model.selectedModelEntry.family)).tag(slots)
                     }
                 }
                 .pickerStyle(.menu)
                 .labelsHidden()
                 .fixedSize()
             }
-            Text("More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 8K context and 16 slots and apply after reloading the model.")
+            Text(model.selectedModelID == .qwen3_6
+                 ? "More slots can use more memory. Qwen conversation state uses FP32, and total memory fit has not been measured. Changes apply after reloading the model."
+                 : "More slots can improve decode speed by keeping more experts in memory, but they also use more RAM. Changes are compared with 8K context and 16 slots and apply after reloading the model.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
         .disabled(model.isRunning || model.loadState.isLoading
             || model.isVisionCompanionOperationInProgress)
+    }
+
+    private func runtimeByteText(_ bytes: UInt64?) -> String {
+        guard let bytes else { return "Unavailable" }
+        return MetricFormat.storage(bytes)
     }
 
     private var generationSection: some View {

@@ -1,0 +1,18 @@
+{
+  "acceptedOFFResult": {
+    "path": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/run-20261002T161328.568847Z-1ea5d43faad8453c9627769b9fe8750b/result.json",
+    "sha256": "01ef209b031e2d8a7e6bc6c0bba4465d83c8f49390c2ce0a2d5f8559c1d3e5f7"
+  },
+  "acceptedOFFWrapperReceipt": {
+    "path": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/run-20261002T161328.568847Z-1ea5d43faad8453c9627769b9fe8750b/receipt.json",
+    "sha256": "b59cd74dcaddf91e5f5e49c408da3a4d8fa37387b90404d53fa24bbbd3c04f64",
+    "childExit": 0,
+    "exit": 0
+  },
+  "request": {
+    "path": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-decode-20261002/request.json",
+    "sha256": "841f885f3e7e30c56656176e2cb41b4616f01d88db16f30f03ab058f125e1285"
+  },
+  "capturedRows": 1120,
+  "compulsoryFirstTouches": 2709
+}

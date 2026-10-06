@@ -23,6 +23,10 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     private let condition = NSCondition()
     private var state = State()
     private let generationID: UUID
+    private let loadedFamily: DecodeModelFamily
+    private let loadID: UUID
+    private let modelIdentity: DecodeModelIdentity?
+    private let sourceIdentity: DecodeSourceIdentity?
     private let conversationEpoch: UUID?
     private let memorySampler = AppMemorySampler()
     private let measurementRequest: DecodeRuntimeMeasurementRequest?
@@ -42,15 +46,31 @@ final class DecodeServiceOutbox: @unchecked Sendable {
     /// Nil outside conversation mode, so a one-shot turn reports no gauge
     /// rather than a misleading zero.
     private let conversationTokens: @Sendable () -> Int?
+    /// Logical bytes in the committed conversation state, when available.
+    private let conversationLogicalStateBytes: @Sendable () -> UInt64?
+    /// Bytes of actual routed-expert cache buffers currently owned.
+    private let expertCacheBytes: @Sendable () -> UInt64?
 
     init(generationID: UUID,
+         loadedFamily: DecodeModelFamily,
+         loadID: UUID,
+         modelIdentity: DecodeModelIdentity?,
+         sourceIdentity: DecodeSourceIdentity? = nil,
          conversationEpoch: UUID? = nil,
          towerBytes: @escaping @Sendable () -> UInt64? = { nil },
          conversationTokens: @escaping @Sendable () -> Int? = { nil },
+         conversationLogicalStateBytes: @escaping @Sendable () -> UInt64? = { nil },
+         expertCacheBytes: @escaping @Sendable () -> UInt64? = { nil },
          measurementRequest: DecodeRuntimeMeasurementRequest? = nil,
          measurementCapture: RuntimeMeasurementCapture? = nil) {
         self.conversationTokens = conversationTokens
+        self.conversationLogicalStateBytes = conversationLogicalStateBytes
+        self.expertCacheBytes = expertCacheBytes
         self.generationID = generationID
+        self.loadedFamily = loadedFamily
+        self.loadID = loadID
+        self.modelIdentity = modelIdentity
+        self.sourceIdentity = sourceIdentity
         self.conversationEpoch = conversationEpoch
         self.towerBytes = towerBytes
         self.measurementRequest = measurementRequest
@@ -116,7 +136,11 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         condition.lock()
         if !state.terminalCommitted, let error {
             state.terminal = DecodeServiceEvent(
-                kind: .failed, generationID: generationID, error: "\(error)",
+                kind: .failed, generationID: generationID,
+                loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
+                error: "\(error)",
+                conversationLogicalStateBytes: conversationLogicalStateBytes(),
+                expertCacheBytes: expertCacheBytes(),
                 conversationEpoch: conversationEpoch)
             state.terminalCommitted = true
         }
@@ -192,9 +216,12 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                terminal == nil, !done {
                 let snapshot = DecodeServiceEvent(
                     kind: .memory, generationID: generationID,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes(),
+                    conversationLogicalStateBytes: conversationLogicalStateBytes(),
+                    expertCacheBytes: expertCacheBytes(),
                     conversationEpoch: conversationEpoch)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
                 continue
@@ -202,11 +229,14 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             if let prefill, let prefillSequence {
                 let snapshot = DecodeServiceEvent(
                     kind: .prefill, generationID: generationID,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     sequence: prefillSequence,
                     prefillDone: prefill.done, prefillTotal: prefill.total,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes(),
+                    conversationLogicalStateBytes: conversationLogicalStateBytes(),
+                    expertCacheBytes: expertCacheBytes(),
                     conversationEpoch: conversationEpoch)
                 try handle.write(contentsOf: DecodeFrameCodec.encode(snapshot))
             }
@@ -215,12 +245,15 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 let count = (token?.index ?? -1) + 1
                 let snapshot = DecodeServiceEvent(
                     kind: .snapshot, generationID: generationID,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     sequence: tokenSequence ?? 0, textDelta: text, tokenCount: count,
                     decodeSeconds: elapsed,
                     tokensPerSecond: elapsed > 0 ? Double(count) / elapsed : 0,
                     currentMemoryBytes: memorySampler.sample(),
                     peakMemoryBytes: memorySampler.peakBytes,
                     visionTowerMappedBytes: towerBytes(),
+                    conversationLogicalStateBytes: conversationLogicalStateBytes(),
+                    expertCacheBytes: expertCacheBytes(),
                     conversationEpoch: conversationEpoch,
                     structuredProgress: token?.structuredProgress,
                     thinkingPreview: token?.thinkingPreview,
@@ -231,6 +264,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                 let event = DecodeServiceEvent(
                     kind: .toolCall,
                     generationID: generationID,
+                    loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
                     conversationEpoch: conversationEpoch,
                     toolCall: DecodeToolCall(
                         id: call.id,
@@ -266,7 +300,10 @@ final class DecodeServiceOutbox: @unchecked Sendable {
         }
         try autoreleasepool {
             let encodeStart = DispatchTime.now().uptimeNanoseconds
-            var event = DecodeServiceEvent(kind: .measurement, generationID: generationID)
+            var event = DecodeServiceEvent(
+                kind: .measurement, generationID: generationID,
+                loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
+                conversationEpoch: conversationEpoch)
             event.measurementCaptureID = measurementRequest.stepID
             event.measurementBatchJSON = json
             event.measurementContainsFooter = containsFooter ? true : nil
@@ -295,7 +332,10 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             "app_queue_byte_limit": UInt64(DecodeRuntimeMeasurementLimits.maximumQueuedBytes),
         ]
         let data = try JSONEncoder().encode(totals)
-        var event = DecodeServiceEvent(kind: .measurement, generationID: generationID)
+        var event = DecodeServiceEvent(
+            kind: .measurement, generationID: generationID,
+            loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
+            conversationEpoch: conversationEpoch)
         event.measurementCaptureID = measurementRequest.stepID
         event.measurementBatchJSON = String(decoding: data, as: UTF8.self)
         event.measurementFinal = true
@@ -307,6 +347,7 @@ final class DecodeServiceOutbox: @unchecked Sendable {
                           error: String? = nil) -> DecodeServiceEvent {
         DecodeServiceEvent(
             kind: kind, generationID: generationID,
+            loadedFamily: loadedFamily, loadID: loadID, modelIdentity: modelIdentity, sourceIdentity: sourceIdentity,
             tokenCount: diagnostics?.generatedTokens ?? 0,
             promptTokenCount: diagnostics?.promptTokenCount,
             computedPrefillTokens: diagnostics?.computedPrefillTokens,
@@ -319,6 +360,9 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             currentMemoryBytes: memorySampler.sample(),
             peakMemoryBytes: memorySampler.peakBytes,
             visionTowerMappedBytes: diagnostics?.visionTowerMappedBytes,
+            conversationLogicalStateBytes: diagnostics?.conversationLogicalStateBytes
+                ?? conversationLogicalStateBytes(),
+            expertCacheBytes: diagnostics?.expertCacheBytes ?? expertCacheBytes(),
             cachedPromptTokens: diagnostics?.cachedPromptTokens,
             conversationTokenCount: conversationTokens(),
             conversationEpoch: conversationEpoch,
@@ -350,6 +394,11 @@ final class DecodeServiceOutbox: @unchecked Sendable {
             rdadviseCallsPerToken: value.rdadviseCallsPerToken,
             rdadviseMegabytesPerToken: value.rdadviseMegabytesPerToken,
             rdadviseSkippedPerToken: value.rdadviseSkippedPerToken,
-            rdadviseFailures: value.rdadviseFailures)
+            rdadviseFailures: value.rdadviseFailures,
+            gpuExpertCacheEligibleForwards: value.gpuExpertCacheEligibleForwards,
+            gpuExpertCacheBatches: value.gpuExpertCacheBatches,
+            gpuExpertCacheHitExperts: value.gpuExpertCacheHitExperts,
+            gpuExpertCacheFirstMisses: value.gpuExpertCacheFirstMisses,
+            gpuExpertCacheCPUFallbackLayers: value.gpuExpertCacheCPUFallbackLayers)
     }
 }

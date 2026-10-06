@@ -1,0 +1,144 @@
+{
+  "schema": 1,
+  "runPath": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/baseline-memory-probe-20261002/run-20261002T192037.312697Z-2c4d23ceb7624e69b4d5bcfddf4da3d4",
+  "exit": 0,
+  "validEvidence": true,
+  "completeCorrectnessResult": false,
+  "speedClaim": false,
+  "errors": [],
+  "limitations": [
+    "The last marker does not prove the active phase at stop.",
+    "Peaks are sampled values. Missing counters remain missing.",
+    "Metal allocated size, process footprint, and system VM are different measures.",
+    "residencyRequestAfter means the call returned. It does not prove physical residency.",
+    "System changes cannot prove which process caused them.",
+    "Decode timing is exploratory. Request timing excludes model load."
+  ],
+  "runReceiptSHA256": "81d0d5d5fd10cbfe09f8d5a26659bc2f366380975235f5f0d38aaceb0aa0d136",
+  "memory": {
+    "phaseRecordCount": 47,
+    "lastDurablePhase": {
+      "allocatedCacheBytes": 4026531840,
+      "cachedLayerCount": 40,
+      "currentAllocatedSizeBytes": 9330065408,
+      "layer": null,
+      "phase": "prefillDone",
+      "pid": 81987,
+      "requestID": "8C783D56-FE53-4687-AAD2-EC2CBA167C0D",
+      "residencyAllocatedSizeBytes": 4026531840,
+      "residencyAllocationCount": 1280,
+      "residencyRegisteredLayers": 40,
+      "residencyRequested": true,
+      "schema": 1,
+      "type": "memoryPhase",
+      "uptimeNanoseconds": 2120342956354041
+    },
+    "stopUptimeNanoseconds": 2120349181639000,
+    "peakMetalAllocatedSizeAtMarkersBytes": 9359163392,
+    "processSampleCount": 87,
+    "processCounters": {
+      "ri_phys_footprint": {
+        "first": 81992,
+        "last": 0,
+        "peakSampled": 9210404208,
+        "change": -81992,
+        "firstUptimeNanoseconds": 2120177204033583,
+        "lastUptimeNanoseconds": 2120349209813625
+      },
+      "ri_lifetime_max_phys_footprint": {
+        "first": 98376,
+        "last": 9212255600,
+        "peakSampled": 9212255600,
+        "change": 9212157224,
+        "firstUptimeNanoseconds": 2120177204033583,
+        "lastUptimeNanoseconds": 2120349209813625
+      },
+      "ri_wired_size": {
+        "first": 0,
+        "last": 0,
+        "peakSampled": 0,
+        "change": 0,
+        "firstUptimeNanoseconds": 2120177204033583,
+        "lastUptimeNanoseconds": 2120349209813625
+      },
+      "ri_resident_size": {
+        "first": 32768,
+        "last": 3153625088,
+        "peakSampled": 3153625088,
+        "change": 3153592320,
+        "firstUptimeNanoseconds": 2120177204033583,
+        "lastUptimeNanoseconds": 2120349209813625
+      },
+      "ri_diskio_bytesread": {
+        "first": 0,
+        "last": 71216799744,
+        "peakSampled": 71216799744,
+        "change": 71216799744,
+        "firstUptimeNanoseconds": 2120177204033583,
+        "lastUptimeNanoseconds": 2120349209813625
+      }
+    },
+    "systemSampleCount": 87,
+    "systemVMChanges": {
+      "Pages wired down": {
+        "first": 446475,
+        "last": 882117,
+        "change": 435642,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      },
+      "Pages occupied by compressor": {
+        "first": 114527,
+        "last": 497738,
+        "change": 383211,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      },
+      "Pages stored in compressor": {
+        "first": 2605423,
+        "last": 3360050,
+        "change": 754627,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      },
+      "Compressions": {
+        "first": 5629958485,
+        "last": 5635883554,
+        "change": 5925069,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      },
+      "Decompressions": {
+        "first": 5073970773,
+        "last": 5078848676,
+        "change": 4877903,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      },
+      "Swapins": {
+        "first": 29758108,
+        "last": 29771163,
+        "change": 13055,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      },
+      "Swapouts": {
+        "first": 49567306,
+        "last": 49665394,
+        "change": 98088,
+        "firstUptimeNanoseconds": 2120177204216916,
+        "lastUptimeNanoseconds": 2120349210125000
+      }
+    },
+    "systemPageSizeBytes": 16384,
+    "missingCounters": [],
+    "errors": [],
+    "phaseRecordErrors": [],
+    "notes": [],
+    "stopReason": "memory below 30% or unavailable",
+    "launchFreePercent": 72,
+    "minimumFreePercent": 28,
+    "childExit": -15,
+    "wallSeconds": 172.29957070900127
+  }
+}

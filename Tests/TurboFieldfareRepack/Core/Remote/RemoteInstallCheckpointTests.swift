@@ -24,6 +24,35 @@ struct RemoteInstallCheckpointTests {
             planFingerprint: checkpoint.planFingerprint))
     }
 
+    @Test func transformedProgressEncodingIsBoundedByCounts() throws {
+        let root = tmpDirForRemote("checkpoint-progress")
+        defer { cleanUpRemote([root]) }
+        try Posix.mkdirP(root)
+        let small = transformedCheckpoint(completedUnits: 1)
+        let large = transformedCheckpoint(completedUnits: 100_000_000)
+        let smallData = try JSONEncoder().encode(small)
+        let largeData = try JSONEncoder().encode(large)
+        #expect(abs(smallData.count - largeData.count) <= 16)
+        #expect(largeData.count < 1024)
+    }
+
+    @Test func transformedBindingWithoutCurrentProgressIsRefused() throws {
+        let root = tmpDirForRemote("checkpoint-missing-progress")
+        let path = (root as NSString).appendingPathComponent("resume.json")
+        defer { cleanUpRemote([root]) }
+        try Posix.mkdirP(root)
+        let legacy = RemoteInstallCheckpoint(
+            repoID: "owner/model", requestedRevision: "main",
+            resolvedCommit: String(repeating: "a", count: 40),
+            sourceIndexSHA256: String(repeating: "b", count: 64),
+            planFingerprint: String(repeating: "c", count: 64), totalSourceBytes: 10,
+            transformBinding: transformedBinding())
+        try JSONEncoder().encode(legacy).write(to: URL(fileURLWithPath: path))
+        #expect(throws: RepackError.self) {
+            _ = try RemoteInstallCheckpoint.load(from: path)
+        }
+    }
+
     @Test func oversizedCheckpointIsRejectedBeforeDecode() throws {
         let root = tmpDirForRemote("checkpoint-large")
         let path = (root as NSString).appendingPathComponent("resume.json")
@@ -127,6 +156,28 @@ struct RemoteInstallCheckpointTests {
             copies: [copy],
             partialDirectory: root).isEmpty)
     }
+}
+
+private func transformedBinding() -> RemoteTransformBinding {
+    RemoteTransformBinding(
+        sourcePayloadSHA256: String(repeating: "a", count: 64), converterVersion: "test",
+        quantizationPolicySHA256: String(repeating: "b", count: 64),
+        planFingerprint: String(repeating: "c", count: 64),
+        destinationIdentity: String(repeating: "d", count: 64), destinationBytes: 8)
+}
+
+private func transformedCheckpoint(completedUnits: UInt64) -> RemoteInstallCheckpoint {
+    RemoteInstallCheckpoint(
+        repoID: "owner/model", requestedRevision: "main",
+        resolvedCommit: String(repeating: "a", count: 40),
+        sourceIndexSHA256: String(repeating: "b", count: 64),
+        planFingerprint: String(repeating: "c", count: 64), totalSourceBytes: 10,
+        transformBinding: transformedBinding(),
+        transformProgress: .init(
+            requestIndex: 0, requestID: String(repeating: "e", count: 64),
+            completedUnitCount: completedUnits, totalCompletedUnitCount: completedUnits,
+            sourceChainSHA256: String(repeating: "f", count: 64),
+            destinationChainSHA256: String(repeating: "0", count: 64)))
 }
 
 private func sampleCheckpoint() -> RemoteInstallCheckpoint {

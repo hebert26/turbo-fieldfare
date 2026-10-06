@@ -1077,7 +1077,7 @@ public final class InstructionTranscriptDocumentController {
                         string: "\nVisionCapture response to request #\(number - 1) · display excerpt\n",
                         attributes: activityLabelAttributes(color: .secondaryLabelColor)))
                     document.append(NSAttributedString(
-                        string: "Actual MCP result received by the host. Embedded content and binary fields are omitted where marked. This is not the sanitized result sent to Gemma.\n",
+                        string: "Actual MCP result received by the host. Embedded content and binary fields are omitted where marked. This is not the sanitized result sent to the model.\n",
                         attributes: activityBodyAttributes()))
                     document.append(activityCodeCard(body: response, cardStyle: .response))
                 }
@@ -1109,7 +1109,7 @@ public final class InstructionTranscriptDocumentController {
                 document.append(NSAttributedString(string: "\n\n"))
             case .modelInput(let attempt, let isFormatCorrection):
                 document.append(NSAttributedString(
-                    string: "Sent to Gemma · input attempt #\(attempt)\(isFormatCorrection ? " · format correction" : "")\n",
+                    string: "Sent to model · input attempt #\(attempt)\(isFormatCorrection ? " · format correction" : "")\n",
                     attributes: activityLabelAttributes(color: modelInputAccentColor)))
                 document.append(NSAttributedString(
                     string: "Text added to the retained model context is below. Developer and tool configuration appear only when this input adds them.\nTool results are host-sanitized; raw MCP responses have their own cards.\nImages are supplied separately; references are listed below.\nJSON indentation is display-only. Original request text and values are unchanged.\n",
@@ -1119,7 +1119,7 @@ public final class InstructionTranscriptDocumentController {
                 document.append(NSAttributedString(string: "\n\n"))
             case .modelResult(let callID, let toolName, let imageCount):
                 document.append(NSAttributedString(
-                    string: "Host → Gemma · tool result\n",
+                    string: "Host → model · tool result\n",
                     attributes: activityLabelAttributes(color: TurboFieldfareMacTheme.accentNSColor)))
                 document.append(NSAttributedString(
                     string: "\(toolName) · call \(callID)\nSanitized result · small JSON formatted for display. Original model input is unchanged. This result may combine several MCP responses.\n",
@@ -1138,7 +1138,7 @@ public final class InstructionTranscriptDocumentController {
                     attributes: activityLabelAttributes(color: status.color)))
             case .localProposal:
                 document.append(NSAttributedString(
-                    string: "Not sent · Gemma proposal (not an MCP request)\n",
+                    string: "Not sent · model proposal (not an MCP request)\n",
                     attributes: activityLabelAttributes(color: .systemOrange)))
                 document.append(NSAttributedString(
                     string: activity.body,

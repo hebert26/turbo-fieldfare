@@ -32,7 +32,8 @@ final class FusedLayerTail {
                        postFFNWeightOffset: Int = 0,
                        d: UInt32,
                        eps: Float,
-                       layerScalar: Float) {
+                       layerScalar: Float,
+                       conditional: DecodeDispatch? = nil) {
         precondition(d <= 4096,
                      "D > 4096 exceeds the fused-tail threadgroup scratch (kFusedMaxD)")
         guard let enc = cb.makeComputeCommandEncoder() else { return }
@@ -50,8 +51,9 @@ final class FusedLayerTail {
         enc.setBytes(&scaleVar, length: MemoryLayout<Float>.size,  index: 7)
 
         let threads = min(Int(pso.maxTotalThreadsPerThreadgroup), 256)
-        enc.dispatchThreads(MTLSize(width: threads, height: 1, depth: 1),
-                            threadsPerThreadgroup: MTLSize(width: threads, height: 1, depth: 1))
+        enc.dispatchDecode(MTLSize(width: 1, height: 1, depth: 1),
+                           threads: MTLSize(width: threads, height: 1, depth: 1),
+                           conditional: conditional)
         enc.endEncoding()
     }
 }

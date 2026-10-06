@@ -1,0 +1,55 @@
+{
+  "status": "STAGED_FROZEN_NOT_BUILT_NOT_RUN",
+  "baselineCommit": "3fe330585beb148cb1954419a0c41cb70ebbd672",
+  "previousRejectedProbe": "exact-block-probe-20261002",
+  "ownership": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-probe-20261002",
+  "deltaPathsVsRejected": [
+    "Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockTypes.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenExactBlockProbe.swift",
+    "Sources/TurboFieldfare/Runtime/Qwen/QwenOfficialSourceRunner.swift"
+  ],
+  "hashes": "frozen-hashes.json",
+  "forwardSHA256": "2f7eb28c0276ddd022ce3fff8226671df462f304ae77c5494180d8fc175a1a26",
+  "inverseSHA256": "d5265d43534fcb54a15ab2d2e5eb33408fc11fafe7a5140ae063056fe20f2c0b",
+  "deltaSHA256": "a5ce52c18e5ba95e3fd3c494910ee0ca3f7de3341325d74201ffcd205995a337",
+  "deltaInverseSHA256": "e2c6e1c7e0782c03f02952a7066ce9aa670c0ea009d5e8be315ef23a3854562b",
+  "schedule": [
+    "Only exactBlock known-none4token16slot path changes; normal grouped prefill keeps prior planner and shared submission.",
+    "Per layer fixed0/1 pair then2/3; each<=16union and16original rank contributions. Pair B map after A awaited complete/pin release.",
+    "Work expertID then tokenIndex order unchanged, preserving each token ascending expert additions and original route-rank weights.",
+    "Only A clears all4output rows; B guarded initializeOutput=false.",
+    "All routed contributions finish, then shared token0 and1 (or2and3) through unchanged single-row encoder. No shared batching/new arithmetic."
+  ],
+  "buffers": [
+    "4tiny private tracked row buffers per pair: hidden and output for each token;4*hiddenSize*4bytes=32768bytes atwidth2048.",
+    "GPU blit each normalized input+finished routed row into distinct offset0 rows, unchanged shared encoder, GPU blit combined row back. End each encoder before next. Shared scratch reused sequentially with tracked hazard ordering; reject explicit untracked caller resources.",
+    "All bounds/device/alias/tracking/shape checks and row allocations before authentication and any encoder creation.",
+    "Rows appended to retainedBuffers before lease.submit; retained through existing success/partial-encoding-error completion settlement. Original lease pins remain live until command settles. No CPU routed/shared readback before both pair commands complete."
+  ],
+  "sourceChecks": [
+    "Per pair both tokens fresh full-source premap checks; original physical cachemap hit/miss/read/publication checks unchanged.",
+    "V2 actual submitted lease/work admission: physical map covers firstuse, each reuse gets protected gate/down range checks with original failure invalidation; each touchedtoken independent fresh preGPUfullsourcecheck.",
+    "No await/callback/payloadread between final admissions and lease-owned encoding/commit.",
+    "Fused sharedwork is inside same admitted command, matching productionserial semantics; no later shared submission or shared-onlyvalidation.",
+    "Mandatory numerical gates:80maps/80pairMoEcommands,160premap+160preGPU,4token+4finalchecks,0separateSharedcommands/0sharedchecks;mappedexpertfirstuses+reusechecks=1280logicalvisits."
+  ],
+  "protocol": "Existing4rawrow/route/statebit comparisons, production sampler boundary, immutable Sendable arm snapshots, forced0/1/3/4replay, causal frozen first+adjacent block, flags LFU slots16 and opposite-order timings unchanged except counters. Cost gate still rejects before actual-rejection block; EOS behavior not exercised. No speedclaim.",
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-probe-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-probe-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-probe-20261002/run.py",
+      "/absolute/path/to/existing/official/registration.json"
+    ]
+  ],
+  "memory": "Same12GiBmodel budget includescache + existingrunner/state; newrows peak32KiB perpair. One model/runner,16slots,>=30%free internal/external guards; no copiedweights/buildoutputs.",
+  "verification": "4forward/inverse staticpatch checks passed. Scripts unchanged and ASTsyntax passed. No compiler/test/model run. Live source unchanged; rejected evidence not written."
+}

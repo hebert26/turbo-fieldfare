@@ -3,11 +3,122 @@ import Testing
 @testable import TurboFieldfareAppCore
 
 @Suite struct MacAppSettingsTests {
-    @Test func settingsFileLivesBesideModelDirectory() {
+    @Test func settingsFileLivesBesideModelDirectory() throws {
         let model = URL(fileURLWithPath: "/tmp/TurboFieldfare/gemma4.gturbo",
                         isDirectory: true)
-        #expect(MacAppSettingsFileStore.fileURL(forModelDirectory: model).path
+        #expect(try MacAppSettingsFileStore.fileURL(
+            forModelDirectory: model, environment: [:]).path
             == "/tmp/TurboFieldfare/mac-app-settings.json")
+    }
+
+    @Test func explicitSettingsPathIsStableAcrossModelDirectories() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let firstModel = root.appendingPathComponent("first/model.gturbo", isDirectory: true)
+        let secondModel = root.appendingPathComponent("second/model.gturbo", isDirectory: true)
+        let explicit = root.appendingPathComponent("settings/private.json")
+        let environment = [MacAppSettingsFileStore.settingsPathEnvironmentKey: explicit.path]
+
+        #expect(try MacAppSettingsFileStore.fileURL(
+            forModelDirectory: firstModel, environment: environment) == explicit.standardizedFileURL)
+        #expect(try MacAppSettingsFileStore.fileURL(
+            forModelDirectory: secondModel, environment: environment) == explicit.standardizedFileURL)
+        #expect(try MacAppSettingsFileStore.fileURL(
+            forModelDirectory: firstModel, environment: [:])
+            == firstModel.standardizedFileURL.deletingLastPathComponent()
+                .appendingPathComponent(MacAppSettings.fileName, isDirectory: false))
+    }
+
+    @Test(arguments: ["", "relative/settings.json", "/tmp/settings/", "/tmp/settings\0.json"])
+    func explicitSettingsPathRejectsMalformedPaths(_ path: String) {
+        expectInvalidSettingsOverride([
+            MacAppSettingsFileStore.settingsPathEnvironmentKey: path,
+        ])
+    }
+
+    @Test func explicitSettingsPathRejectsDirectoriesAndSymbolicLinks() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("settings-directory", isDirectory: true)
+        let target = root.appendingPathComponent("target.json")
+        let symbolicLink = root.appendingPathComponent("settings-link.json")
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let sharedFile = try defaultSettingsFileURL(forModelDirectory: model)
+        let sharedBytes = Data("shared owner data".utf8)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try Data("target".utf8).write(to: target)
+        try sharedBytes.write(to: sharedFile)
+        try FileManager.default.createSymbolicLink(at: symbolicLink, withDestinationURL: target)
+
+        for invalidPath in [directory.path, symbolicLink.path] {
+            let environment = [
+                MacAppSettingsFileStore.settingsPathEnvironmentKey: invalidPath,
+            ]
+            expectInvalidSettingsOverride(environment)
+            expectLaunchPreflightFailure(environment)
+            #expect(try Data(contentsOf: sharedFile) == sharedBytes)
+        }
+    }
+
+    @Test func launchPreflightWithoutOverrideLeavesSharedSettingsUntouched() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let sharedFile = try defaultSettingsFileURL(forModelDirectory: model)
+        try Data("existing shared settings".utf8).write(to: sharedFile)
+        let original = try Data(contentsOf: sharedFile)
+
+        try AppSettingsLaunchConfiguration.validate(environment: [:])
+
+        #expect(try Data(contentsOf: sharedFile) == original)
+    }
+
+    @Test func launchPreflightCreatesOnlyTheExplicitSettingsFile() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let sharedFile = try defaultSettingsFileURL(forModelDirectory: model)
+        try FileManager.default.createDirectory(
+            at: sharedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let sharedBytes = Data("shared owner data".utf8)
+        try sharedBytes.write(to: sharedFile)
+        let explicit = root.appendingPathComponent("isolated/settings.json")
+        let environment = [MacAppSettingsFileStore.settingsPathEnvironmentKey: explicit.path]
+
+        try AppSettingsLaunchConfiguration.validate(environment: environment)
+
+        #expect(FileManager.default.fileExists(atPath: explicit.path))
+        #expect(try JSONDecoder().decode(
+            MacAppSettings.self, from: Data(contentsOf: explicit)) == MacAppSettings())
+        #expect(try Data(contentsOf: sharedFile) == sharedBytes)
+    }
+
+    @Test func explicitSettingsFailuresPreserveExplicitAndSharedFiles() throws {
+        let root = try makeTemporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
+        let sharedFile = try defaultSettingsFileURL(forModelDirectory: model)
+        try FileManager.default.createDirectory(
+            at: sharedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let sharedBytes = Data("shared owner data".utf8)
+        try sharedBytes.write(to: sharedFile)
+        let cases: [(String, Data)] = [
+            ("corrupt", Data("not json".utf8)),
+            ("future", Data("{\"version\": \(MacAppSettings.currentVersion + 1), \"future\": true}".utf8)),
+        ]
+
+        for (name, explicitBytes) in cases {
+            let explicit = root.appendingPathComponent("\(name)/settings.json")
+            try FileManager.default.createDirectory(
+                at: explicit.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try explicitBytes.write(to: explicit)
+            let environment = [MacAppSettingsFileStore.settingsPathEnvironmentKey: explicit.path]
+
+            expectLaunchPreflightFailure(environment)
+
+            #expect(try Data(contentsOf: explicit) == explicitBytes)
+            #expect(try Data(contentsOf: sharedFile) == sharedBytes)
+        }
     }
 
     @Test func missingFileCreatesReadableDefaults() throws {
@@ -248,7 +359,7 @@ import Testing
 
     /// Phase D item 15. The newer-version branch says "Every key decodes with
     /// `decodeIfPresent`, so it reads cleanly", and that is false: nine keys use
-    /// a hard `decode`. So a version-3 file whose schema moved any of those nine
+    /// a hard `decode`. So a future-version file whose schema moved any of those nine
     /// throws inside `JSONDecoder().decode` *before* the version guard is
     /// reached, and lands in the `catch` that deletes the file - destroying a
     /// newer build's settings, which is the exact outcome that branch exists to
@@ -259,11 +370,11 @@ import Testing
         let modelDirectory = root.appendingPathComponent("gemma4.gturbo", isDirectory: true)
         let fileURL = MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory)
 
-        // A plausible version 3: `topP` became `topProbability`. Everything else
+        // A plausible future version: `topP` became `topProbability`. Everything else
         // this build knows is still present and still valid.
         let newer = """
         {
-          "version": 3,
+          "version": \(MacAppSettings.currentVersion + 1),
           "contextTokens": 8192,
           "expertCacheSlots": 16,
           "temperature": 0.2,
@@ -311,6 +422,32 @@ import Testing
             withIntermediateDirectories: true)
         return root
     }
+
+    private func defaultSettingsFileURL(forModelDirectory modelDirectory: URL) throws -> URL {
+        try MacAppSettingsFileStore.fileURL(forModelDirectory: modelDirectory, environment: [:])
+    }
+
+    private func expectInvalidSettingsOverride(
+        _ environment: [String: String],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        do {
+            _ = try MacAppSettingsFileStore.explicitFileURL(environment: environment)
+            Issue.record("invalid settings override was accepted", sourceLocation: sourceLocation)
+        } catch {}
+    }
+
+    private func expectLaunchPreflightFailure(
+        _ environment: [String: String],
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) {
+        do {
+            try AppSettingsLaunchConfiguration.validate(environment: environment)
+            Issue.record("invalid explicit settings file passed launch preflight",
+                         sourceLocation: sourceLocation)
+        } catch {}
+    }
+
     @Test func visionResidencyRoundTrips() throws {
         let initial = MacAppSettings(visionResidencyPolicy: .keepReady)
         let decoded = try JSONDecoder().decode(

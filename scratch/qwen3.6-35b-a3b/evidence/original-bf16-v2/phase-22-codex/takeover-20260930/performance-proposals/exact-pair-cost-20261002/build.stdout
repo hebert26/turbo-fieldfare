@@ -1,0 +1,136 @@
+Building for production...
+[0/41] Copying t5_tokenizer_config.json
+[0/41] Copying gpt2_tokenizer_config.json
+[2/41] Copying PrivacyInfo.xcprivacy
+[3/41] Copying libjpeg-macos.a
+[4/41] Write sources
+[6/41] Compiling CNIOWindows shim.c
+[7/41] Compiling CNIOWindows WSAStartup.c
+[8/41] Copying Metal
+[9/41] Write sources
+[10/41] Write swift-version--58304C5D6DBC2206.txt
+[11/41] Write sources
+[12/41] Compiling CNIOWASI CNIOWASI.c
+[13/41] Compiling CNIOFreeBSD shim.c
+[14/41] Compiling CNIOLinux shim.c
+[15/41] Compiling CNIOOpenBSD shim.c
+[15/41] Compiling CNIOLinux liburing_shims.c
+[16/41] Write sources
+[32/45] Compiling _AtomicsShims.c
+[33/47] Compiling TurboFieldfareJPEGBridge TurboFieldfareJPEG.c
+[34/47] Compiling CNIODarwin shim.c
+[35/47] Compiling c-nioatomics.c
+[37/47] Compiling _NIOBase64 Base64.swift
+[37/47] Compiling TurboFieldfareSourceTopK TurboFieldfareSourceTopK.cpp
+[38/47] Compiling c-atomics.c
+[40/48] Compiling InternalCollectionsUtilities Debugging.swift
+[41/50] Compiling ContainersPreview OutputSpan+Extras.swift
+[42/50] Compiling _NIODataStructures Heap.swift
+[43/51] Compiling NIOConcurrencyHelpers NIOAtomic.swift
+[44/51] Compiling Atomics OptionalRawRepresentable.swift
+[45/51] Compiling Crypto AES-GCM.swift
+[46/51] Compiling OrderedCollections _HashTable+Bucket.swift
+[47/52] Compiling DequeModule Deque+Codable.swift
+[47/53] Compiling yyjson.c
+[49/53] Compiling TurboFieldfareFormat GTurboFormatV1.swift
+[50/54] Compiling NIOCore AddressedEnvelope.swift
+[51/55] Compiling EventSource AsyncEventsSequence.swift
+[52/56] Compiling Jinja AST.swift
+[53/56] Compiling TurboFieldfareOfficialQwenSource OfficialIdentity.swift
+[54/56] Compiling HuggingFace AccessRequest.swift
+[55/57] Compiling Hub BinaryDistinct.swift
+[56/58] Compiling Tokenizers BPETokenizer.swift
+[57/59] Compiling TurboFieldfare MetalContext.swift
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Kernels/Qwen/QwenFullAttention.swift:502:17: warning: 'cblas_sgemm' was deprecated in macOS 13.3: An updated CBLAS interface supporting ILP64 is available.  Please compile with -DACCELERATE_NEW_LAPACK to access the new headers and -DACCELERATE_LAPACK_ILP64 for ILP64 support. [#DeprecatedDeclaration]
+500 |                     }
+501 |                 }
+502 |                 cblas_sgemm(
+    |                 `- warning: 'cblas_sgemm' was deprecated in macOS 13.3: An updated CBLAS interface supporting ILP64 is available.  Please compile with -DACCELERATE_NEW_LAPACK to access the new headers and -DACCELERATE_LAPACK_ILP64 for ILP64 support. [#DeprecatedDeclaration]
+503 |                     CblasRowMajor, CblasNoTrans, CblasTrans,
+504 |                     1, sourceKeyCount, sourceDimension, 1,
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift:843:73: warning: capture of 'contributions' with non-Sendable type 'any MTLBuffer' in a '@Sendable' closure [#SendableClosureCaptures]
+ 841 |                 // Explicit completion ownership also covers partial-encoding
+ 842 |                 // failure: lease.submit commits that work and retains its pins.
+ 843 |                 command.addCompletedHandler { _ in withExtendedLifetime(contributions) {} }
+     |                                                                         `- warning: capture of 'contributions' with non-Sendable type 'any MTLBuffer' in a '@Sendable' closure [#SendableClosureCaptures]
+ 844 |                 try encodeBF16ProjectionBatch(command: command, hidden: hidden,
+ 845 |                     lease: lease, routingWeights: routingWeights, scratch: scratch,
+
+/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk/System/Library/Frameworks/Metal.framework/Headers/MTLBuffer.h:34:11: note: protocol 'MTLBuffer' does not conform to the 'Sendable' protocol
+ 32 |  */
+ 33 | API_AVAILABLE(macos(10.11), ios(8.0))
+ 34 | @protocol MTLBuffer <MTLResource>
+    |           `- note: protocol 'MTLBuffer' does not conform to the 'Sendable' protocol
+ 35 | 
+ 36 | /*!
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Kernels/Qwen/QwenMoE.swift:2:1: warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+   1 | import Foundation
+   2 | import Metal
+     | `- warning: add '@preconcurrency' to treat 'Sendable'-related errors from module 'Metal' as warnings
+   3 | 
+   4 | enum QwenMoEError: Error, Equatable, Sendable {
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Runtime/Inference/QwenExactTokenCapture.swift:15:13: warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+ 13 |         let stopStrings: [String]
+ 14 |         let extraStopTokens: [Int32]
+ 15 |         let logitTransform = "raw"
+    |             |- warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+    |             |- note: set the initial value via the initializer or explicitly define a CodingKeys enum including a 'logitTransform' case to silence this warning
+    |             `- note: make the property mutable instead
+ 16 | 
+ 17 |         init(_ config: GenerationConfig) {
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Runtime/Inference/QwenExactTokenCapture.swift:30:13: warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+ 28 | 
+ 29 |     private struct Record: Codable {
+ 30 |         let schemaVersion = 1
+    |             |- warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+    |             |- note: set the initial value via the initializer or explicitly define a CodingKeys enum including a 'schemaVersion' case to silence this warning
+    |             `- note: make the property mutable instead
+ 31 |         let requestID = UUID().uuidString
+ 32 |         let startedAt = Date().timeIntervalSince1970
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Runtime/Inference/QwenExactTokenCapture.swift:31:13: warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+ 29 |     private struct Record: Codable {
+ 30 |         let schemaVersion = 1
+ 31 |         let requestID = UUID().uuidString
+    |             |- warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+    |             |- note: set the initial value via the initializer or explicitly define a CodingKeys enum including a 'requestID' case to silence this warning
+    |             `- note: make the property mutable instead
+ 32 |         let startedAt = Date().timeIntervalSince1970
+ 33 |         var finishedAt: Double?
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Runtime/Inference/QwenExactTokenCapture.swift:32:13: warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+ 30 |         let schemaVersion = 1
+ 31 |         let requestID = UUID().uuidString
+ 32 |         let startedAt = Date().timeIntervalSince1970
+    |             |- warning: immutable property will not be decoded because it is declared with an initial value which cannot be overwritten
+    |             |- note: set the initial value via the initializer or explicitly define a CodingKeys enum including a 'startedAt' case to silence this warning
+    |             `- note: make the property mutable instead
+ 33 |         var finishedAt: Double?
+ 34 |         var terminal = "incomplete"
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Runtime/Qwen/Vision/QwenJPEGDecoder.swift:62:27: warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+ 60 |         }
+ 61 |         guard status == 0 else {
+ 62 |             let message = String(cString: error)
+    |                           `- warning: 'init(cString:)' is deprecated: Use String(decoding: array, as: UTF8.self) instead, after truncating the null termination. [#DeprecatedDeclaration]
+ 63 |             throw VisionImageError.invalidSource("Qwen JPEG decode failed: \(message)")
+ 64 |         }
+
+/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-pair-cost-20261002/overlay/Sources/TurboFieldfare/Runtime/Qwen/Vision/QwenSourceVisionLinear.swift:60:9: warning: 'cblas_sgemm' was deprecated in macOS 13.3: An updated CBLAS interface supporting ILP64 is available.  Please compile with -DACCELERATE_NEW_LAPACK to access the new headers and -DACCELERATE_LAPACK_ILP64 for ILP64 support. [#DeprecatedDeclaration]
+58 |         // Row-major Y[M,N] is column-major Y^T[N,M]. W is stored [N,K],
+59 |         // so transpose its column-major [K,N] view, preserving Torch's call.
+60 |         cblas_sgemm(CblasColMajor, CblasTrans, CblasNoTrans,
+   |         `- warning: 'cblas_sgemm' was deprecated in macOS 13.3: An updated CBLAS interface supporting ILP64 is available.  Please compile with -DACCELERATE_NEW_LAPACK to access the new headers and -DACCELERATE_LAPACK_ILP64 for ILP64 support. [#DeprecatedDeclaration]
+61 |                     Int32(outputWidth), Int32(rows), Int32(inputWidth), 1,
+62 |                     converted, Int32(inputWidth),
+
+[#DeprecatedDeclaration]: <https://docs.swift.org/compiler/documentation/diagnostics/deprecated-declaration>
+[#SendableClosureCaptures]: <https://docs.swift.org/compiler/documentation/diagnostics/sendable-closure-captures>
+[58/60] Compiling TurboFieldfareExactBlockProbe Command.swift
+[58/60] Write Objects.LinkFileList
+[59/60] Linking TurboFieldfareExactBlockProbe
+Build of product 'TurboFieldfareExactBlockProbe' complete! (114.41s)

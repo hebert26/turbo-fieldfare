@@ -48,6 +48,18 @@ public enum MultimodalPromptRendererError: Error, Equatable {
     case placeholderMismatch
 }
 
+enum MultimodalTokenLayout: Sendable, Equatable {
+    case gemma
+    case qwen(imageTokenID: Int32, visionStartTokenID: Int32, visionEndTokenID: Int32)
+
+    static func qwen(_ config: QwenArchConfig) -> Self {
+        .qwen(
+            imageTokenID: Int32(config.imageTokenID),
+            visionStartTokenID: Int32(config.visionStartTokenID),
+            visionEndTokenID: Int32(config.visionEndTokenID))
+    }
+}
+
 public enum MultimodalPromptRenderer {
     public static let placeholder = "<|image|>"
     public static let imageTokenID = Int32(258_880)
@@ -110,6 +122,69 @@ public enum MultimodalPromptRenderer {
         }
         return try expandingImageTokens(
             templateTokens, features: orderedImages.map(\.1))
+    }
+
+    /// Expands Qwen image-pad markers without borrowing Gemma token IDs or its
+    /// fixed row count. Product-facing Qwen chat routing remains P18/P20; this
+    /// prepared boundary is directly consumable by that routing.
+    static func expandingQwenImageTokens(
+        _ templateTokens: [Int32],
+        features: [QwenVisionFeatures],
+        architecture: QwenArchConfig,
+        config: QwenVisionConfig = .official,
+        limits: QwenVisionResourceLimits = .provisional
+    ) throws -> QwenMultimodalPrefillInput {
+        let image = Int32(architecture.imageTokenID)
+        let placeholders = templateTokens.indices.filter {
+            templateTokens[$0] == image
+        }
+        guard placeholders.count == features.count else {
+            throw MultimodalPromptRendererError.placeholderMismatch
+        }
+        var effective: [Int32] = []
+        var embedding: [Int32] = []
+        var spans: [QwenMultimodalImageSpan] = []
+        var grids: [QwenVisionGrid] = []
+        let rows = features.reduce(0) { $0 + $1.tokenCount }
+        guard rows <= limits.maximumVisibleHistoryRows else {
+            throw QwenVisionError.mergedRowQuotaExceeded(
+                requested: rows, maximum: limits.maximumVisibleHistoryRows)
+        }
+        effective.reserveCapacity(templateTokens.count + rows + features.count)
+        embedding.reserveCapacity(effective.capacity)
+        var featureIndex = 0
+        for token in templateTokens {
+            guard token == image else {
+                effective.append(token)
+                embedding.append(token)
+                continue
+            }
+            let value = features[featureIndex]
+            let start = Int32(architecture.visionStartTokenID)
+            let end = Int32(architecture.visionEndTokenID)
+            effective.append(start)
+            embedding.append(start)
+            let lower = effective.count
+            effective.append(contentsOf: repeatElement(image, count: value.tokenCount))
+            embedding.append(contentsOf: repeatElement(image, count: value.tokenCount))
+            let range = lower..<effective.count
+            spans.append(QwenMultimodalImageSpan(tokenRange: range, features: value))
+            grids.append(value.grid)
+            effective.append(end)
+            embedding.append(end)
+            featureIndex += 1
+        }
+        let positions = try QwenMultimodalPositions.make(
+            tokenCount: effective.count,
+            imageRanges: spans.map(\.tokenRange), grids: grids,
+            maximumRows: limits.maximumVisibleHistoryRows)
+        return try QwenMultimodalPrefillInput(
+            effectiveTokenIDs: effective,
+            embeddingTokenIDs: embedding,
+            imageSpans: spans,
+            positionPlan: positions,
+            config: config,
+            limits: limits)
     }
 
     /// Expands only the supplied native prompt or continuation. Callers retain

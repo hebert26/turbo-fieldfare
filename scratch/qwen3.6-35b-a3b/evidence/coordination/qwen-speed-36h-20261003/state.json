@@ -1,0 +1,21 @@
+{
+  "goal": "Qwen speed plan for the next 36 hours",
+  "plan": "https://chatgpt.com/space/page_401147ecde808191bdbac68ac69f54ea",
+  "startedUTC": "2026-10-03T06:44:03+00:00",
+  "deadlineUTC": "2026-10-04T18:44:03+00:00",
+  "baselineCommit": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "activePoint": 4,
+  "stage": "recover-preserve-and-diagnose-memory",
+  "modelRunStarted": false,
+  "lastPreflightAvailablePercent": 44,
+  "admissionMinimumPercent": 50,
+  "liveMinimumPercent": 30,
+  "roles": {
+    "Astra": "xhigh research",
+    "Fable5.1": "high research existing Zed",
+    "Sol6.1": "code and recovery",
+    "Opus5.5": "xhigh read-only review existing Zed",
+    "Grok4.7": "xhigh investigation existing Zed",
+    "GPT6Luna": "max documentation"
+  }
+}

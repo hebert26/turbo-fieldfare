@@ -1,0 +1,59 @@
+{
+  "status": "FROZEN_STAGED_NO_EXECUTION",
+  "baselineCommit": "2adb70c2251f98af73bc349a58db7a75564ee751",
+  "ownership": "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002",
+  "changedSourceCopies": [
+    "Package.swift",
+    "Sources/TurboFieldfareOfficialQwenSource/OfficialSourceHandle.swift",
+    "Sources/TurboFieldfareOfficialQwenSource/OfficialSourceMetadataCost.swift",
+    "Sources/TurboFieldfareExactMetadataCost/Command.swift"
+  ],
+  "forwardSHA256": "ac62ad054cca0b62a8b354c91f27eaeaf2aa9202e5a2e60f153d189d16d05dfb",
+  "inverseSHA256": "5718cfd97612094a809c3f35bb0572e83688fb151f48b15b88cf9b0b3ced6346",
+  "hashes": "frozen-hashes.json",
+  "apiPath": [
+    "OfficialSourceTrust.verify(at:,policy:.sizeCheckTrustedReceipt) only. Its branch reads bounded registered marker/receipt bytes, validates pinned receipt binding and source stat snapshots. No full verifier or payload hash branch selected.",
+    "OfficialSourceHandle(registrationURL:) holds existing root descriptors and registered marker metadata.",
+    "Actual validateTrustedReceipt(receipt,metadataCost:) method. Fresh source-file opens/stat/close happen unchanged. No shard/tensor read API is called."
+  ],
+  "forbidden": "No model loader, MetalContext, tensor admission, readExactly/preadProtectedRange, source headers, original payload reads/hash, observers, filesystem mutations or validator replacement. Command depends only on official-source module and format dependency.",
+  "callOrdering": "Binding; immutable receipt/digest/name guard; root/list/each sorted file/root; binding; second identical scan; binding. Existing cancellation sites, open flags, fstat then short-circuit fstatat, all predicates, remember conditional and deferred close unchanged. Local wrappers only measure existing calls. Error values/messages forwarded unchanged; no injected errors or error-behavior qualification.",
+  "intervalMap": {
+    "total": "Full validateTrustedReceipt inclusive. Contains all intervals and timer/count overhead.",
+    "binding": "Actual validateBinding calls, including named directory checks, layout listing and marker reads. Three successful calls per validation.",
+    "receiptNames": "Existing immutable marker identity/digest/descriptor work and sorted receipt name/inventory checks. FAST1 uses current init cache.",
+    "root": "Held root stat, fresh named root open/stat/compare/deferred close. Four calls per validation.",
+    "listing": "Actual source entryNames through EOF including its existing cursor setup/cleanup. Two calls per validation. Binding layout listing is only inside binding.",
+    "fileOpen": "Exact receipt-file openat call.2*N per successful validation. No payload bytes read.",
+    "heldStat": "Exact per-file fstat. Nested in fileCheckAndRemember.2*N per successful validation.",
+    "namedStat": "Exact per-file fstatat, short-circuit after successful heldStat. Nested in fileCheckAndRemember.2*N for success.",
+    "fileCheckAndRemember": "Inclusive original stat/type/link/fingerprint/held-vs-named identity guard and conditional remember. Includes heldStat/namedStat and clock overhead; subtract them only for a descriptive residual.2*N for success.",
+    "fileClose": "Existing deferred close after compare/remember or thrown file-check error.2*N for success."
+  },
+  "aggregation": "Do not add child heldStat/namedStat again to inclusive fileCheckAndRemember or add any child to total. Whole-batch wall/user/systemCPU also recorded. Primitive durations are wall only. They are not syscall kernelCPU times.",
+  "schedule": "One receipt and retained handle. Initialization verify/handle wall and whole user/systemCPU recorded. Warm baseline/count-only clockOFF/clockON once each. Then6batches*32 calls in baseline,clockOFF,clockON,clockON,clockOFF,baseline order;192steady+3warm. Baseline nil primitive counts unmeasured; OFF counts all actual sites with clock disabled; ON counts+wall. Checkcounts guard against actual receipt N, never directory entry count.",
+  "controls": "Same unchanged method/body/flags. Nil baseline and count-only OFF separate branch/count overhead from additional monotonic clock overhead. Warm sequential cache observations; no inference/model speed claim or new validator correctness qualification.",
+  "guard": "Local copied full preflight pins2adb plus3fe..2adb no-production-input-change proof, all731app019sourcehashes, installedapp019, verifiedGemma stat/manifest and prior OS/Swift/disk/memory/process requirements. Wrapper adds both diagnostic process names. No guard executed by Sol.",
+  "flags": {
+    "TURBO_QWEN_SOURCE_VALIDATION_FAST": "1",
+    "TURBO_QWEN_SOURCE_MEMBERSHIP_SCAN": "0"
+  },
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/exact-metadata-cost-20261002/run.py",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+    ]
+  ],
+  "limits": "One metadata process, no model/GPU execution. Scalar counters only; no added locks/concurrency/per-event arrays. Raw evidence stdout/stderr/exit, complete build source/binary linkage; whole-run60s timeout and owned-child memory30% watchdog retained. No old metadata payload-reading test used.",
+  "verification": "Forward/inverse static patch checks passed, PythonAST parsed only. CurrentSources/Package match3fe and all731app019hashes. No build, tests, metadata run or model run.",
+  "payloadReadEvidence": "Output labels zero as static fixed-policy call-path assertion, not measured syscall bytes or system IO tracing. No observer instrumentation added."
+}

@@ -1,0 +1,37 @@
+{
+  "schema": 1,
+  "status": "frozen-not-built-not-run",
+  "head": "526d35a090eb4b87e8b6410babd685d6bb5310e7",
+  "sourceHandoff": "source-handoff.json",
+  "sourceManifestSHA256": "67694a9d45fb3ae3f2b4772eee05a5ece3f01cd4326323b148f36c3a5c47af31",
+  "wrapperHandoffSHA256": "11d0af2de63803753670df5cc1b74149ad6b09502f89277910de6f30d4fbbad5",
+  "commands": [
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/prepare.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/build.py"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/run.py",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/phase25-live-003/metadata/qwen3.6-35b-a3b.gturbo"
+    ],
+    [
+      "python3",
+      "/Users/dev-machine/dev/turbo-fieldfare-personal/scratch/qwen3.6-35b-a3b/evidence/original-bf16-v2/phase-22-codex/takeover-20260930/performance-proposals/embedding-row-memory-20261002/analyze.py",
+      "RUN_PATH_FROM_RUN_STDOUT"
+    ]
+  ],
+  "guards": "Main-only one child. Admission50%, ongoing30%,420s timeout. Same residency0 as completed baseline.",
+  "correctness": "Exact29IDs,1120routes,28rawrows and final numeric state digests against completed baseline. ProtectedEmbeddingRows must be true.",
+  "measurement": "AfterModelLoad Metal allocation change comes from actual baseline and candidate phase markers. Declared removal is not independent evidence. Old baseline has no residentWeightBytes field.",
+  "checks": "Source and wrapper hashes match. Python AST passes. Forward/inverse copied-baseline round trip passed. No tests, builds or model runs.",
+  "reviews": [
+    "review/astra-source-review.md",
+    "review/opus-source-review.md"
+  ],
+  "next": "Main reviews manifest, then builds and runs the single candidate."
+}
