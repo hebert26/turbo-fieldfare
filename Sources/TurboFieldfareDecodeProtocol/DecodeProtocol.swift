@@ -333,15 +333,11 @@ public enum DecodeContextCheckpointTrigger: String, Codable, Equatable, Sendable
     case sustainedSlowDecode = "sustained_slow_decode"
 }
 
-/// Exact completed-generation measurements used by the host's optional
-/// performance policy. Rates are derived from totals, never averaged from the
-/// rounded per-step display values.
+/// Completed-generation measurements attached to a `sustainedSlowDecode`
+/// checkpoint. Kept for protocol compatibility. The Mac app no longer proposes
+/// performance checkpoints: measured decode speed is not a reliable signal of
+/// context capacity, so compaction is driven by context size alone.
 public struct DecodePerformanceCheckpointEvidence: Codable, Equatable, Sendable {
-    public static let requiredDecisions = 3
-    public static let minimumGeneratedTokens = 128
-    public static let minimumContextTokens = 20_480
-    public static let maximumWeightedTokensPerSecond = 15.0
-
     public var completedDecisions: Int
     public var generatedTokens: Int
     public var decodeSeconds: Double

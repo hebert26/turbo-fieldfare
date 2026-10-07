@@ -853,74 +853,8 @@ actor VisionCaptureToolLoop {
             correctionSent = false
             if !preservingVisualRecovery { visualRecoveryFactsDigest = nil }
         }
-    }
 
-    private struct PerformanceCompactionPolicy {
-        private static let cooldownDecisionCount = 6
-
-        private struct Sample {
-            let generatedTokens: Int
-            let decodeSeconds: Double
-        }
-
-        private var conversationEpoch: UUID?
-        private var samples: [Sample] = []
-        private var cooldownDecisionsRemaining = 0
-
-        mutating func beginConversation(_ epoch: UUID?) {
-            guard epoch != conversationEpoch else { return }
-            conversationEpoch = epoch
-            samples.removeAll(keepingCapacity: true)
-            cooldownDecisionsRemaining = 0
-        }
-
-        mutating func observe(
-            _ diagnostics: AppDiagnostics
-        ) -> DecodePerformanceCheckpointEvidence? {
-            guard diagnostics.stopReason == .toolCalls,
-                  diagnostics.generatedTokens > 0,
-                  diagnostics.decodeSeconds.isFinite,
-                  diagnostics.decodeSeconds > 0,
-                  let conversationTokens = diagnostics.conversationTokens,
-                  conversationTokens >= 0 else {
-                return nil
-            }
-            if cooldownDecisionsRemaining > 0 {
-                cooldownDecisionsRemaining -= 1
-                samples.removeAll(keepingCapacity: true)
-                return nil
-            }
-            samples.append(Sample(
-                generatedTokens: diagnostics.generatedTokens,
-                decodeSeconds: diagnostics.decodeSeconds))
-            if samples.count > DecodePerformanceCheckpointEvidence.requiredDecisions {
-                samples.removeFirst(samples.count
-                    - DecodePerformanceCheckpointEvidence.requiredDecisions)
-            }
-            let generated = samples.reduce(0) { $0 + $1.generatedTokens }
-            let seconds = samples.reduce(0) { $0 + $1.decodeSeconds }
-            guard samples.count == DecodePerformanceCheckpointEvidence.requiredDecisions,
-                  generated >= DecodePerformanceCheckpointEvidence.minimumGeneratedTokens,
-                  conversationTokens >= DecodePerformanceCheckpointEvidence.minimumContextTokens,
-                  seconds.isFinite, seconds > 0,
-                  Double(generated) / seconds
-                    < DecodePerformanceCheckpointEvidence.maximumWeightedTokensPerSecond else {
-                return nil
-            }
-            samples.removeAll(keepingCapacity: true)
-            cooldownDecisionsRemaining = Self.cooldownDecisionCount
-            return DecodePerformanceCheckpointEvidence(
-                completedDecisions: DecodePerformanceCheckpointEvidence.requiredDecisions,
-                generatedTokens: generated,
-                decodeSeconds: seconds,
-                conversationTokens: conversationTokens)
-        }
-
-        mutating func didCommit(replacementEpoch: UUID) {
-            conversationEpoch = replacementEpoch
-            samples.removeAll(keepingCapacity: true)
-            cooldownDecisionsRemaining = Self.cooldownDecisionCount
-        }
+        var requiresAlternativeAction: Bool { correctionSent }
     }
 
     private static let logger = Logger(
@@ -952,6 +886,21 @@ actor VisionCaptureToolLoop {
     private var checkingLocalProposal = false
     private var staleActionConfirmation: StaleActionConfirmation?
     private var blockedStaleActions: Set<StaleActionConfirmation> = []
+    /// Stale cache refusals since the last dispatched action.
+    private var staleCacheRefusals = 0
+    private static let staleCacheRefusalPauseLimit = 6
+    /// Intents refused as stale twice on one screen. They skip the cache.
+    private var coldPathIntents: Set<NavigationIntent> = []
+    /// Published actions sent without a verified effect, by intent. An action
+    /// sent three times without effect is withheld so the model tries another way.
+    private var unverifiedAttempts: [NavigationIntent: Int] = [:]
+    private static let unverifiedAttemptLimit = 3
+    /// Fast host path: one plain read for choices, one plain tap by name, and
+    /// the screen that the action result already carries. No cache contract.
+    static let fastHostPath = true
+    /// Fast host path: the pointer task kept live across taps in one run, and
+    /// the device it belongs to. Hidden and dropped when the run ends.
+    private var liveComputerUseTask: (udid: String, task: ComputerUseTaskIdentity)?
     private var journeyEvents: [JourneyEvent] = []
     private var completedCycleActions: [JourneyAction] = []
     private var verifiedTypingActions: Set<VerifiedTypingAction> = []
@@ -974,7 +923,6 @@ actor VisionCaptureToolLoop {
     private let screenshotStore = AppImageAttachmentStore()
     private var taskCheckpoint = AgentTaskCheckpoint()
     private var checkpointRequestIDs: [UUID] = []
-    private var performanceCompactionPolicy = PerformanceCompactionPolicy()
     private var modelConversationEpoch: UUID?
     private var knownCallIDs: Set<String> = []
     private var localProposals = LocalProposalTracker()
@@ -1013,9 +961,13 @@ actor VisionCaptureToolLoop {
         let resumesRetainedTask = modelConversationEpoch.map {
             $0 != conversationEpoch
         } ?? false
-        performanceCompactionPolicy.beginConversation(conversationEpoch)
         if resumesRetainedTask {
             localProposals.reset()
+            // A fresh model lineage starts with fresh no-progress counters.
+            readOnlyNoProgress.reset()
+            recoverableColdMisses.reset()
+            staleCacheRefusals = 0
+            coldPathIntents.removeAll()
             // The new model context has not observed these private targets.
             // Retire their host capabilities before it can choose another app action.
             invalidateScreenObservation()
@@ -1041,6 +993,15 @@ actor VisionCaptureToolLoop {
             activePendingUserInstructionCheck = nil
             screenshotStore.removeAll()
             currentImageObservation = nil
+            if let pointer = liveComputerUseTask {
+                // The run ended or paused: hide its pointer once and drop the
+                // task. An unstructured task still sends this after a stop.
+                liveComputerUseTask = nil
+                Task { [self] in
+                    await closeComputerUseTask(
+                        pointer.task, configuration: configuration, activity: activity)
+                }
+            }
         }
         let developerPrompt: String?
         if hasInjectedPrompt, !resumesRetainedTask {
@@ -1314,6 +1275,7 @@ actor VisionCaptureToolLoop {
                         case .continueObserving:
                             break
                         case .correct(let repetitionCount):
+                            permittedNextOperations?.remove(.observe)
                             content = try Self.addingReadOnlyNoProgressCorrection(
                                 to: content,
                                 repetitionCount: repetitionCount)
@@ -1352,14 +1314,30 @@ actor VisionCaptureToolLoop {
                                 }
                             }
                         case .stop(let repetitionCount):
-                            throw VisionCaptureAgentError.noProgress(
-                                "Agent Mode stopped after \(repetitionCount) equivalent successful read-only observations returned the same sanitized app facts without intervening verified progress. Read-only observation continued after one explicit correction. No action was dispatched by those reads.")
+                            // An unchanged read is not a reason to end the chat.
+                            // Withhold observe, tell the model, and spend the shared
+                            // rejection budget so persistent looping pauses instead.
+                            permittedNextOperations?.remove(.observe)
+                            let reason = "Read-only observation returned the same app facts \(repetitionCount) times without verified progress."
+                            Self.logLocalRejection(call, reason: reason)
+                            await activity(.localRejection(id: UUID(), call: call, reason: reason))
+                            let rejection = localProposals.record(
+                                call: semanticProposalForRepeatCheck(call),
+                                reason: reason,
+                                screen: currentScreenContentIdentity)
+                            if rejection.shouldStop {
+                                throw VisionCaptureAgentError.proposalCorrectionExhausted(
+                                    "Agent paused after repeated read-only observations without progress. No action was dispatched by those reads. Completed work is retained. You can continue this chat.")
+                            }
+                            content = try Self.addingReadOnlyNoProgressCorrection(
+                                to: content,
+                                repetitionCount: repetitionCount)
                         }
                     }
                     if let arguments = outcome.recoverableColdMissArguments {
                         if recoverableColdMisses.record(arguments: arguments) {
-                            throw VisionCaptureAgentError.noProgress(
-                                "Agent Mode stopped after three equivalent safe pre-dispatch cache refusals for the same intended action. No refused action was replayed.")
+                            throw VisionCaptureAgentError.proposalCorrectionExhausted(
+                                "Agent paused after three equivalent safe pre-dispatch cache refusals for the same intended action. No refused action was replayed. Completed work is retained. You can continue this chat.")
                         }
                     } else if outcome.progressed {
                         recoverableColdMisses.reset()
@@ -1496,99 +1474,54 @@ actor VisionCaptureToolLoop {
                     trigger: force ? .explicitComparison : .capacityForecast,
                     performanceEvidence: nil, permitsScreenshot: permitsScreenshot)
                 let capacityAssessment = try await checkpoint(capacityProposal)
-                var commitProposal: AgentContextCheckpointProposal?
-                var refreshBeforeCommit = false
                 if capacityAssessment.needed {
-                    commitProposal = capacityProposal
-                    refreshBeforeCommit = true
-                } else if !isHistoryRead,
-                          let evidence = performanceCompactionPolicy.observe(
-                              completion.diagnostics) {
-                    let record = try taskCheckpoint.render(
-                        currentPacket: settledResult.content,
-                        safety: checkpointSafety(configuration),
-                        currentPacketWasRefreshed: false)
-                    let performanceProposal = AgentContextCheckpointProposal(
-                        id: UUID(), replacementEpoch: UUID(), call: call,
-                        result: settledResult, record: record,
-                        commit: false, force: false,
-                        trigger: .sustainedSlowDecode,
-                        performanceEvidence: evidence,
-                        permitsScreenshot: permitsScreenshot)
-                    do {
-                        let performanceAssessment = try await checkpoint(performanceProposal)
-                        if performanceAssessment.needed {
-                            commitProposal = performanceProposal
-                        }
-                    } catch is CancellationError {
-                        throw CancellationError()
-                    } catch {
-                        try Task.checkCancellation()
-                        // The optional assessment cannot have changed model
-                        // context. Continue with the already-settled result.
-                    }
-                }
-                if var commitProposal {
+                    var commitProposal = capacityProposal
                     try Task.checkCancellation()
-                    if refreshBeforeCommit {
-                        nextReadyOffer = nil
-                        try retirePendingConfirmation()
-                        let hadAlert = currentSystemAlert != nil || uncertainAlertPress != nil
-                        currentManifest = AuthorityManifest()
-                        invalidateScreenObservation()
-                        checkpointRequestIDs.removeAll(keepingCapacity: true)
-                        let refreshStarted = ContinuousClock.now
-                        let refreshed = try await checkpointObservation(
-                            hadAlert: hadAlert, configuration: configuration, activity: activity)
-                        await AgentInferenceTrace.shared?.checkpointRead(
-                            id: commitProposal.id,
-                            seconds: Self.elapsedSeconds(since: refreshStarted))
-                        let refreshCall = AppToolCall(
-                            id: "checkpoint-read-\(commitProposal.id.uuidString)",
-                            name: VisionCaptureToolDefinitions.navigateName,
-                            arguments: .object(["action": .string("observe")]))
-                        let freshPacket = try decisionPacket(
-                            from: refreshed.content, call: refreshCall,
-                            configuration: configuration, images: []).content
-                        try taskCheckpoint.appendSettled(
-                            call: refreshCall,
-                            result: AppToolResult(callID: refreshCall.id,
-                                name: refreshCall.name, content: freshPacket),
-                            outcome: refreshed.content, target: nil,
-                            requestIDs: checkpointRequestIDs,
-                            session: checkpointSessionReference,
-                            origin: "host_read_only_checkpoint_refresh")
-                        taskCheckpoint.nextRevision()
-                        commitProposal = AgentContextCheckpointProposal(
-                            id: commitProposal.id,
-                            replacementEpoch: commitProposal.replacementEpoch,
-                            call: call, result: settledResult,
-                            record: try taskCheckpoint.render(
-                                currentPacket: freshPacket,
-                                safety: checkpointSafety(configuration),
-                                pendingHistoryResult: isHistoryRead ? settledResult : nil),
-                            commit: true, force: commitProposal.force,
-                            trigger: commitProposal.trigger,
-                            performanceEvidence: commitProposal.performanceEvidence,
-                            permitsScreenshot: permitsScreenshot)
-                    } else {
-                        commitProposal = AgentContextCheckpointProposal(
-                            id: commitProposal.id,
-                            replacementEpoch: commitProposal.replacementEpoch,
-                            call: commitProposal.call, result: commitProposal.result,
-                            record: commitProposal.record,
-                            commit: true, force: false,
-                            trigger: .sustainedSlowDecode,
-                            performanceEvidence: commitProposal.performanceEvidence,
-                            permitsScreenshot: permitsScreenshot)
-                    }
+                    nextReadyOffer = nil
+                    try retirePendingConfirmation()
+                    let hadAlert = currentSystemAlert != nil || uncertainAlertPress != nil
+                    currentManifest = AuthorityManifest()
+                    invalidateScreenObservation()
+                    checkpointRequestIDs.removeAll(keepingCapacity: true)
+                    let refreshStarted = ContinuousClock.now
+                    let refreshed = try await checkpointObservation(
+                        hadAlert: hadAlert, configuration: configuration, activity: activity)
+                    await AgentInferenceTrace.shared?.checkpointRead(
+                        id: commitProposal.id,
+                        seconds: Self.elapsedSeconds(since: refreshStarted))
+                    let refreshCall = AppToolCall(
+                        id: "checkpoint-read-\(commitProposal.id.uuidString)",
+                        name: VisionCaptureToolDefinitions.navigateName,
+                        arguments: .object(["action": .string("observe")]))
+                    let freshPacket = try decisionPacket(
+                        from: refreshed.content, call: refreshCall,
+                        configuration: configuration, images: []).content
+                    try taskCheckpoint.appendSettled(
+                        call: refreshCall,
+                        result: AppToolResult(callID: refreshCall.id,
+                            name: refreshCall.name, content: freshPacket),
+                        outcome: refreshed.content, target: nil,
+                        requestIDs: checkpointRequestIDs,
+                        session: checkpointSessionReference,
+                        origin: "host_read_only_checkpoint_refresh")
+                    taskCheckpoint.nextRevision()
+                    commitProposal = AgentContextCheckpointProposal(
+                        id: commitProposal.id,
+                        replacementEpoch: commitProposal.replacementEpoch,
+                        call: call, result: settledResult,
+                        record: try taskCheckpoint.render(
+                            currentPacket: freshPacket,
+                            safety: checkpointSafety(configuration),
+                            pendingHistoryResult: isHistoryRead ? settledResult : nil),
+                        commit: true, force: commitProposal.force,
+                        trigger: commitProposal.trigger,
+                        performanceEvidence: commitProposal.performanceEvidence,
+                        permitsScreenshot: permitsScreenshot)
                     let receipt = try await checkpoint(commitProposal)
                     guard receipt.committed else {
                         throw VisionCaptureAgentError.noProgress("The context checkpoint was not acknowledged. No action was replayed.")
                     }
                     try Task.checkCancellation()
-                    performanceCompactionPolicy.didCommit(
-                        replacementEpoch: commitProposal.replacementEpoch)
                     modelConversationEpoch = commitProposal.replacementEpoch
                     next = .checkpoint(commitProposal.id)
                     retryBoundary = nil
@@ -1772,6 +1705,11 @@ actor VisionCaptureToolLoop {
             fallthrough
 
         case .setBoolean:
+            if Self.fastHostPath, intent.operation == .tap, staleConfirmation == nil,
+               let selector = intent.selector, isCurrentFastTapTarget(intent) {
+                return try await performDirectNameTap(
+                    intent, selector: selector, configuration: configuration, activity: activity)
+            }
             let candidateSignature: String?
             if intent.operation == .tap, staleConfirmation == nil,
                let offered = offeredTapCandidates,
@@ -1852,6 +1790,7 @@ actor VisionCaptureToolLoop {
                 manifest = prepared.manifest
             }
             checkingLocalProposal = true
+            try rejectExhaustedIntent(intent)
             let action = try Self.uniquePublishedAction(
                 for: intent,
                 in: manifest)
@@ -1903,10 +1842,17 @@ actor VisionCaptureToolLoop {
                 arguments: actionArguments
             ) {
                 currentManifest = AuthorityManifest()
+                // The cache is a shortcut, not a gate. A stale refusal sent
+                // nothing, so the run continues on the slow path: read again,
+                // then act without the cache. Only a long streak pauses the run.
+                staleCacheRefusals += 1
+                if staleCacheRefusals >= Self.staleCacheRefusalPauseLimit {
+                    throw VisionCaptureAgentError.proposalCorrectionExhausted(
+                        "Agent paused after \(Self.staleCacheRefusalPauseLimit) stale cache refusals without progress. No refused action was sent. Completed work is retained. You can continue this chat.")
+                }
                 if isStaleConfirmation, !layoutChangedBeforeRevalidation {
-                    staleActionConfirmation = nil
-                    throw VisionCaptureAgentError.noProgress(
-                        "VisionCapture returned CACHE_ACTION_CAPABILITY_STALE twice for the same action with the same content signature for visible text and identifiers. Agent Mode stopped because this action reached the host's one-confirming-attempt limit. No input was submitted and no further attempt was made.")
+                    // Same action refused twice: stop using its cache entry.
+                    coldPathIntents.insert(intent)
                 }
                 return try await recoverFromStaleCacheAction(
                     intent,
@@ -1924,20 +1870,33 @@ actor VisionCaptureToolLoop {
                     intent,
                     result: result.value)
                 staleActionConfirmation = nil
+                staleCacheRefusals = 0
+                coldPathIntents.removeAll()
                 if let staleConfirmation {
                     blockedStaleActions.remove(staleConfirmation)
                 }
+                noteExecuted(intent, result: result)
             }
             let terminalManifest = try Self.returnedAuthorityManifest(
                 from: result.value)
             currentManifest = terminalManifest
-            return try outcome(
-                for: intent,
-                result: result,
-                arguments: actionArguments,
-                manifest: terminalManifest,
-                systemAlert: nil,
-                progressed: !result.isError)
+            let tapOutcome = { [self] in
+                try outcome(
+                    for: intent,
+                    result: result,
+                    arguments: actionArguments,
+                    manifest: terminalManifest,
+                    systemAlert: nil,
+                    progressed: !result.isError)
+            }
+            if !result.isError {
+                // The host verifies the tap by reading the screen itself, so
+                // the model does not spend a step asking for that read.
+                return try await observeAfterMutation(
+                    intent, result: result, configuration: configuration,
+                    activity: activity, fallback: tapOutcome)
+            }
+            return try tapOutcome()
 
         case .tapCoordinates:
             return try await performCoordinateTap(
@@ -1956,7 +1915,10 @@ actor VisionCaptureToolLoop {
                verifiedTypingActions.contains(completed),
                !Self.explicitlyRequestsRepeatedTyping(
                    userPrompt: currentUserPrompt,
-                   text: intent.text ?? "") {
+                   text: intent.text ?? ""),
+               // The field may have been cleared or replaced since. Block only
+               // while the screen still shows that text in an editable field.
+               currentScreenFacts?.editableFieldShows(text: intent.text ?? "") != false {
                 throw VisionCaptureAgentError.navigationUnavailable(
                     "This exact text was already typed into this field and VisionCapture verified it earlier in this task. It was not sent again. Use the retained result and continue with any remaining QA checks.")
             }
@@ -1979,8 +1941,16 @@ actor VisionCaptureToolLoop {
             try rejectPreviouslyRejectedProposal(intent)
             var parameters: [String: JSONValue] = [:]
             if let selector = intent.selector {
-                let field = try uniquePublishedEditableField(for: intent)
-                parameters[field.selectorKind] = .string(selector)
+                if let position = currentScreenFacts?.ocrConfirmedTypingPosition(for: selector),
+                   (try? uniquePublishedEditableField(for: intent)) == nil {
+                    // The field is on screen but not published. Type at its
+                    // position: VisionCapture taps the point, then types.
+                    parameters["x_norm"] = .integer(position.x)
+                    parameters["y_norm"] = .integer(position.y)
+                } else {
+                    let field = try uniquePublishedEditableField(for: intent)
+                    parameters[field.selectorKind] = .string(selector)
+                }
             }
             guard let text = intent.text else {
                 throw VisionCaptureAgentError.malformedCall(
@@ -2134,7 +2104,7 @@ actor VisionCaptureToolLoop {
             throw VisionCaptureAgentError.malformedCall(
                 "tap_coordinates requires normalized coordinates and intent")
         }
-        let arguments = makeMCPArguments(
+        var arguments = makeMCPArguments(
             request: "tap coordinates",
             parameters: [
                 "x_norm": .integer(Int64(x)),
@@ -2145,24 +2115,125 @@ actor VisionCaptureToolLoop {
             configuration: configuration)
         currentManifest = AuthorityManifest()
         invalidateScreenObservation()
-        let result = try await executeHostRequest(
-            arguments,
-            configuration: configuration,
-            interruptibleByUserInstruction: true,
-            activity: activity)
+        let result: VisionCaptureMCPResult
+        if Self.fastHostPath {
+            // Gemma's taps go through the pointer, not the driver.
+            let pointer = try await performFastPointerClick(
+                x: Int64(x), y: Int64(y), label: visualIntent,
+                configuration: configuration, activity: activity)
+            arguments = pointer.arguments
+            result = pointer.result
+        } else {
+            result = try await executeHostRequest(
+                arguments,
+                configuration: configuration,
+                interruptibleByUserInstruction: true,
+                activity: activity)
+        }
         if !result.isError {
             try recordCompletedJourneyAction(intent, result: result.value)
             staleActionConfirmation = nil
         }
         let terminalManifest = try Self.returnedAuthorityManifest(from: result.value)
         currentManifest = terminalManifest
-        return try outcome(
-            for: intent,
-            result: result,
-            arguments: arguments,
-            manifest: terminalManifest,
-            systemAlert: nil,
-            progressed: !result.isError)
+        let tapOutcome = { [self] in
+            try outcome(
+                for: intent,
+                result: result,
+                arguments: arguments,
+                manifest: terminalManifest,
+                systemAlert: nil,
+                progressed: !result.isError)
+        }
+        if !result.isError {
+            // The host reads the screen after the tap and returns fresh choices.
+            return try await observeAfterMutation(
+                intent, result: result, configuration: configuration,
+                activity: activity, fallback: tapOutcome, actionArguments: arguments)
+        }
+        return try tapOutcome()
+    }
+
+    /// Fast host path: a tap at a known position is one pointer click. The
+    /// pointer task stays live across taps and is hidden when the run ends.
+    /// A stale, busy or expired task is replaced once and the click retried once.
+    private func performFastPointerClick(
+        x: Int64,
+        y: Int64,
+        label: String,
+        configuration: VisionCaptureAgentConfiguration,
+        activity: @escaping Activity
+    ) async throws -> (result: VisionCaptureMCPResult, arguments: JSONValue) {
+        var retried = false
+        var preCaptureRetried = false
+        while true {
+            do {
+                let task: ComputerUseTaskIdentity
+                if let live = liveComputerUseTask, live.udid == configuration.simulatorUDID {
+                    task = live.task
+                } else {
+                    liveComputerUseTask = nil
+                    let activation = try await executeHostRequest(
+                        makeMCPArguments(
+                            request: "activate computer use",
+                            parameters: ["x_norm": .integer(x), "y_norm": .integer(y)],
+                            configuration: configuration,
+                            includeFlowSession: false),
+                        configuration: configuration,
+                        usesFlowSession: false,
+                        interruptibleByUserInstruction: true,
+                        activity: activity)
+                    task = try Self.returnedComputerUseTaskIdentity(from: activation.value)
+                    liveComputerUseTask = (configuration.simulatorUDID, task)
+                }
+                let arguments = makeMCPArguments(
+                    request: "click pointer",
+                    parameters: [
+                        "computer_use_task_id": .string(task.id),
+                        "computer_use_generation": .integer(Int64(task.generation)),
+                        "x_norm": .integer(x),
+                        "y_norm": .integer(y),
+                        "intent": .string(label),
+                        "cache_policy": .string("visual_bypass"),
+                    ],
+                    configuration: configuration,
+                    includeFlowSession: false)
+                let result = try await executeHostRequest(
+                    arguments,
+                    configuration: configuration,
+                    usesFlowSession: false,
+                    interruptibleByUserInstruction: true,
+                    activity: activity)
+                if result.isPointerPreCaptureFailureBeforeSubmission, !preCaptureRetried {
+                    // No input was sent: the Simulator window geometry changed
+                    // during the before-capture. Retry once after it settles.
+                    preCaptureRetried = true
+                    try await Task.sleep(nanoseconds: 500_000_000)
+                    continue
+                }
+                var returned: Set<ComputerUseTaskIdentity> = []
+                Self.collectComputerUseTaskIdentities(in: result.value, into: &returned)
+                if let generation = returned.filter({ $0.id == task.id }).map(\.generation).max() {
+                    liveComputerUseTask = (configuration.simulatorUDID,
+                        ComputerUseTaskIdentity(id: task.id, generation: generation))
+                }
+                return (result, arguments)
+            } catch let error as VisionCaptureAgentError
+                where !retried && Self.isStalePointerTaskRefusal(error) {
+                retried = true
+                liveComputerUseTask = nil
+            }
+        }
+    }
+
+    /// The held pointer task can no longer be used: stale, the device is busy,
+    /// or its lease expired.
+    private static func isStalePointerTaskRefusal(_ error: VisionCaptureAgentError) -> Bool {
+        guard case .mcpOutcome(let outcome) = error, let code = outcome.reasonCode else {
+            return false
+        }
+        return code == "COMPUTER_USE_TASK_STALE" || code == "COMPUTER_USE_DEVICE_BUSY"
+            || (code.contains("LEASE") && code.contains("EXPIR"))
     }
 
     private func performComputerUseClick(
@@ -2274,6 +2345,14 @@ actor VisionCaptureToolLoop {
             successfulReadOnlyObservation: false)
     }
 
+    /// Driver-lane requests that VisionCapture refuses while a pointer task is live.
+    private static func isDriverLaneMutation(_ request: String) -> Bool {
+        if request.hasPrefix("swipe ") || request.hasPrefix("tap ") { return true }
+        return ["tap coordinates", "go back", "press system alert button", "inspect cache",
+                "tap cached action", "execute cached action", "revalidate cached action",
+                "execute observed action"].contains(request)
+    }
+
     private func closeComputerUseTask(
         _ task: ComputerUseTaskIdentity,
         configuration: VisionCaptureAgentConfiguration,
@@ -2300,8 +2379,11 @@ actor VisionCaptureToolLoop {
         _ intent: NavigationIntent,
         result: VisionCaptureMCPResult,
         configuration: VisionCaptureAgentConfiguration,
-        activity: @escaping Activity
+        activity: @escaping Activity,
+        fallback: (() throws -> NavigationOutcome)? = nil,
+        actionArguments: JSONValue? = nil
     ) async throws -> NavigationOutcome {
+        let factsBeforeAction = currentScreenFacts
         let proof = try Self.sanitizedNamedObject(
             "proof", allowedKeys: ["verdict", "verdict_source", "reason_code", "action"],
             in: result.value)
@@ -2312,13 +2394,38 @@ actor VisionCaptureToolLoop {
         } else {
             canonicalVerdict = "unavailable"
         }
-        let actionName = intent.operation == .swipe
-            ? "swipe" : "Computer Use click"
+        let actionName: String
+        switch intent.operation {
+        case .swipe: actionName = "swipe"
+        case .tap: actionName = "tap"
+        case .tapCoordinates: actionName = "coordinate tap"
+        default: actionName = "Computer Use click"
+        }
+        let isTap = intent.operation == .tap || intent.operation == .tapCoordinates
         currentManifest = AuthorityManifest()
         currentSystemAlert = nil
         staleActionConfirmation = nil
         invalidateScreenObservation()
+        var afterScreens: [[String: JSONValue]] = []
+        try? Self.collectStructuredObjects(named: "after_screen", in: result.value) { afterScreens.append($0) }
         let refreshed: PreparedNavigation
+        if Self.fastHostPath, !result.isError, !afterScreens.isEmpty {
+            // VisionCapture already settled and read the screen after the action.
+            do {
+                try recordScreenObservation(from: result.value)
+            } catch {
+                invalidateScreenObservation()
+            }
+            let manifest = AuthorityManifest(state: currentScreenSignature == nil ? "unavailable" : "ready")
+            currentManifest = manifest
+            refreshed = PreparedNavigation(
+                result: result, arguments: actionArguments ?? .object([:]), manifest: manifest,
+                systemAlert: nil, screenFacts: Self.returnedScreenFacts(from: result.value))
+        } else {
+        if isTap {
+            // Let the screen settle before the read. Cheaper than a model step.
+            try await Task.sleep(for: .milliseconds(400))
+        }
         do {
             refreshed = try await refreshNavigation(configuration: configuration, activity: activity)
         } catch is CancellationError {
@@ -2327,8 +2434,14 @@ actor VisionCaptureToolLoop {
             currentManifest = AuthorityManifest()
             currentSystemAlert = nil
             invalidateScreenObservation()
+            if let fallback {
+                // The tap itself was delivered. Return its own result and let
+                // the model observe, as before. Do not end the chat.
+                return try fallback()
+            }
             throw VisionCaptureAgentError.noProgress(
                 "The \(actionName) request returned, with proof \(canonicalVerdict). Its following observation failed: \(error). The input was not repeated.")
+        }
         }
         let observed = try outcome(
             for: NavigationIntent(operation: .observe, selector: nil, selectorKind: nil,
@@ -2353,12 +2466,55 @@ actor VisionCaptureToolLoop {
         }
         if let proof { body["proof"] = .object(proof) }
         body.merge(delivery) { _, returned in returned }
+        // The pointer lane never carries a driver acknowledgement: a submitted
+        // click is its delivered form. Do not treat it as delivery unknown.
+        let pointerDelivered = actionArguments?.objectValue?["request"] == .string("click pointer")
+            && delivery["submission_started"] == .bool(true)
+        if pointerDelivered {
+            body["delivery_acknowledged"] = .bool(true)
+            body.removeValue(forKey: "delivery_unknown")
+        }
         if let attempted = result.dispatchAttempted { body["dispatch_attempted"] = .bool(attempted) }
         let verdict = proof?["verdict"]
         body["outcome"] = verdict == .string("verified") ? .string("succeeded")
             : verdict ?? .string("unknown")
         body["observation_outcome"] = .string(refreshed.result.isError ? "unavailable" : "succeeded")
-        body["instruction"] = .string(delivery["delivery_unknown"] == .bool(true)
+        // VisionCapture compares the screen before and after the action.
+        // Its one-line summary is the model's evidence of effect.
+        var changes: [[String: JSONValue]] = []
+        try? Self.collectStructuredObjects(named: "changes", in: result.value) { changes.append($0) }
+        if let summary = changes.first?["summary"], case .string(let text) = summary, !text.isEmpty {
+            body["effect"] = .string(text)
+        } else if actionArguments?.objectValue?["request"] == .string("click pointer"),
+                  let before = factsBeforeAction?.readableTexts,
+                  let after = refreshed.screenFacts?.readableTexts {
+            // The pointer lane returns no summary. Derive the effect from the
+            // texts of the reads before and after the click.
+            let appeared = after.filter { !before.contains($0) }.prefix(8)
+            let disappeared = before.filter { !after.contains($0) }.prefix(8)
+            var parts: [String] = []
+            if !appeared.isEmpty { parts.append("appeared: " + appeared.joined(separator: ", ")) }
+            if !disappeared.isEmpty { parts.append("disappeared: " + disappeared.joined(separator: ", ")) }
+            if !parts.isEmpty { body["effect"] = .string(parts.joined(separator: "; ")) }
+        }
+        if let changed = changes.first?["screen_changed"], case .bool = changed {
+            body["screen_changed"] = changed
+        } else if actionArguments?.objectValue?["request"] == .string("click pointer") {
+            // A pointer click returns no after_screen or changes. Its own
+            // screen observation says whether the screen changed.
+            var statuses: Set<String> = []
+            try? Self.collectStructuredObjects(named: "interaction_evidence", in: result.value) {
+                if case .string(let status)? = $0["screen_observation"]?.objectValue?["status"] {
+                    statuses.insert(status)
+                }
+            }
+            if statuses == ["changed_observed"] {
+                body["screen_changed"] = .bool(true)
+            } else if statuses == ["no_persistent_change_observed"] {
+                body["screen_changed"] = .bool(false)
+            }
+        }
+        body["instruction"] = .string(delivery["delivery_unknown"] == .bool(true) && !pointerDelivered
             ? "\(actionName) delivery remains unknown. It was not repeated. These facts come from a separate read. Do not replay the input."
             : "These facts come from the read after the \(actionName). Use its canonical verdict without assuming the intended effect. Choose again from the fresh actions; old IDs have expired.")
         if verdict != .string("verified") {
@@ -2751,7 +2907,7 @@ actor VisionCaptureToolLoop {
                 "Thinking recovery did not obtain one admitted current image/read pair in the same session. No action was replayed.")
         }
         packet["generation_recovery"] = .string(
-            "The unfinished repeated response was discarded. No call from it was executed. Reconsider the remaining user goal using this fresh evidence. Earlier app actions retain their original outcomes and must not be repeated just because generation was interrupted.")
+            "The unfinished repeated response was discarded. No call from it was executed. Use this fresh evidence to choose one permitted action now. Do not restate or compare the evidence. If no action can safely advance the goal, return one concise blocker. Earlier app actions retain their original outcomes and must not be repeated.")
         packet["image_attachment_order"] = .string(oldImages.isEmpty
             ? "The single attached image is from the additional current screenshot/read pair."
             : "The first \(oldImages.count) attached image(s) are historical images from the original pending result. The final image, number \(oldImages.count + 1), belongs to the additional current screenshot/read pair. Earlier images do not establish current targets.")
@@ -2782,7 +2938,7 @@ actor VisionCaptureToolLoop {
             return nil
         }
         packet["generation_recovery"] = .string(
-            "The unfinished repeated response was discarded. No call from it was executed. Reconsider the remaining user goal using this still-current screenshot/read pair. Earlier app actions retain their original outcomes and must not be repeated.")
+            "The unfinished repeated response was discarded. No call from it was executed. Use this still-current screenshot/read pair to choose one permitted action now. Do not restate or compare the evidence. If no action can safely advance the goal, return one concise blocker. Earlier app actions retain their original outcomes and must not be repeated.")
         packet["image_attachment_order"] = .string(
             "The single attached image is the current screenshot/read pair from the interrupted decision.")
         return try JSONValue.object(packet).encoded()
@@ -3034,6 +3190,14 @@ actor VisionCaptureToolLoop {
                 throw VisionCaptureAgentError.navigationUnavailable(
                     "The warm-cache screenshot and fresh read did not establish a usable pair.")
             }
+            if Self.fastHostPath {
+                // One plain read pairs with the image. Choices come from its facts.
+                let manifest = AuthorityManifest(state: "ready")
+                currentManifest = manifest
+                return PreparedNavigation(
+                    result: observed.result, arguments: observed.arguments, manifest: manifest,
+                    systemAlert: nil, screenFacts: Self.returnedScreenFacts(from: observed.result.value))
+            }
             let refreshed = try await refreshNavigation(
                 configuration: configuration, activity: activity,
                 allowsObservationRefresh: false)
@@ -3097,6 +3261,9 @@ actor VisionCaptureToolLoop {
         desiredAction: JSONValue? = nil,
         allowsObservationRefresh: Bool = true
     ) async throws -> PreparedNavigation {
+        if Self.fastHostPath {
+            return try await plainDescribeNavigation(configuration: configuration, activity: activity)
+        }
         currentManifest = AuthorityManifest()
         currentSystemAlert = nil
         let inspectArguments = makeMCPArguments(
@@ -3299,6 +3466,104 @@ actor VisionCaptureToolLoop {
             systemAlert: nil)
     }
 
+    /// Fast host path read: one plain describe. Choices come from the screen
+    /// facts (tap candidates and editable fields), and taps go out by name.
+    private func plainDescribeNavigation(
+        configuration: VisionCaptureAgentConfiguration,
+        activity: @escaping Activity
+    ) async throws -> PreparedNavigation {
+        let arguments = makeMCPArguments(
+            request: "describe screen",
+            parameters: [:],
+            configuration: configuration)
+        currentManifest = AuthorityManifest()
+        currentSystemAlert = nil
+        invalidateScreenObservation()
+        let result = try await executeHostRequest(
+            arguments,
+            configuration: configuration,
+            activity: activity)
+        if !result.isError {
+            try recordScreenObservation(from: result.value)
+        }
+        let manifest = AuthorityManifest(state: result.isError ? "unavailable" : "ready")
+        currentManifest = manifest
+        return PreparedNavigation(
+            result: result,
+            arguments: arguments,
+            manifest: manifest,
+            systemAlert: nil,
+            screenFacts: result.isError ? nil : Self.returnedScreenFacts(from: result.value))
+    }
+
+    /// Fast host path tap: one pointer click at the read position, or one
+    /// plain tap by name when no position is known.
+    private func performDirectNameTap(
+        _ intent: NavigationIntent,
+        selector: String,
+        configuration: VisionCaptureAgentConfiguration,
+        activity: @escaping Activity
+    ) async throws -> NavigationOutcome {
+        checkingLocalProposal = true
+        try rejectPreviouslyRejectedProposal(intent)
+        try rejectExhaustedIntent(intent)
+        let attemptedScreenScope = currentNavigationScreenScope
+        let knownPosition = currentScreenFacts?.normalizedPosition(
+            selector: selector, role: intent.role ?? "", selectorKind: intent.selectorKind)
+        let arguments: JSONValue
+        let result: VisionCaptureMCPResult
+        currentManifest = AuthorityManifest()
+        invalidateScreenObservation()
+        if let knownPosition {
+            // Gemma's taps go through the pointer at the read position, not
+            // through the driver's name or coordinate taps.
+            let label = resolvedJourneyLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let pointer = try await performFastPointerClick(
+                x: knownPosition.x, y: knownPosition.y, label: label.isEmpty ? selector : label,
+                configuration: configuration, activity: activity)
+            arguments = pointer.arguments
+            result = pointer.result
+        } else {
+            arguments = makeMCPArguments(
+                request: "tap \(selector)",
+                parameters: [:],
+                configuration: configuration)
+            result = try await executeHostRequest(
+                arguments,
+                configuration: configuration,
+                interruptibleByUserInstruction: true,
+                activity: activity)
+        }
+        let plainOutcome = { [self] in
+            try outcome(
+                for: intent, result: result, arguments: arguments,
+                manifest: AuthorityManifest(), systemAlert: nil, progressed: false)
+        }
+        if result.isError {
+            // Nothing was sent. Remember it so the same proposal is not repeated.
+            rememberRejectedBeforeSubmissionProposal(intent, screen: attemptedScreenScope)
+            return try plainOutcome()
+        }
+        try recordCompletedJourneyAction(intent, result: result.value)
+        staleActionConfirmation = nil
+        noteExecuted(intent, result: result)
+        return try await observeAfterMutation(
+            intent, result: result, configuration: configuration,
+            activity: activity, fallback: plainOutcome, actionArguments: arguments)
+    }
+
+    private func isCurrentFastTapTarget(_ intent: NavigationIntent) -> Bool {
+        guard let selector = intent.selector, let role = intent.role else { return false }
+        if let offered = offeredTapCandidates, offered.signature == currentScreenSignature,
+           offered.candidates.contains(where: {
+               $0.selector.utf8.elementsEqual(selector.utf8) && $0.role.utf8.elementsEqual(role.utf8)
+           }) { return true }
+        return currentManifest.actions.contains {
+            $0.action == "tap" && $0.selector.utf8.elementsEqual(selector.utf8)
+                && $0.role.utf8.elementsEqual(role.utf8)
+        }
+    }
+
     /// An expired unused action is discarded. Keep any spent stale-confirmation
     /// block and refresh only observations for the model's next decision.
     private func observeAfterActionAuthorizationExpiry(
@@ -3404,25 +3669,30 @@ actor VisionCaptureToolLoop {
             try recordScreenObservation(from: result.value)
         }
 
-        guard let baselineScreenSignature,
-              let observedScreenSignature else {
-            staleActionConfirmation = nil
-            throw VisionCaptureAgentError.noProgress(
-                "VisionCapture refused a stale cached action before dispatch, but the host could not compare the content signatures for visible text and identifiers before and after the required plain read. Agent Mode stopped instead of weakening the one-confirming-attempt budget. No input was submitted and the action was not retried.")
-        }
-
-        let screenChanged = baselineScreenSignature != observedScreenSignature
-        if isConfirmation, !screenChanged {
-            staleActionConfirmation = nil
-            throw VisionCaptureAgentError.noProgress(
-                "VisionCapture refused the confirming cached action before dispatch and the required plain read returned the same content signature for visible text and identifiers. Agent Mode stopped this action after its one confirming choice. No input was submitted.")
-        }
-        if screenChanged {
-            staleActionConfirmation = nil
+        var refreshChoices = refreshChoices
+        let screenChanged: Bool
+        if let baselineScreenSignature, let observedScreenSignature {
+            screenChanged = baselineScreenSignature != observedScreenSignature
         } else {
+            // The screens cannot be compared. Treat the screen as new and
+            // give the model fresh choices instead of stopping.
+            screenChanged = true
+            refreshChoices = true
+        }
+        if isConfirmation, !screenChanged {
+            // The confirming attempt was refused again on the same screen.
+            // Give fresh choices. The next choice of this action skips the cache.
+            refreshChoices = true
+        }
+        if screenChanged || isConfirmation {
+            staleActionConfirmation = nil
+        } else if let observedScreenSignature {
             staleActionConfirmation = StaleActionConfirmation(
                 intent: intent,
                 screenSignature: observedScreenSignature)
+        }
+        if screenChanged {
+            coldPathIntents.removeAll()
         }
         if refreshChoices {
             // Inspect after the plain read with no old capability, grant, or
@@ -3494,8 +3764,8 @@ actor VisionCaptureToolLoop {
     ) throws {
         guard blockedStaleActions.contains(action)
                 || blockedStaleActions.count < Self.staleActionBlockLimit else {
-            throw VisionCaptureAgentError.noProgress(
-                "Agent Mode stopped because 24 different stale cached actions were already retired on the current screen. No additional action was sent.")
+            throw VisionCaptureAgentError.proposalCorrectionExhausted(
+                "Agent paused because 24 different stale cached actions were already retired on the current screen. No additional action was sent. Completed work is retained. You can continue this chat.")
         }
         blockedStaleActions.insert(action)
     }
@@ -3605,7 +3875,12 @@ actor VisionCaptureToolLoop {
         manifest: AuthorityManifest,
         configuration: VisionCaptureAgentConfiguration
     ) throws -> JSONValue {
-        if let capability = action.actionCapability {
+        // An intent refused as stale twice takes the slow path: a plain tap
+        // under the current observation grant, with no cache entry.
+        let useCache = !(coldPathIntents.contains(intent)
+            && action.action == "tap"
+            && manifest.observationGrant != nil)
+        if useCache, let capability = action.actionCapability {
             let request = action.action == "tap"
                 ? "tap cached action" : "execute cached action"
             return makeMCPArguments(
@@ -3613,13 +3888,18 @@ actor VisionCaptureToolLoop {
                 parameters: ["action_capability": .string(capability)],
                 configuration: configuration)
         }
-        if let capability = action.revalidationCapability {
+        if useCache, let capability = action.revalidationCapability {
             return makeMCPArguments(
                 request: "revalidate cached action",
                 parameters: ["revalidation_capability": .string(capability)],
                 configuration: configuration)
         }
         guard let grant = manifest.observationGrant else {
+            if action.action == "tap" {
+                // No grant: a plain tap by name. VisionCapture accepts it.
+                return makeMCPArguments(
+                    request: "tap \(action.selector)", parameters: [:], configuration: configuration)
+            }
             throw VisionCaptureAgentError.navigationUnavailable(
                 "The selected action has no current host-held execution evidence. Observe again before choosing it.")
         }
@@ -3686,6 +3966,16 @@ actor VisionCaptureToolLoop {
         activity: @escaping Activity
     ) async throws -> VisionCaptureMCPResult {
         checkingLocalProposal = false
+        // VisionCapture refuses driver-lane mutations while a pointer task
+        // owns the device (DEVICE_LANE_CONFLICT). Hide the pointer first; the
+        // next pointer tap activates a new task.
+        if let pointer = liveComputerUseTask, pointer.udid == configuration.simulatorUDID,
+           case .object(let object) = arguments,
+           case .string(let request)? = object["request"],
+           Self.isDriverLaneMutation(request) {
+            liveComputerUseTask = nil
+            await closeComputerUseTask(pointer.task, configuration: configuration, activity: activity)
+        }
         // A new host observation or action ends the preceding packet's image
         // offer, including when transport fails or cancellation interrupts it.
         currentImageObservation = nil
@@ -3753,13 +4043,19 @@ actor VisionCaptureToolLoop {
         }
 
         await activity(.incomingResponse(id: activityID, excerpt: result.displayExcerpt))
-        if let trace, result.isError {
+        if let trace {
             let operation: String?
             if case .object(let request) = arguments, case .string(let name)? = request["request"] {
                 operation = name
             } else { operation = nil }
-            await trace.mcpFailure(
-                step: traceStep, requestID: activityID, operation: operation, result: result)
+            await trace.mcpRequest(
+                step: traceStep, requestID: activityID, operation: operation,
+                elapsedSeconds: Self.elapsedSeconds(since: activityStart),
+                isError: result.isError, refusalCode: result.refusalCode)
+            if result.isError {
+                await trace.mcpFailure(
+                    step: traceStep, requestID: activityID, operation: operation, result: result)
+            }
         }
         let launchTimeout = Self.isolatedLaunchTimeout(
             result, arguments: arguments, configuration: configuration)
@@ -3777,7 +4073,9 @@ actor VisionCaptureToolLoop {
                 permittedNonTargetLaunchOutcome:
                     launchTimeout ?? launchNotForeground,
                 permitsUncertainRecipientAfterSubmission:
-                    uncertainSwipe || uncertainComputerUseClick)
+                    uncertainSwipe || uncertainComputerUseClick,
+                permitsForeignObservedBundleID:
+                    arguments.objectValue?["request"] == .string("click pointer"))
             if usesFlowSession, launchTimeout == nil {
                 try adoptReturnedSessionIdentity(
                     from: result.value,
@@ -3863,6 +4161,13 @@ actor VisionCaptureToolLoop {
                 elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
             return result
         }
+        if result.isActionDispatchUnproven {
+            await activity(.requestStatus(
+                id: activityID,
+                status: .serverOutcome(serverOutcome),
+                elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
+            return result
+        }
         if result.isError {
             let code = result.refusalCode ?? "MCP_TOOL_REFUSED"
             await activity(.requestStatus(
@@ -3906,15 +4211,26 @@ actor VisionCaptureToolLoop {
         guard result.isStaleActionCapabilityBeforeDispatch,
               case .object(let object) = arguments,
               case .string(let rawRequest)? = object["request"],
-              case .object(let parameters)? = object["parameters"],
-              case .string(let capability)? = parameters["action_capability"],
-              !capability.isEmpty else {
+              case .object(let parameters)? = object["parameters"] else {
             return false
         }
+        // A cached handle or a plain observation grant can both go stale.
         let request = rawRequest.trimmingCharacters(
             in: .whitespacesAndNewlines).lowercased()
+        let evidence = parameters["action_capability"]
+            ?? parameters["revalidation_capability"]
+            ?? parameters["observation_grant"]
+        guard case .string(let evidenceValue)? = evidence,
+              !evidenceValue.isEmpty else {
+            // A plain tap by name carries no handle. Its refusal before
+            // submission is recoverable in the same way.
+            return request.hasPrefix("tap ")
+        }
         return request == "tap cached action"
             || request == "execute cached action"
+            || request == "revalidate cached action"
+            || request == "execute observed action"
+            || request.hasPrefix("tap ")
     }
 
     /// An uncertain swipe can continue only through one read-only recovery.
@@ -4162,40 +4478,21 @@ actor VisionCaptureToolLoop {
         configuration _: VisionCaptureAgentConfiguration
     ) -> String {
         return """
-        You are the iOS QA agent for the configured simulator app. Interpret the user's goal, derive observable checks, test through the available tools, and report only what the evidence supports.
+        You are the iOS QA agent for the configured simulator app. Complete the user's goal with observable evidence.
 
-        Goal and permissions
-        - Apply new user instructions before the next app action. Preserve completed evidence; the newest instruction wins when instructions conflict.
-        - Use any tool-permitted action that advances or verifies the current goal. Respect explicit user restrictions even when a prohibited action or target is offered.
-        - Each reply contains exactly one permitted tool call or a concise final answer.
-
-        Choose an action
-        - Follow the tool contract. Use exact current choice IDs and their listed operations; never invent or substitute controls.
-        - Each new result replaces previous choices. observation, facts, and choices describe the current screen; last_action describes the previous step.
-        - Use relevant content already on screen rather than reopening its section.
-        - If a current choice advances an unfinished check, act before requesting another screen read.
-        - When current_image_evidence is true, match unlabeled choices to visible controls by position. A missing label alone does not require another observation.
-        - Compare each choice position with the visible control. If a matching label points somewhere else in the screenshot, do not use that target ID. Use computer_use_click at the visible control instead.
-        - When current_image_evidence is true, tap_coordinates and computer_use_click may use a visible control's normalized screenshot position. Use computer_use_click when native pointer evidence is useful.
-        - If the screenshot shows the software keyboard and the intended field is already focused, type may omit target.
-        - If a needed control requires_screenshot, take a screenshot first.
-        - If an open form exposes no editable fields, inspect its pixels or expand an offered sheet before canceling.
-        - If a form remains after a verified tap, do not tap the same semantic choice again. Take a screenshot and use computer_use_click on the visible submit control.
-        - If a read exposes only software-keyboard controls while app content is visible, take a screenshot next. Do not repeat observe.
-
-        Evaluate evidence
-        - An accepted request is not proof of execution. A VisionCapture verified action proves that action occurred; it completes a workflow only when its evidence proves the requested outcome.
-        - A visible target or selected control proves state, not that an interaction was tested.
-        - A VisionCapture failed action is terminal evidence for that attempt. Record it and continue other checks.
-        - Preserve refused, inconclusive, and delivery-unknown outcomes without replaying those inputs. A new confirmation offer permits a new decision.
-        - Resolve uncertainty through permitted screen reads, screenshots, or controls that can reach the missing evidence.
-        - Do not repeat completed workflows unless the user requests it.
-
-        Finish
-        - Continue while an unfinished check has a permitted path to evidence, even if another check is blocked.
-        - Once every requested check is verified or failed, give the final answer without another tool call.
-        - Report blocked, unknown, or inconclusive results only when a factual blocker prevents further evidence.
-        - Keep the final answer concise: verified results, observed failures, and any remaining blockers. Never claim unverified work.
+        - Apply the newest user instruction before another app action. Keep completed evidence. Respect prohibited_targets.
+        - Reply with one permitted tool call or a concise final answer.
+        - Use only allowed_next and exact current choice IDs. Never invent controls. Each result replaces earlier choices.
+        - observation, facts, and choices describe the current screen. last_action describes the previous step.
+        - Use useful content already visible. If a choice advances unfinished work, act before reading the same screen again.
+        - When current_image_evidence is true, use positions to match unlabeled choices. If a label and visible position conflict, use computer_use_click on the visible control.
+        - Use tap_coordinates or computer_use_click only with current image evidence. A focused field may omit target when the software keyboard is visible. Use screenshots or Computer Use when accessibility information is not enough.
+        - Take a screenshot when a control requires_screenshot, a form has no editable fields, or a read exposes only keyboard controls.
+        - If a form remains after a verified tap, do not repeat that choice. Use a fresh screenshot and the visible submit control.
+        - An accepted request is not proof. A verified action proves only that action. Visible state does not prove an interaction was tested.
+        - Keep failed, refused, inconclusive, and delivery-unknown results. Never replay uncertain input. Continue other reachable checks.
+        - Do not repeat completed work unless requested.
+        - Finish only when each requested check has evidence or a factual blocker. Report verified results, failures, and blockers only.
         """
     }
 
@@ -4291,6 +4588,12 @@ actor VisionCaptureToolLoop {
                 throw VisionCaptureAgentError.navigationUnavailable(
                     "Focused typing needs current screenshot evidence. Choose screenshot now. If it shows the intended field focused with the keyboard visible, retry type without a target.")
             }
+            if operation == .tapCoordinates || operation == .computerUseClick,
+               currentImageObservation != observationGeneration,
+               allowedNow.contains(.screenshot) {
+                throw VisionCaptureAgentError.navigationUnavailable(
+                    "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step.")
+            }
             throw VisionCaptureAgentError.navigationUnavailable(
                 "This action is not currently permitted. Choose from allowed_next.")
         }
@@ -4302,7 +4605,13 @@ actor VisionCaptureToolLoop {
         }
         switch operation {
         case .tapCoordinates, .computerUseClick:
-            guard currentImageObservation == observationGeneration,
+            var ocrConfirmedTarget = false
+            if operation == .tapCoordinates,
+               case .integer(let cx)? = object["x_norm"], case .integer(let cy)? = object["y_norm"],
+               currentScreenFacts?.isOCRConfirmedPosition(x: cx, y: cy) == true {
+                ocrConfirmedTarget = true
+            }
+            guard currentImageObservation == observationGeneration || ocrConfirmedTarget,
                   currentSystemAlert == nil,
                   committedSessionIdentity?.kind == "flow",
                   case .integer(let x)? = object["x_norm"],
@@ -4352,6 +4661,19 @@ actor VisionCaptureToolLoop {
                 role: "focused_editable_element", desiredState: nil, text: raw)
         case .tap, .setBoolean, .type:
             break
+        }
+        if operation == .type,
+           case .string(let target)? = object["target"],
+           currentChoiceBindings[target] == nil,
+           let position = currentScreenFacts?.ocrConfirmedTypingPosition(for: target) {
+            // The field is on screen but not published. Type at its position.
+            guard case .string(let raw)? = object["text"], !raw.isEmpty else {
+                throw VisionCaptureAgentError.malformedCall("Typing requires nonempty text.")
+            }
+            resolvedJourneyLabel = "field at (\(position.x), \(position.y))"
+            return NavigationIntent(
+                operation: .type, selector: target, selectorKind: "ocr_position",
+                role: "text_field", desiredState: nil, text: raw)
         }
         guard case .string(let target)? = object["target"],
               let binding = currentChoiceBindings[target],
@@ -4596,6 +4918,14 @@ actor VisionCaptureToolLoop {
                 facts["label"] = .string(label)
             }
         }
+        if !isField, case .string(let selector)? = object["selector"],
+           case .string(let role)? = object["role"] {
+            let kind: String?
+            if case .string(let value)? = object["selector_kind"] { kind = value } else { kind = nil }
+            if let warning = currentScreenFacts?.coverageWarning(selector: selector, role: role, selectorKind: kind) {
+                facts["warning"] = .string(warning)
+            }
+        }
         if isField, facts["value"] == nil { facts["value"] = .null }
         if isField, facts["value_status"] == nil {
             facts["value_status"] = .string(facts["value"] == .null ? "unavailable" : "available")
@@ -4656,7 +4986,8 @@ actor VisionCaptureToolLoop {
         } else if let pairing = body["image_observation"]?.objectValue,
                   pairing["state"] != .string("sequential") {
             requiresReadOnlyRecovery = true
-        } else if operation == .string("observe"), outcome == .string("succeeded"),
+        } else if (operation == .string("observe") || operation == .string("screenshot")),
+                  outcome == .string("succeeded"),
                   currentScreenSignature != nil || currentSystemAlert != nil {
             requiresReadOnlyRecovery = false
         }
@@ -4766,6 +5097,9 @@ actor VisionCaptureToolLoop {
         var allowed: Set<NavigationOperation> = currentImageObservation == observationGeneration
             ? []
             : [.observe]
+        if readOnlyNoProgress.requiresAlternativeAction, !readOnlyRequired {
+            allowed.remove(.observe)
+        }
         var swipeDirections: [SwipeDirection] = []
         if currentImageObservation != observationGeneration,
            visionAvailable {
@@ -4776,8 +5110,21 @@ actor VisionCaptureToolLoop {
            currentImageObservation == observationGeneration,
            committedSessionIdentity?.kind == "flow" {
             allowed.insert(.tapCoordinates)
-            allowed.insert(.computerUseClick)
+            // The pointer lane needs a window capture that is not available
+            // on the fast path; tap_coordinates covers the same need.
+            if !Self.fastHostPath { allowed.insert(.computerUseClick) }
             if currentScreenFacts?.hasSoftwareKeyboard == true {
+                allowed.insert(.type)
+            }
+        }
+        if !readOnlyRequired, !unavailable, recovery == nil, currentSystemAlert == nil,
+           committedSessionIdentity?.kind == "flow",
+           currentScreenFacts?.hasOCRConfirmedControls == true {
+            // OCR-confirmed controls carry accessibility positions. A
+            // coordinate tap on one of them needs no screenshot.
+            allowed.insert(.tapCoordinates)
+            if currentScreenFacts?.hasOCRConfirmedEditableField == true {
+                // Type at the field position: VisionCapture taps, then types.
                 allowed.insert(.type)
             }
         }
@@ -4872,6 +5219,8 @@ actor VisionCaptureToolLoop {
         }
         if unknownDelivery { lastAction["delivery"] = .string("unknown") }
         if let note = body["outcome_note"] { lastAction["note"] = note }
+        if let effect = body["effect"] { lastAction["effect"] = effect }
+        if let changed = body["screen_changed"] { lastAction["screen_changed"] = changed }
         var packet: [String: JSONValue] = [
             "schema_version": .integer(1), "observation": .object(observation),
             "last_action": .object(lastAction),
@@ -4883,8 +5232,6 @@ actor VisionCaptureToolLoop {
             packet["user_restrictions"] = .object([
                 "prohibited_targets": .array(
                     userRestrictions.displayTargets.map(JSONValue.string)),
-                "instruction": .string(
-                    "Do not propose or execute these targets. Continue other requested checks."),
             ])
         }
         if let instruction = body["instruction"], instruction != .string("Observation is complete.") {
@@ -5403,6 +5750,12 @@ actor VisionCaptureToolLoop {
                     body["outcome_note"] = .string(
                         "Request completion does not establish the expected effect, and does not establish that no effect occurred.")
                 }
+                if result.isActionDispatchUnproven {
+                    body["outcome"] = .string("delivery_unknown")
+                    body["delivery_unknown"] = .bool(true)
+                    body["instruction"] = .string(
+                        "VisionCapture could not prove whether this input was dispatched. Do not repeat it. Choose a read-only observation, then continue from new current choices without replaying this input.")
+                }
             case .launch, .observe, .screenshot:
                 break
             }
@@ -5613,7 +5966,10 @@ actor VisionCaptureToolLoop {
                 "the host could not encode its read-only no-progress correction")
         }
         let instruction =
-            "The same observed facts and current choices have now returned \(repetitionCount) times without verified progress. Do not repeat observe solely for these unchanged facts. Repeating delivered input whose effect remains inconclusive has not established progress and may repeat an effect. Choose a different current action, choose screenshot if it can clarify a safe next step, or report the unfinished work if no supported choice serves the goal. Use only current IDs and offered operations. A screenshot includes a following read and supplies only its newly offered choices. It does not restore refused actions. Observe after newly submitted input, required read-only recovery, or an expected external screen change. Never retry or replace input whose delivery is unknown."
+            "The same observed facts and current choices have now returned \(repetitionCount) times without verified progress. Observe is unavailable until another action changes the screen. Repeating delivered input whose effect remains inconclusive has not established progress and may repeat an effect. Choose a different current action, choose screenshot if it can clarify a safe next step, or report the unfinished work if no supported choice serves the goal. Use only current IDs and offered operations. A screenshot includes a following read and supplies only its newly offered choices. It does not restore refused actions. Never retry or replace input whose delivery is unknown."
+        if case .array(let allowed)? = body["allowed_next"] {
+            body["allowed_next"] = .array(allowed.filter { $0 != .string("observe") })
+        }
         if let value = body["guidance"] {
             let existing: String
             if case .string(let text) = value { existing = text }
@@ -5667,9 +6023,19 @@ actor VisionCaptureToolLoop {
     }
 
     private func isEligibleOfferedAction(_ intent: NavigationIntent) -> Bool {
+        // A frame that covers other controls has no reliable tap point: a tap
+        // at its centre lands on one of them (NestMind's "Create Profile"
+        // renamed the profile that way). Keep it in the facts with its warning;
+        // do not offer it as a tap.
+        if intent.operation == .tap, let selector = intent.selector, let role = intent.role,
+           currentScreenFacts?.coverageWarning(
+               selector: selector, role: role, selectorKind: intent.selectorKind) != nil {
+            return false
+        }
         do {
             try rejectPreviouslyRejectedProposal(intent)
             try rejectBlockedStaleAction(intent)
+            try rejectExhaustedIntent(intent)
             return true
         } catch {
             return false
@@ -6396,6 +6762,37 @@ actor VisionCaptureToolLoop {
             "The same navigation action was already rejected before submission on this observed screen content and was not sent again. Choose a different current available action, or report that no safe alternative is published.")
     }
 
+    /// Counts a dispatched published action. A verified effect clears the
+    /// counters: the task moved on. Three sends without a verified effect
+    /// withhold that action until something is verified.
+    private func noteExecuted(_ intent: NavigationIntent, result: VisionCaptureMCPResult) {
+        guard intent.operation == .tap || intent.operation == .setBoolean else { return }
+        let proof = try? Self.sanitizedNamedObject(
+            "proof", allowedKeys: ["verdict", "verdict_source", "reason_code", "action"],
+            in: result.value)
+        // A changed screen after the action is progress, even without a
+        // typed verdict. Only an action that changed nothing counts against it.
+        var changes: [[String: JSONValue]] = []
+        try? Self.collectStructuredObjects(named: "changes", in: result.value) { changes.append($0) }
+        // A pointer click carries no `changes` block; its screen observation
+        // says whether the screen changed after the click.
+        var observations: [[String: JSONValue]] = []
+        try? Self.collectStructuredObjects(named: "screen_observation", in: result.value) { observations.append($0) }
+        let screenChanged = changes.first?["screen_changed"] == .bool(true)
+            || observations.first?["status"] == .string("changed_observed")
+        if proof?["verdict"] == .string("verified") || screenChanged {
+            unverifiedAttempts.removeAll()
+        } else {
+            unverifiedAttempts[intent, default: 0] += 1
+        }
+    }
+
+    private func rejectExhaustedIntent(_ intent: NavigationIntent) throws {
+        guard unverifiedAttempts[intent, default: 0] >= Self.unverifiedAttemptLimit else { return }
+        throw VisionCaptureAgentError.navigationUnavailable(
+            "This action was already sent \(Self.unverifiedAttemptLimit) times without a verified effect, so it is withheld now. Do not repeat it. Use another way to reach the goal: type into the field, choose the return key, or take a screenshot and use tap_coordinates on the visible control.")
+    }
+
     private func rememberRejectedBeforeSubmissionProposal(
         _ intent: NavigationIntent,
         screen suppliedScreen: NavigationScreenScope? = nil
@@ -6644,7 +7041,8 @@ actor VisionCaptureToolLoop {
         configuration: VisionCaptureAgentConfiguration,
         refusalCode: String?,
         permittedNonTargetLaunchOutcome: [String: JSONValue]? = nil,
-        permitsUncertainRecipientAfterSubmission: Bool = false
+        permitsUncertainRecipientAfterSubmission: Bool = false,
+        permitsForeignObservedBundleID: Bool = false
     ) throws {
         var inspectedEmbeddedTexts: Set<String> = []
         var interactionEvidenceCopies = InteractionEvidenceCopies()
@@ -6667,7 +7065,8 @@ actor VisionCaptureToolLoop {
                     && interactionEvidenceCopies.allDispatchFactsProveNoSubmission)
                     || (permitsUncertainRecipientAfterSubmission
                         && interactionEvidenceCopies
-                            .allCopiesProveUncertainAfterSubmission)))
+                            .allCopiesProveUncertainAfterSubmission)),
+            permitsForeignObservedBundleID: permitsForeignObservedBundleID)
     }
 
     private struct InteractionEvidenceCopies {
@@ -6890,7 +7289,8 @@ actor VisionCaptureToolLoop {
         isPermittedNonTargetForeground: Bool = false,
         isInteractionEvidence: Bool = false,
         globallyPermitsNullObservedBundleID: Bool = false,
-        permitsNullObservedBundleID: Bool = false
+        permitsNullObservedBundleID: Bool = false,
+        permitsForeignObservedBundleID: Bool = false
     ) throws {
         switch value {
         case .object(let object):
@@ -6914,6 +7314,9 @@ actor VisionCaptureToolLoop {
                    !(permitsNullObservedBundleID
                        && key == "observed_bundle_id"
                        && child == .null),
+                   // A pointer click is delivered by coordinates; the observed
+                   // bundle is informational and may name a transition owner.
+                   !(permitsForeignObservedBundleID && key == "observed_bundle_id"),
                    !(isPermittedNonTargetForeground && key == "bundle_id") {
                     throw VisionCaptureAgentError.returnedIdentityMismatch(
                         fieldPath: boundedIdentityDiagnosticPath(childPath), refusalCode: refusalCode)
@@ -6942,7 +7345,8 @@ actor VisionCaptureToolLoop {
                     globallyPermitsNullObservedBundleID:
                         globallyPermitsNullObservedBundleID,
                     permitsNullObservedBundleID: key == "binding"
-                        && permitsNullObservedBundleIDInBinding)
+                        && permitsNullObservedBundleIDInBinding,
+                    permitsForeignObservedBundleID: permitsForeignObservedBundleID)
             }
         case .array(let array):
             for (index, child) in array.enumerated() {
@@ -6956,7 +7360,8 @@ actor VisionCaptureToolLoop {
                         permittedNonTargetLaunchOutcome,
                     isInteractionEvidence: isInteractionEvidence,
                     globallyPermitsNullObservedBundleID:
-                        globallyPermitsNullObservedBundleID)
+                        globallyPermitsNullObservedBundleID,
+                    permitsForeignObservedBundleID: permitsForeignObservedBundleID)
             }
         case .string(let text):
             guard inspectedEmbeddedTexts.insert(text).inserted else { return }
@@ -6970,7 +7375,8 @@ actor VisionCaptureToolLoop {
                     permittedNonTargetLaunchOutcome:
                         permittedNonTargetLaunchOutcome,
                     globallyPermitsNullObservedBundleID:
-                        globallyPermitsNullObservedBundleID)
+                        globallyPermitsNullObservedBundleID,
+                    permitsForeignObservedBundleID: permitsForeignObservedBundleID)
             }
         default:
             break
@@ -7067,7 +7473,7 @@ actor VisionCaptureToolLoop {
             body["instruction"] = .string(
                 "Not sent. \(localRejectionReason(error))"
                     + (facts == nil
-                        ? " Current accessibility facts are unavailable. Choose observe for fresh choices."
+                        ? " Current accessibility facts are unavailable. Choose a read-only action from allowed_next for fresh choices."
                         : " Use only the current choices."))
         default:
             break

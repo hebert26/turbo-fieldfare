@@ -153,7 +153,53 @@ private struct Parser {
         if takeWord("true") { return .bool(true) }
         if takeWord("false") { return .bool(false) }
         if takeWord("null") { return .null }
+        if let bare = try bareIdentifierValue() {
+            // A stray word glued to a delimited string, such as
+            // `action:s<|"|>tap<|"|>`. The delimited string is the value.
+            if allowsIncomplete {
+                let remaining = characters[index...]
+                let expected = Array("<|\"|>")
+                if remaining.count < expected.count,
+                   remaining.elementsEqual(expected.prefix(remaining.count)) {
+                    throw IncompleteToolCallPrefix()
+                }
+            }
+            if starts(with: "<|\"|>") {
+                // `type<|"|>,` is a bare word with only its closing delimiter:
+                // consume the delimiter and keep the word. Otherwise the
+                // delimiter opens the real string value.
+                let afterDelimiter = index + 5
+                if afterDelimiter < characters.count,
+                   characters[afterDelimiter] == "," || characters[afterDelimiter] == "}" {
+                    try consume("<|\"|>")
+                    return .string(bare)
+                }
+                if allowsIncomplete, afterDelimiter >= characters.count {
+                    throw IncompleteToolCallPrefix()
+                }
+                return .string(try gemmaString())
+            }
+            return .string(bare)
+        }
         return try number()
+    }
+
+    /// A bare word where a value belongs, such as `action:screenshot`. The
+    /// model sometimes omits the `<|"|>` delimiters. Accept the word as a
+    /// string so the call reaches semantic validation instead of cancelling
+    /// the generation at its first token.
+    mutating func bareIdentifierValue() throws -> String? {
+        guard index < characters.count,
+              characters[index].isLetter || characters[index] == "_" else { return nil }
+        let start = index
+        while index < characters.count {
+            let character = characters[index]
+            guard character.isLetter || character.isNumber
+                    || character == "_" || character == "-" else { break }
+            index += 1
+        }
+        if allowsIncomplete, isAtEnd { throw IncompleteToolCallPrefix() }
+        return String(characters[start..<index])
     }
 
     mutating func objectKey() throws -> String {

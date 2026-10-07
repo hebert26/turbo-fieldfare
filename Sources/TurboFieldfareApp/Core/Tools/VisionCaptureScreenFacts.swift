@@ -21,6 +21,11 @@ struct VisionCaptureScreenFacts {
         let enabled: Bool?
         let selected: Bool?
         let position: JSONValue?
+        /// XCTest marked the control not visible; VisionCapture confirmed its
+        /// text by OCR inside its accessibility frame.
+        let ocrConfirmed: Bool
+        /// Other controls whose centre lies inside this control's frame.
+        let coversControls: Int
     }
 
     private let elements: [Element]
@@ -33,8 +38,12 @@ struct VisionCaptureScreenFacts {
     init(elements: [JSONValue], navigation: [[String: JSONValue]] = []) {
         self.elements = elements.compactMap { value in
             guard case .object(let object) = value,
-                  object["visible"] == .bool(true),
+                  object["visible"] == .bool(true)
+                      || object["visibility"] == .string("ocr_confirmed"),
                   let role = Self.text(object["role"]) else { return nil }
+            let ocrConfirmed = object["visibility"] == .string("ocr_confirmed")
+            let coversControls: Int
+            if case .integer(let count)? = object["frame_covers_controls"] { coversControls = Int(count) } else { coversControls = 0 }
             let label = Self.rawText(object["label"])
             let type = Self.text(object["type"])
             let metadata = object["editable_field_metadata"]?.objectValue
@@ -57,12 +66,15 @@ struct VisionCaptureScreenFacts {
                 type: type,
                 identifier: Self.rawText(object["identifier"]),
                 label: label == Self.rawText(object["element_id"]) ? nil : label,
-                placeholder: Self.observedPlaceholder(metadata: metadata, type: type),
+                placeholder: Self.observedPlaceholder(
+                    metadata: metadata, type: type, ocrConfirmed: ocrConfirmed),
                 value: valueStatus == nil || valueStatus == "available" ? rawValue : nil,
                 valueStatus: valueStatus == "available" && rawValue == nil ? "unavailable" : valueStatus,
                 enabled: Self.boolean(object["enabled"]),
                 selected: Self.boolean(object["selected"]),
-                position: Self.position(in: object))
+                position: Self.position(in: object),
+                ocrConfirmed: ocrConfirmed,
+                coversControls: coversControls)
         }
         navigationFacts = navigation.flatMap { navigation in
             [("tab_bars", "Selected tab"), ("segmented_controls", "Selected segment")]
@@ -91,6 +103,7 @@ struct VisionCaptureScreenFacts {
         if let enabled = element.enabled { properties["enabled"] = .bool(enabled) }
         if let value = element.value { properties["value"] = .string(value) }
         if let status = element.valueStatus { properties["value_status"] = .string(status) }
+        if element.value?.isEmpty == true { properties["value_status"] = .string("available") }
         if let position = element.position { properties["position"] = position }
         return properties
     }
@@ -239,6 +252,17 @@ struct VisionCaptureScreenFacts {
                case .integer(let x)? = position["x_norm"], case .integer(let y)? = position["y_norm"] {
                 line += " at (\(x), \(y))"
             }
+            if element.ocrConfirmed, !line.contains(" at ("),
+               case .object(let position)? = element.position,
+               case .integer(let x)? = position["x_norm"], case .integer(let y)? = position["y_norm"] {
+                line += " at (\(x), \(y))"
+            }
+            if element.ocrConfirmed {
+                line += " ocr-confirmed: type or tap_coordinates at this position is allowed without a screenshot; for type, pass this line as target"
+            }
+            if element.coversControls > 0 {
+                line += " frame-covers-\(element.coversControls)-controls: an element tap may hit one of them"
+            }
             if element.role == "segmented_item" {
                 // Preserve independent observed state without joining rounded
                 // positions to a private action selector.
@@ -248,7 +272,23 @@ struct VisionCaptureScreenFacts {
                 if element.selected == true { line += " selected" }
                 if element.enabled == false { line += " disabled" }
             }
+            if Self.isEditableRole(element.role) {
+                if element.value?.isEmpty == true { line += " value=empty" }
+                if element.valueStatus == "placeholder_ambiguous" { line += " shows-placeholder-only (probably empty)" }
+            }
             if !lines.contains(line) { lines.append(line) }
+        }
+        let editable = elements.filter { Self.isEditableRole($0.role) }
+        if hasSoftwareKeyboard, !editable.isEmpty {
+            // The facts carry no focus flag, so the focused field is known to be
+            // empty only when every editable field on screen is empty.
+            if editable.allSatisfy({ $0.value?.isEmpty == true || $0.valueStatus == "placeholder_ambiguous" }) {
+                lines.append("[keyboard] open: the focused field is empty; type its text first, then the return key submits it")
+            } else {
+                // Generic iOS behaviour: the keyboard's return key submits a one-line
+                // field. It is the reliable exit when a submit button cannot be reached.
+                lines.append("[keyboard] open: the return key submits the focused one-line field when no submit button can be reached (choose the return choice)")
+            }
         }
         return lines.isEmpty ? nil : lines.joined(separator: "\n")
     }
@@ -282,9 +322,12 @@ struct VisionCaptureScreenFacts {
         return matches.count == 1 ? matches.first : nil
     }
 
-    private static func observedPlaceholder(metadata: [String: JSONValue]?, type: String?) -> String? {
+    private static func observedPlaceholder(
+        metadata: [String: JSONValue]?, type: String?, ocrConfirmed: Bool = false
+    ) -> String? {
         guard let metadata, let type, metadata["type"] == .string(type),
-              metadata["enabled"] == .bool(true), metadata["visible"] == .bool(true),
+              metadata["enabled"] == .bool(true),
+              metadata["visible"] == .bool(true) || ocrConfirmed,
               let placeholder = metadata["placeholder"]?.objectValue,
               placeholder["status"] == .string("present"),
               let raw = rawText(placeholder["text"]), !raw.isEmpty, raw.utf8.count <= 256,
@@ -309,6 +352,87 @@ struct VisionCaptureScreenFacts {
     private static func boolean(_ value: JSONValue?) -> Bool? {
         guard case .bool(let boolean) = value else { return nil }
         return boolean
+    }
+
+    /// Controls hidden from XCTest but confirmed by OCR carry accessibility
+    /// positions, so coordinate taps on them need no screenshot evidence.
+    /// Position of an OCR-confirmed editable field for a type action. The target may be
+    /// the fact line itself (it carries "at (x, y)") or any text when one such field exists.
+    func ocrConfirmedTypingPosition(for target: String?) -> (x: Int64, y: Int64)? {
+        let fields = elements.filter { $0.ocrConfirmed && Self.isEditableRole($0.role) }
+        func point(_ element: Element) -> (x: Int64, y: Int64)? {
+            guard case .object(let position)? = element.position,
+                  case .integer(let x)? = position["x_norm"],
+                  case .integer(let y)? = position["y_norm"] else { return nil }
+            return (x, y)
+        }
+        if let target, let range = target.range(of: #"\((\d+),\s*(\d+)\)"#, options: .regularExpression) {
+            let numbers = target[range].split(whereSeparator: { !$0.isNumber }).compactMap { Int64($0) }
+            if numbers.count == 2, isOCRConfirmedPosition(x: numbers[0], y: numbers[1]) {
+                return (numbers[0], numbers[1])
+            }
+        }
+        if fields.count == 1, let point = point(fields[0]) { return point }
+        return nil
+    }
+
+    private static func isEditableRole(_ role: String) -> Bool {
+        ["text_field", "textfield", "secure_text_field", "search_field", "text_view", "textview"]
+            .contains(role.lowercased())
+    }
+
+    /// Normalized position of a control, for a tap by position when a tap by name is refused.
+    func normalizedPosition(selector: String, role: String, selectorKind: String? = nil) -> (x: Int64, y: Int64)? {
+        guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
+              case .object(let position)? = elements[index].position,
+              case .integer(let x)? = position["x_norm"],
+              case .integer(let y)? = position["y_norm"] else { return nil }
+        return (x, y)
+    }
+
+    /// Warning text for a control whose frame covers other controls, or nil.
+    func coverageWarning(selector: String, role: String, selectorKind: String? = nil) -> String? {
+        guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
+              elements[index].coversControls > 0 else { return nil }
+        return "its frame covers \(elements[index].coversControls) other controls, so an element tap may hit one of them; if the tap has no effect, take a screenshot and use tap_coordinates on the visible control"
+    }
+
+    /// True when an editable field on screen still contains the text.
+    func editableFieldShows(text: String) -> Bool {
+        let needle = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return false }
+        return elements.contains { element in
+            Self.isEditableRole(element.role)
+                && [element.value, element.label].contains { $0?.contains(needle) == true }
+        }
+    }
+
+    /// Labels and static texts on screen, trimmed and de-duplicated.
+    var readableTexts: [String] {
+        elements.compactMap { element -> String? in
+            guard element.type != "XCUIElementTypeKey",
+                  let text = element.label.flatMap(Self.displayText),
+                  !text.hasPrefix("__vc") else { return nil }
+            return text
+        }
+        .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
+    }
+
+    var hasOCRConfirmedEditableField: Bool {
+        elements.contains { $0.ocrConfirmed && Self.isEditableRole($0.role) }
+    }
+
+    var hasOCRConfirmedControls: Bool {
+        elements.contains { $0.ocrConfirmed && $0.position != nil }
+    }
+
+    func isOCRConfirmedPosition(x: Int64, y: Int64) -> Bool {
+        elements.contains { element in
+            guard element.ocrConfirmed, case .object(let position)? = element.position,
+                  case .integer(let px)? = position["x_norm"],
+                  case .integer(let py)? = position["y_norm"] else { return false }
+            return abs(px - x) <= 30 && abs(py - y) <= 30
+        }
     }
 
     private static func position(in object: [String: JSONValue]) -> JSONValue? {

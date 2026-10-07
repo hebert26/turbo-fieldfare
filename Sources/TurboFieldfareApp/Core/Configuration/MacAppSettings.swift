@@ -31,6 +31,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     var qwenToolThinkingEnabled: Bool = true
     var qwenSourceRoot: String? = nil
     var qwenRegistrationPath: String? = nil
+    /// Agent Mode targets. Absent in older files; the app keeps its defaults then.
+    var agentBundleIdentifier: String? = nil
+    var agentSimulatorUDID: String? = nil
 
     var gemmaToolThinkingEnabled: Bool {
         get { toolThinkingEnabled }
@@ -59,6 +62,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case qwenToolThinkingEnabled
         case qwenSourceRoot
         case qwenRegistrationPath
+        case agentBundleIdentifier
+        case agentSimulatorUDID
     }
 
     init(version: Int = currentVersion,
@@ -81,7 +86,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          selectedModelID: AppModelID = AppModelCatalog.defaultID,
          qwenToolThinkingEnabled: Bool = true,
          qwenSourceRoot: String? = nil,
-         qwenRegistrationPath: String? = nil) {
+         qwenRegistrationPath: String? = nil,
+         agentBundleIdentifier: String? = nil,
+         agentSimulatorUDID: String? = nil) {
         self.version = version
         self.contextTokens = contextTokens
         self.qwenContextTokens = qwenContextTokens
@@ -103,6 +110,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.qwenToolThinkingEnabled = qwenToolThinkingEnabled
         self.qwenSourceRoot = qwenSourceRoot
         self.qwenRegistrationPath = qwenRegistrationPath
+        self.agentBundleIdentifier = agentBundleIdentifier
+        self.agentSimulatorUDID = agentSimulatorUDID
     }
 
     init(from decoder: Decoder) throws {
@@ -148,6 +157,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
             forKey: .qwenToolThinkingEnabled) ?? true
         qwenSourceRoot = try container.decodeIfPresent(String.self, forKey: .qwenSourceRoot)
         qwenRegistrationPath = try container.decodeIfPresent(String.self, forKey: .qwenRegistrationPath)
+        agentBundleIdentifier = try container.decodeIfPresent(String.self, forKey: .agentBundleIdentifier)
+        agentSimulatorUDID = try container.decodeIfPresent(String.self, forKey: .agentSimulatorUDID)
     }
 
     func contextTokens(for modelID: AppModelID) -> Int {

@@ -358,6 +358,12 @@ public final class AppModel {
         self.showPromptExamples = settings.showPromptExamples
         self.loadModelOnLaunch = settings.loadModelOnLaunch
         self.agentModeEnabled = settings.agentModeEnabled
+        if let bundle = settings.agentBundleIdentifier, !bundle.isEmpty {
+            self.agentBundleIdentifier = bundle
+        }
+        if let udid = settings.agentSimulatorUDID, !udid.isEmpty {
+            self.agentSimulatorUDID = udid
+        }
         self.installationStatus = installationStatusProvider(directory, selectedEntry)
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(
             at: directory,
@@ -1189,12 +1195,14 @@ public final class AppModel {
         guard agentModeEnabled, !isRunning,
               agentBundleIdentifier != value else { return }
         agentBundleIdentifier = value
+        persistSettings()
     }
 
     public func setAgentSimulatorUDID(_ value: String) {
         guard agentModeEnabled, !isRunning,
               agentSimulatorUDID != value else { return }
         agentSimulatorUDID = value
+        persistSettings()
     }
 
     private func makeAgentConfiguration() -> VisionCaptureAgentConfiguration {
@@ -2388,6 +2396,12 @@ public final class AppModel {
         showPromptExamples = settings.showPromptExamples
         loadModelOnLaunch = settings.loadModelOnLaunch
         agentModeEnabled = settings.agentModeEnabled
+        if let bundle = settings.agentBundleIdentifier, !bundle.isEmpty {
+            agentBundleIdentifier = bundle
+        }
+        if let udid = settings.agentSimulatorUDID, !udid.isEmpty {
+            agentSimulatorUDID = udid
+        }
         agentToolLoop = VisionCaptureToolLoop()
     }
 
@@ -2410,6 +2424,8 @@ public final class AppModel {
         settings.rdadvisePolicy = runtimeOptions.rdadvisePolicy
         settings.loadModelOnLaunch = loadModelOnLaunch
         settings.agentModeEnabled = agentModeEnabled
+        settings.agentBundleIdentifier = agentBundleIdentifier
+        settings.agentSimulatorUDID = agentSimulatorUDID
         settings.selectedModelID = selectedModelID
         settings.qwenSourceRoot = qwenSourceDirectory?.path
         settings.qwenRegistrationPath = catalogEntry(for: .qwen3_6).location.textModelURL.path
@@ -2882,6 +2898,9 @@ public final class AppModel {
                     await self.finishAgentFailure(.cancelled, generation: generation)
                 } catch VisionCaptureAgentError.proposalCorrectionExhausted(let message) {
                     await self.finishAgentProposalPause(message, generation: generation)
+                } catch AppInferenceError.structuredToolFailure(let message, true, _) {
+                    // A malformed model request sent nothing. Pause, do not end the chat.
+                    await self.finishAgentProposalPause(message, generation: generation)
                 } catch let error as VisionCaptureAgentError {
                     await self.finishAgentFailure(
                         .conversationLineageLost(error.description),
@@ -3209,8 +3228,9 @@ public final class AppModel {
         baseRequest: AppGenerationRequest,
         toolTurn: AppToolTurn,
         generation: Int,
-        allowsMalformedRegeneration: Bool = true
+        malformedRegenerationsRemaining: Int = 2
     ) async throws -> VisionCaptureModelCompletion {
+        let allowsMalformedRegeneration = malformedRegenerationsRemaining > 0
         await beginAgentStep(generation: generation)
         var request = try await agentRequest(baseRequest, toolTurn: toolTurn, generation: generation)
         let trace = AgentInferenceTrace.shared
@@ -3231,7 +3251,7 @@ public final class AppModel {
         if case .checkpoint(let id) = toolTurn { checkpointID = id } else { checkpointID = nil }
         do {
             await recordAgentModelInput(
-                request, isFormatCorrection: !allowsMalformedRegeneration,
+                request, isFormatCorrection: malformedRegenerationsRemaining < 2,
                 generation: generation)
             generationEvents: for try await event in client.generate(request) {
                 switch event {
@@ -3342,7 +3362,7 @@ public final class AppModel {
                     let corrected = try await generateAgentStep(
                         client: client, baseRequest: correctedRequest,
                         toolTurn: toolTurn.correctingMalformedResponse(), generation: generation,
-                        allowsMalformedRegeneration: false)
+                        malformedRegenerationsRemaining: malformedRegenerationsRemaining - 1)
                     await applyAgentActivity(.generationRecovery(id: recoveryID,
                         text: "Model response regenerated after a format correction.",
                         status: .succeeded), generation: generation)
@@ -3359,7 +3379,7 @@ public final class AppModel {
                let failure = error as? AppInferenceError,
                case .structuredToolFailure(_, true, let evidence) = failure {
                 throw AppInferenceError.structuredToolFailure(
-                    message: "The model still produced an invalid tool request after one format correction. This invalid request was not sent. Generation stopped.",
+                    message: "The model still produced an invalid tool request after two format corrections. This invalid request was not sent. Agent paused; completed work is retained. You can continue this chat.",
                     canRegenerateToolResult: true,
                     evidence: evidence)
             }

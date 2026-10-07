@@ -152,6 +152,14 @@ struct VisionCaptureMCPResult: Sendable {
     var isSystemAlertDeliveryUnknown: Bool {
         refusalCode == "SYSTEM_ALERT_TAP_DELIVERY_UNKNOWN"
     }
+
+    var isActionDispatchUnproven: Bool {
+        isError
+            && refusalCode == "CACHE_DISPATCH_UNPROVEN"
+            && dispatchAttempted == nil
+            && !hasConflictingDispatchAttemptEvidence
+            && serverOutcome.verdict == "failed"
+    }
 }
 
 enum VisionCaptureMCPError: Error, CustomStringConvertible {
@@ -365,10 +373,14 @@ actor VisionCaptureMCPClient {
                 && !dispatchAttempts.contains(true)
                 && dispatchAttempts.count <= 1
                 && Self.provesGuardedTargetRejectionBeforeSubmission(in: result),
+            // The cache is a shortcut, not a gate. Every stale or failed cache
+            // check that sent nothing is a recoverable pre-dispatch refusal.
             isStaleActionCapabilityBeforeDispatch:
                 isError
-                && refusalCode == "CACHE_ACTION_CAPABILITY_STALE"
-                && dispatchAttempts == [false],
+                && ((refusalCode?.hasPrefix("CACHE_") ?? false) && dispatchAttempts == [false]
+                    || (["DISPATCH_REJECTED_BEFORE_SUBMISSION", "EXECUTION_NO_MATCH", "TARGET_UNAVAILABLE"].contains(refusalCode)
+                        && !dispatchAttempts.contains(true)
+                        && Self.provesRejectedBeforeSubmission(in: result))),
             isSourceLayoutChangedBeforeRevalidation:
                 isError
                 && refusalCode == "CACHE_REVALIDATION_CAPABILITY_STALE"
@@ -399,6 +411,38 @@ actor VisionCaptureMCPClient {
                 isError && refusalCode == "CACHE_ACTION_CAPABILITY_STALE"
                 && dispatchAttempts == [false]
                 && Self.provesObservationTopologyRefresh(in: result, arguments: arguments))
+    }
+
+    /// Every dispatch envelope says the input was refused before submission.
+    private static func provesRejectedBeforeSubmission(in value: JSONValue) -> Bool {
+        var dispatches: [[String: JSONValue]] = []
+        findObjects(named: "dispatch", in: value, into: &dispatches)
+        guard !dispatches.isEmpty else { return false }
+        return dispatches.allSatisfy {
+            $0["status"] == .string("rejected_before_submission")
+                && $0["submission_started"] != .bool(true)
+                && $0["delivery_acknowledged"] != .bool(true)
+        }
+    }
+
+    private static func findObjects(
+        named name: String, in value: JSONValue, into found: inout [[String: JSONValue]]
+    ) {
+        switch value {
+        case .object(let object):
+            for (key, child) in object {
+                if key == name, case .object(let nested) = child { found.append(nested) }
+                findObjects(named: name, in: child, into: &found)
+            }
+        case .array(let array):
+            for child in array { findObjects(named: name, in: child, into: &found) }
+        case .string(let text):
+            for embedded in embeddedJSONValues(in: text) {
+                findObjects(named: name, in: embedded, into: &found)
+            }
+        default:
+            break
+        }
     }
 
     private static func provesPointerPreCaptureFailureBeforeSubmission(

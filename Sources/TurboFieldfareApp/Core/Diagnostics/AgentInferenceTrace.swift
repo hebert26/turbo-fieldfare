@@ -729,6 +729,38 @@ actor AgentInferenceTrace {
 
     /// Diagnostic-only projection of an already-returned failure. It is captured
     /// before identity validation, so none of these fields grant execution rights.
+    /// One line per host request: which operation, how long, and whether it failed.
+    /// Only a fixed operation name crosses this boundary.
+    func mcpRequest(
+        step: Step?, requestID: UUID, operation: String?, elapsedSeconds: Double,
+        isError: Bool, refusalCode: String?
+    ) {
+        guard let step else { return }
+        var body: [String: JSONValue] = [
+            "host_request_id": .string(requestID.uuidString),
+            "elapsed_seconds": .number(elapsedSeconds),
+            "is_error": .bool(isError),
+            "operation": .string(Self.publicOperationName(operation)),
+        ]
+        if let refusalCode, let value = FailureField.code.project(.string(refusalCode)) {
+            body["refusal_code"] = value
+        }
+        append(step: step, event: "mcp_request", body: ["mcp_request": .object(body)],
+               maximumBytes: 2_048)
+    }
+
+    static func publicOperationName(_ operation: String?) -> String {
+        guard let operation else { return "unknown" }
+        let fixedOperations = ["launch app", "take a screenshot", "go back", "inspect cache",
+                               "describe screen", "describe system alert", "press system alert button",
+                               "tap cached action", "execute cached action", "revalidate cached action",
+                               "execute observed action", "tap coordinates", "click pointer"]
+        if fixedOperations.contains(operation) { return operation }
+        if operation.hasPrefix("type ") { return "type" }
+        if operation.hasPrefix("tap ") { return "tap" }
+        return "other"
+    }
+
     func mcpFailure(
         step: Step?, requestID: UUID, operation: String?, result: VisionCaptureMCPResult
     ) {
