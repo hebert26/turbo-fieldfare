@@ -240,7 +240,9 @@ struct VisionCaptureScreenFacts {
                isLowValueSoftwareKeyboardControl(selector: selector, role: element.role) {
                 continue
             }
-            let content = [element.label, element.value]
+            // A field without a label is named by its placeholder ("Tag name"
+            // against "What do you want to do?"), so the model can tell them apart.
+            let content = [element.label ?? element.placeholder, element.value]
                 .compactMap { $0.flatMap(Self.displayText) }
                 .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
                 .joined(separator: ": ")
@@ -391,6 +393,12 @@ struct VisionCaptureScreenFacts {
     }
 
     /// Warning text for a control whose frame covers other controls, or nil.
+    /// The element's enabled flag, or nil when unknown or not on screen.
+    func isEnabled(selector: String, role: String, selectorKind: String? = nil) -> Bool? {
+        guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind) else { return nil }
+        return elements[index].enabled
+    }
+
     func coverageWarning(selector: String, role: String, selectorKind: String? = nil) -> String? {
         guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
               elements[index].coversControls > 0 else { return nil }

@@ -901,6 +901,9 @@ actor VisionCaptureToolLoop {
     /// Fast host path: the pointer task kept live across taps in one run, and
     /// the device it belongs to. Hidden and dropped when the run ends.
     private var liveComputerUseTask: (udid: String, task: ComputerUseTaskIdentity)?
+    /// The last screen facts before an action invalidated them; the effect
+    /// diff compares them with the read after the action.
+    private var lastInvalidatedScreenFacts: VisionCaptureScreenFacts?
     private var journeyEvents: [JourneyEvent] = []
     private var completedCycleActions: [JourneyAction] = []
     private var verifiedTypingActions: Set<VerifiedTypingAction> = []
@@ -2383,7 +2386,7 @@ actor VisionCaptureToolLoop {
         fallback: (() throws -> NavigationOutcome)? = nil,
         actionArguments: JSONValue? = nil
     ) async throws -> NavigationOutcome {
-        let factsBeforeAction = currentScreenFacts
+        let factsBeforeAction = currentScreenFacts ?? lastInvalidatedScreenFacts
         let proof = try Self.sanitizedNamedObject(
             "proof", allowedKeys: ["verdict", "verdict_source", "reason_code", "action"],
             in: result.value)
@@ -2496,6 +2499,10 @@ actor VisionCaptureToolLoop {
             if !appeared.isEmpty { parts.append("appeared: " + appeared.joined(separator: ", ")) }
             if !disappeared.isEmpty { parts.append("disappeared: " + disappeared.joined(separator: ", ")) }
             if !parts.isEmpty { body["effect"] = .string(parts.joined(separator: "; ")) }
+        } else if actionArguments?.objectValue?["request"] == .string("click pointer") {
+            // Temporary diagnostic (run 27): why the effect diff did not run.
+            body["effect_debug"] = .string(
+                "before=\(factsBeforeAction?.readableTexts.count.description ?? "nil") after=\(refreshed.screenFacts?.readableTexts.count.description ?? "nil") changes=\(changes.count)")
         }
         if let changed = changes.first?["screen_changed"], case .bool = changed {
             body["screen_changed"] = changed
@@ -6032,6 +6039,13 @@ actor VisionCaptureToolLoop {
                selector: selector, role: role, selectorKind: intent.selectorKind) != nil {
             return false
         }
+        // A disabled control is a fact, never an offered action (run 25 typed
+        // into a disabled field).
+        if let selector = intent.selector, let role = intent.role,
+           currentScreenFacts?.isEnabled(
+               selector: selector, role: role, selectorKind: intent.selectorKind) == false {
+            return false
+        }
         do {
             try rejectPreviouslyRejectedProposal(intent)
             try rejectBlockedStaleAction(intent)
@@ -6605,6 +6619,8 @@ actor VisionCaptureToolLoop {
     }
 
     private func invalidateScreenObservation() {
+        // Keep the last read for the effect diff after a pointer click.
+        if let facts = currentScreenFacts { lastInvalidatedScreenFacts = facts }
         currentImageObservation = nil
         currentChoiceBindings.removeAll(keepingCapacity: true)
         permittedNextOperations = nil
