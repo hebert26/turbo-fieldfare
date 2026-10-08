@@ -19,6 +19,8 @@ enum VisionCaptureToolDefinitions {
         "visioncapture_navigate with action \"tap_coordinates\", x_norm, y_norm and intent"
     static let visualClickCall =
         "visioncapture_navigate with action \"computer_use_click\", x_norm, y_norm and intent"
+    static let typeAtPositionCall =
+        "visioncapture_navigate with action \"type\", text, x_norm and y_norm"
 
     static let all: [AppToolDefinition] = [
         AppToolDefinition(
@@ -62,14 +64,14 @@ enum VisionCaptureToolDefinitions {
                         "minimum": .integer(0),
                         "maximum": .integer(1000),
                         "description": .string(
-                            "For tap_coordinates or computer_use_click. X position in the current screenshot, from 0 at the left to 1000 at the right."),
+                            "For tap_coordinates, computer_use_click, or type at an ocr-confirmed field. X position on the screen, from 0 at the left to 1000 at the right."),
                     ]),
                     "y_norm": .object([
                         "type": .string("integer"),
                         "minimum": .integer(0),
                         "maximum": .integer(1000),
                         "description": .string(
-                            "For tap_coordinates or computer_use_click. Y position in the current screenshot, from 0 at the top to 1000 at the bottom."),
+                            "For tap_coordinates, computer_use_click, or type at an ocr-confirmed field. Y position on the screen, from 0 at the top to 1000 at the bottom."),
                     ]),
                     "intent": .object([
                         "type": .string("string"),

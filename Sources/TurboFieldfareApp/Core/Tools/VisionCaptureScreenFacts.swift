@@ -288,7 +288,7 @@ struct VisionCaptureScreenFacts {
                 line += " at (\(x), \(y))"
             }
             if element.ocrConfirmed {
-                line += " ocr-confirmed: type, or \(VisionCaptureToolDefinitions.coordinateTapCall) at this position, is allowed without a screenshot; for type, pass this line as target"
+                line += " ocr-confirmed"
             }
             if element.coversControls > 0 {
                 line += " frame-covers-\(element.coversControls)-controls: an element tap may hit one of them"
@@ -410,23 +410,16 @@ struct VisionCaptureScreenFacts {
 
     /// Controls hidden from XCTest but confirmed by OCR carry accessibility
     /// positions, so coordinate taps on them need no screenshot evidence.
-    /// Position of an OCR-confirmed editable field for a type action. The target may be
-    /// the fact line itself (it carries "at (x, y)") or any text when one such field exists.
-    func ocrConfirmedTypingPosition(for target: String?) -> (x: Int64, y: Int64)? {
-        let fields = elements.filter { $0.ocrConfirmed && Self.isEditableRole($0.role) }
-        func point(_ element: Element) -> (x: Int64, y: Int64)? {
+    /// Position of the OCR-confirmed editable field at (x, y), within the usual
+    /// tolerance. Text never selects a field.
+    func ocrConfirmedEditablePosition(x: Int64, y: Int64) -> (x: Int64, y: Int64)? {
+        for element in elements where element.ocrConfirmed && Self.isEditableRole(element.role) {
             guard case .object(let position)? = element.position,
-                  case .integer(let x)? = position["x_norm"],
-                  case .integer(let y)? = position["y_norm"] else { return nil }
-            return (x, y)
+                  case .integer(let px)? = position["x_norm"],
+                  case .integer(let py)? = position["y_norm"],
+                  abs(px - x) <= 30, abs(py - y) <= 30 else { continue }
+            return (px, py)
         }
-        if let target, let range = target.range(of: #"\((\d+),\s*(\d+)\)"#, options: .regularExpression) {
-            let numbers = target[range].split(whereSeparator: { !$0.isNumber }).compactMap { Int64($0) }
-            if numbers.count == 2, isOCRConfirmedPosition(x: numbers[0], y: numbers[1]) {
-                return (numbers[0], numbers[1])
-            }
-        }
-        if fields.count == 1, let point = point(fields[0]) { return point }
         return nil
     }
 

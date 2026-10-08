@@ -395,6 +395,76 @@ import TurboFieldfare
     }
 
     @Test
+    func ambiguousTypingRefusalBeforeSubmissionIsRecoverableWithOneNote() {
+        func result(code: String, targetReason: String, dispatch: [String: JSONValue]) -> VisionCaptureMCPResult {
+            let evidence: [String: JSONValue] = [
+                "target": .object(["status": .string("ambiguous"), "reason_code": .string(targetReason)]),
+                "dispatch": .object(dispatch),
+            ]
+            return VisionCaptureMCPResult(
+                value: .object(["isError": .bool(true),
+                    "payload": .object(["interaction_evidence": .object(evidence)])]),
+                isError: true, refusalCode: code, dispatchAttempted: nil,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+        let rejected: [String: JSONValue] = [
+            "status": .string("rejected_before_submission"),
+            "submission_started": .bool(false), "delivery_acknowledged": .bool(false),
+        ]
+        let submitted: [String: JSONValue] = [
+            "status": .string("submitted"),
+            "submission_started": .bool(true), "delivery_acknowledged": .bool(true),
+        ]
+        // Run 35 step 45: two fields shared one identifier and no text was submitted.
+        #expect(VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "EXECUTION_NO_MATCH", targetReason: "TARGET_AMBIGUOUS", dispatch: rejected)))
+        #expect(!VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "EXECUTION_NO_MATCH", targetReason: "TARGET_AMBIGUOUS", dispatch: submitted)))
+        #expect(!VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "EXECUTION_NO_MATCH", targetReason: "TARGET_NOT_FOUND", dispatch: rejected)))
+        #expect(VisionCaptureToolLoop.ambiguousTargetInstruction(isTyping: true)
+            == "Several fields match this name; tap the field at its position, then type without a target.")
+        #expect(VisionCaptureToolLoop.ambiguousTargetInstruction(isTyping: false).contains("choose one by its position"))
+    }
+
+    @Test
+    func busyHostReadBeforeDispatchIsRecoverable() {
+        func result(reason: String, dispatchAttempted: Bool? = nil, dispatch: [String: JSONValue]? = nil) -> VisionCaptureMCPResult {
+            var payload: [String: JSONValue] = [
+                "proof": .object(["verdict": .string("failed"), "reason": .string(reason)]),
+            ]
+            if let dispatch { payload["interaction_evidence"] = .object(["dispatch": .object(dispatch)]) }
+            return VisionCaptureMCPResult(
+                value: .object(["isError": .bool(true), "payload": .object(payload)]),
+                isError: true, refusalCode: nil, dispatchAttempted: dispatchAttempted,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+        // Run 36 step 38: the type request met VisionCapture's own read.
+        let busy = "Error: Device DE8B571C-2234-498F-9FAC-71C96B614792 is already running describe work for mcp request 5EB92415-3CE6-4EDD-B242-925984FE593A."
+        #expect(VisionCaptureToolLoop.isBusyHostReadBeforeDispatch(result(reason: busy)))
+        #expect(!VisionCaptureToolLoop.isBusyHostReadBeforeDispatch(result(reason: busy, dispatchAttempted: true)))
+        #expect(!VisionCaptureToolLoop.isBusyHostReadBeforeDispatch(result(reason: busy, dispatch: [
+            "status": .string("submitted"), "submission_started": .bool(true), "delivery_acknowledged": .bool(true),
+        ])))
+        #expect(!VisionCaptureToolLoop.isBusyHostReadBeforeDispatch(result(reason: "Error: element not found.")))
+        #expect(VisionCaptureToolLoop.busyHostReadInstruction.contains("nothing was sent"))
+    }
+
+    @Test
     func ambiguousTargetIsRecoverableOnlyBeforeSubmission() {
         func result(
             code: String, dispatchAttempted: Bool? = nil, dispatch: [String: JSONValue]?

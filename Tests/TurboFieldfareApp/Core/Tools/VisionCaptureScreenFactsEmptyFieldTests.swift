@@ -127,6 +127,38 @@ import TurboFieldfare
         #expect(home.selectorKind == nil)
     }
 
+    @Test
+    func ocrConfirmedFieldIsNamedByPositionOnlyAndTextNeverSelectsIt() throws {
+        let facts = VisionCaptureScreenFacts(elements: [
+            .object([
+                "element_id": .string("name-field"), "role": .string("text_field"),
+                "type": .string("XCUIElementTypeTextField"), "visible": .bool(false),
+                "visibility": .string("ocr_confirmed"), "enabled": .bool(true),
+                "label": .string("Name your profile"),
+                "x_norm": .integer(500), "y_norm": .integer(532),
+            ]),
+            .object([
+                "element_id": .string("ocr-button"), "role": .string("button"),
+                "type": .string("XCUIElementTypeButton"), "visible": .bool(false),
+                "visibility": .string("ocr_confirmed"), "enabled": .bool(true),
+                "label": .string("Continue"), "x_norm": .integer(500), "y_norm": .integer(900),
+            ]),
+        ])
+        let summary = try #require(facts.summary())
+        #expect(summary.contains("[text_field] Name your profile at (500, 532) ocr-confirmed"))
+        #expect(!summary.contains("visioncapture_navigate"))
+        #expect(!summary.contains("pass this line"))
+        // Only a position on an ocr-confirmed editable field resolves.
+        #expect(facts.ocrConfirmedEditablePosition(x: 505, y: 530)! == (500, 532))
+        #expect(facts.ocrConfirmedEditablePosition(x: 500, y: 700) == nil)
+        #expect(facts.ocrConfirmedEditablePosition(x: 500, y: 900) == nil)
+        // A fact line or a label is not a target.
+        #expect(VisionCaptureToolLoop.isChoiceIDShaped("c214"))
+        #expect(!VisionCaptureToolLoop.isChoiceIDShaped("[text_field] Name your profile at (500, 532) ocr-confirmed"))
+        #expect(!VisionCaptureToolLoop.isChoiceIDShaped("Name your profile"))
+        #expect(VisionCaptureToolLoop.choiceTargetReason == "Targets are choice IDs; for positions use x_norm and y_norm.")
+    }
+
     /// A quick-add text field with the software keyboard open, decoded from
     /// JSON the way the loop receives returned elements.
     private static func facts(fieldValue: String, valueStatus: String) throws -> VisionCaptureScreenFacts {

@@ -371,6 +371,9 @@ actor VisionCaptureToolLoop {
     private struct AmbiguousTargetBeforeDispatch: Error {
         let failure: VisionCaptureServerOutcome
     }
+    private struct BusyHostReadBeforeDispatch: Error {
+        let failure: VisionCaptureServerOutcome
+    }
     private var activePendingUserInstructionCheck: HasPendingUserInstruction?
 
     /// Starts a later user instruction inside the same QA task. Completed
@@ -1305,6 +1308,13 @@ actor VisionCaptureToolLoop {
                         outcome = try await observeAfterAmbiguousTarget(
                             intent, failure: refusal.failure,
                             configuration: configuration, activity: activity)
+                    } catch let refusal as BusyHostReadBeforeDispatch {
+                        // Nothing was sent. Let VisionCapture finish its own read, then read once.
+                        try await Task.sleep(for: .seconds(1))
+                        outcome = try await observeAfterAmbiguousTarget(
+                            intent, failure: refusal.failure,
+                            configuration: configuration, activity: activity,
+                            instruction: Self.busyHostReadInstruction)
                     }
                     checkingLocalProposal = false
                     images = outcome.imageAttachments
@@ -2029,17 +2039,14 @@ actor VisionCaptureToolLoop {
             checkingLocalProposal = true
             try rejectPreviouslyRejectedProposal(intent)
             var parameters: [String: JSONValue] = [:]
-            if let selector = intent.selector {
-                if let position = currentScreenFacts?.ocrConfirmedTypingPosition(for: selector),
-                   (try? uniquePublishedEditableField(for: intent)) == nil {
-                    // The field is on screen but not published. Type at its
-                    // position: VisionCapture taps the point, then types.
-                    parameters["x_norm"] = .integer(position.x)
-                    parameters["y_norm"] = .integer(position.y)
-                } else {
-                    let field = try uniquePublishedEditableField(for: intent)
-                    parameters[field.selectorKind] = .string(selector)
-                }
+            if intent.selectorKind == "ocr_position", let x = intent.xNorm, let y = intent.yNorm {
+                // The field is on screen but not published. Type at its
+                // position: VisionCapture taps the point, then types.
+                parameters["x_norm"] = .integer(Int64(x))
+                parameters["y_norm"] = .integer(Int64(y))
+            } else if let selector = intent.selector {
+                let field = try uniquePublishedEditableField(for: intent)
+                parameters[field.selectorKind] = .string(selector)
             }
             guard let text = intent.text else {
                 throw VisionCaptureAgentError.malformedCall(
@@ -3159,6 +3166,30 @@ actor VisionCaptureToolLoop {
         return ocrPositions.contains { abs($0.x - x) <= 10 && abs($0.y - y) <= 10 }
     }
 
+    static let busyHostReadInstruction =
+        "VisionCapture was still busy with its own read; nothing was sent. Choose again from these fresh choices."
+
+    /// VisionCapture refused because a screen read it started still held the device (for
+    /// example inside the loop's own type-at-position request), and nothing was dispatched.
+    static func isBusyHostReadBeforeDispatch(_ result: VisionCaptureMCPResult) -> Bool {
+        guard result.isError, result.dispatchAttempted != true,
+              !result.hasConflictingDispatchAttemptEvidence,
+              let reason = result.serverOutcome.reason,
+              reason.range(of: #"is already running describe work for mcp request [0-9A-Fa-f-]{36}"#,
+                           options: .regularExpression) != nil else { return false }
+        var dispatches: [[String: JSONValue]] = []
+        try? collectStructuredObjects(named: "dispatch", in: result.value) { dispatches.append($0) }
+        return dispatches.allSatisfy {
+            $0["submission_started"] != .bool(true) && $0["delivery_acknowledged"] != .bool(true)
+        }
+    }
+
+    static func ambiguousTargetInstruction(isTyping: Bool) -> String {
+        isTyping
+            ? "Several fields match this name; tap the field at its position, then type without a target."
+            : "Two or more controls share that name; choose one by its position."
+    }
+
     static func coordinateImageSupportCorrection(_ guidance: String) -> String {
         guidance.replacingOccurrences(of: coordinateEvidenceReason,
             with: "Coordinate actions need current screenshot evidence; the loop attached a current screenshot.")
@@ -3782,7 +3813,8 @@ actor VisionCaptureToolLoop {
         _ intent: NavigationIntent,
         failure: VisionCaptureServerOutcome,
         configuration: VisionCaptureAgentConfiguration,
-        activity: @escaping Activity
+        activity: @escaping Activity,
+        instruction: String? = nil
     ) async throws -> NavigationOutcome {
         let prepared = try await refreshNavigation(
             configuration: configuration, activity: activity)
@@ -3798,7 +3830,7 @@ actor VisionCaptureToolLoop {
                 "\(failure.description). The following read could not be retained. No input was sent.")
         }
         body["instruction"] = .string(
-            "Two or more controls share that name; choose one by its position.")
+            instruction ?? Self.ambiguousTargetInstruction(isTyping: intent.operation == .type))
         return NavigationOutcome(
             content: try encodeOutcomeBody(body),
             recoverableColdMissArguments: nil,
@@ -4368,6 +4400,13 @@ actor VisionCaptureToolLoop {
                 elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
             throw AmbiguousTargetBeforeDispatch(failure: serverOutcome)
         }
+        if Self.isBusyHostReadBeforeDispatch(result) {
+            await activity(.requestStatus(
+                id: activityID,
+                status: .recoverablePreDispatchRefusal(serverOutcome),
+                elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
+            throw BusyHostReadBeforeDispatch(failure: serverOutcome)
+        }
         if result.isError {
             let code = result.refusalCode ?? "MCP_TOOL_REFUSED"
             await activity(.requestStatus(
@@ -4404,12 +4443,18 @@ actor VisionCaptureToolLoop {
             in: .whitespacesAndNewlines).lowercased() == "inspect cache"
     }
 
-    /// TARGET_AMBIGUOUS with every dispatch envelope rejected before submission:
-    /// no input was sent.
+    /// TARGET_AMBIGUOUS, or EXECUTION_NO_MATCH whose target evidence says ambiguous,
+    /// with every dispatch envelope rejected before submission: no input was sent.
     static func isAmbiguousTargetBeforeSubmission(_ result: VisionCaptureMCPResult) -> Bool {
-        guard result.isError, result.refusalCode == "TARGET_AMBIGUOUS",
-              result.dispatchAttempted != true,
+        guard result.isError, result.dispatchAttempted != true,
               !result.hasConflictingDispatchAttemptEvidence else { return false }
+        if result.refusalCode == "EXECUTION_NO_MATCH" {
+            var targets: [[String: JSONValue]] = []
+            try? collectStructuredObjects(named: "target", in: result.value) { targets.append($0) }
+            guard targets.contains(where: { $0["reason_code"] == .string("TARGET_AMBIGUOUS") }) else { return false }
+        } else if result.refusalCode != "TARGET_AMBIGUOUS" {
+            return false
+        }
         var dispatches: [[String: JSONValue]] = []
         do {
             try collectStructuredObjects(named: "dispatch", in: result.value) { dispatches.append($0) }
@@ -4706,7 +4751,7 @@ actor VisionCaptureToolLoop {
         - observation, facts, and choices describe the current screen. last_action describes the previous step.
         - Use useful content already visible. If a choice advances unfinished work, act before reading the same screen again.
         - When current_image_evidence is true, use positions to match unlabeled choices. If a label and visible position conflict, send \(VisionCaptureToolDefinitions.visualClickCall) at the visible control.
-        - Send \(VisionCaptureToolDefinitions.coordinateTapCall), or \(VisionCaptureToolDefinitions.visualClickCall), only with current image evidence. A focused field may omit target when the software keyboard is visible. Use screenshots or Computer Use when accessibility information is not enough.
+        - Send \(VisionCaptureToolDefinitions.coordinateTapCall), or \(VisionCaptureToolDefinitions.visualClickCall), only with current image evidence. A fact marked ocr-confirmed needs no screenshot: tap it with \(VisionCaptureToolDefinitions.coordinateTapCall), or type into it with \(VisionCaptureToolDefinitions.typeAtPositionCall), using its position. A focused field may omit target when the software keyboard is visible. Use screenshots or Computer Use when accessibility information is not enough.
         - Take a screenshot when a control requires_screenshot, a form has no editable fields, or a read exposes only keyboard controls.
         - If a form remains after a verified tap, do not repeat that choice. Use a fresh screenshot and the visible submit control.
         - An accepted request is not proof. A verified action proves only that action. Visible state does not prove an interaction was tested.
@@ -4781,8 +4826,13 @@ actor VisionCaptureToolLoop {
             required = ["action", "x_norm", "y_norm", "intent"]
         case .setBoolean: required = ["action", "target", "desired_state"]
         case .type:
-            required = object["target"] == nil
-                ? ["action", "text"] : ["action", "target", "text"]
+            if object["target"] != nil {
+                required = ["action", "target", "text"]
+            } else if object["x_norm"] != nil || object["y_norm"] != nil {
+                required = ["action", "text", "x_norm", "y_norm"]
+            } else {
+                required = ["action", "text"]
+            }
         case .swipe: required = ["action", "direction"]
         case .launch, .observe, .screenshot, .back: required = ["action"]
         }
@@ -4867,6 +4917,21 @@ actor VisionCaptureToolLoop {
         case .launch, .observe, .screenshot, .back:
             return NavigationIntent(operation: operation, selector: nil,
                 selectorKind: nil, role: nil, desiredState: nil, text: nil)
+        case .type where object["target"] == nil && object["x_norm"] != nil:
+            // The field is on screen but not published: type at its ocr-confirmed position.
+            guard case .integer(let x)? = object["x_norm"], case .integer(let y)? = object["y_norm"],
+                  let field = currentScreenFacts?.ocrConfirmedEditablePosition(x: x, y: y) else {
+                throw VisionCaptureAgentError.navigationUnavailable(
+                    "No ocr-confirmed field is at that position. Tap a field choice, or take a screenshot and tap the field first.")
+            }
+            guard case .string(let raw)? = object["text"], !raw.isEmpty else {
+                throw VisionCaptureAgentError.malformedCall("Typing requires nonempty text.")
+            }
+            resolvedJourneyLabel = "field at (\(field.x), \(field.y))"
+            return NavigationIntent(
+                operation: .type, selector: nil, selectorKind: "ocr_position",
+                role: "text_field", desiredState: nil, text: raw,
+                xNorm: Int(field.x), yNorm: Int(field.y))
         case .type where object["target"] == nil:
             guard currentImageObservation == observationGeneration,
                   currentScreenFacts?.hasSoftwareKeyboard == true,
@@ -4882,18 +4947,8 @@ actor VisionCaptureToolLoop {
         case .tap, .setBoolean, .type:
             break
         }
-        if operation == .type,
-           case .string(let target)? = object["target"],
-           currentChoiceBindings[target] == nil,
-           let position = currentScreenFacts?.ocrConfirmedTypingPosition(for: target) {
-            // The field is on screen but not published. Type at its position.
-            guard case .string(let raw)? = object["text"], !raw.isEmpty else {
-                throw VisionCaptureAgentError.malformedCall("Typing requires nonempty text.")
-            }
-            resolvedJourneyLabel = "field at (\(position.x), \(position.y))"
-            return NavigationIntent(
-                operation: .type, selector: target, selectorKind: "ocr_position",
-                role: "text_field", desiredState: nil, text: raw)
+        if case .string(let target)? = object["target"], !Self.isChoiceIDShaped(target) {
+            throw VisionCaptureAgentError.navigationUnavailable(Self.choiceTargetReason)
         }
         guard case .string(let target)? = object["target"],
               let binding = currentChoiceBindings[target],
@@ -7792,6 +7847,14 @@ actor VisionCaptureToolLoop {
 
     private static let coordinateEvidenceReason =
         "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step."
+
+    static let choiceTargetReason = "Targets are choice IDs; for positions use x_norm and y_norm."
+
+    /// Choice IDs are "c" followed by digits. Anything else (a fact line, a label)
+    /// is free text and never selects a control.
+    static func isChoiceIDShaped(_ target: String) -> Bool {
+        target.range(of: #"^c[0-9]+$"#, options: .regularExpression) != nil
+    }
 
     private static let expiredTargetReason =
         "The target ID is expired, ambiguous, or unavailable. Choose a current choice. Old IDs cannot be restored."
