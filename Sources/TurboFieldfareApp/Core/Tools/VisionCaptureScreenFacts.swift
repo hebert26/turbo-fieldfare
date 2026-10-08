@@ -42,7 +42,8 @@ struct VisionCaptureScreenFacts {
         self.elements = elements.compactMap { value in
             guard case .object(let object) = value,
                   object["visible"] == .bool(true)
-                      || object["visibility"] == .string("ocr_confirmed"),
+                      || object["visibility"] == .string("ocr_confirmed")
+                      || object["visibility"] == .string("descendant_visible"),
                   let role = Self.text(object["role"]) else { return nil }
             let ocrConfirmed = object["visibility"] == .string("ocr_confirmed")
             let coversControls: Int
@@ -188,15 +189,28 @@ struct VisionCaptureScreenFacts {
         }
     }
 
+    /// Roles a pointer tap at the element's position can act on.
+    private static let tapCandidateRoles: Set<String> = [
+        "button", "link", "cell", "switch", "tab", "segmented_item", "menu_item",
+    ]
+
     /// Observation suggests a target to validate, never permission to tap it.
-    func tapCandidates(excluding controls: [(selector: String, role: String)]) -> [TapCandidate] {
+    /// Taps go through the pointer at the element's position, so a candidate
+    /// needs a position and a name that is unique within its role.
+    func tapCandidates(
+        excluding controls: [(selector: String, role: String)],
+        excludingLabels published: [(label: String, role: String)] = []
+    ) -> [TapCandidate] {
         let represented = Set(controls.compactMap {
             matchingIndex(selector: $0.selector, role: $0.role)
         })
         return elements.indices.compactMap { index in
             let element = elements[index]
-            guard !represented.contains(index), element.enabled == true,
-                  ["button", "cell", "tab", "link"].contains(element.role) else { return nil }
+            guard !represented.contains(index), element.enabled != false, element.position != nil,
+                  Self.tapCandidateRoles.contains(element.role) else { return nil }
+            if let label = element.label, published.contains(where: {
+                $0.role == element.role && $0.label.utf8.elementsEqual(label.utf8)
+            }) { return nil }
             // Prefer an exact identifier, then an exact label. Do not normalize
             // a name into the contract or use a synthetic element ID.
             for selector in [element.identifier, element.label].compactMap({ $0 }) {
@@ -205,13 +219,6 @@ struct VisionCaptureScreenFacts {
                       selector.utf8.elementsEqual(
                         selector.trimmingCharacters(in: .whitespacesAndNewlines).utf8),
                       matchingIndex(selector: selector, role: element.role) == index else { continue }
-                // Cold name dispatch has no selector-kind argument. Reject a
-                // name shared by any other returned element, even another role.
-                let namedElements = elements.filter {
-                    $0.identifier?.utf8.elementsEqual(selector.utf8) == true
-                        || $0.label?.utf8.elementsEqual(selector.utf8) == true
-                }
-                guard namedElements.count == 1 else { continue }
                 return TapCandidate(selector: selector, role: element.role)
             }
             return nil

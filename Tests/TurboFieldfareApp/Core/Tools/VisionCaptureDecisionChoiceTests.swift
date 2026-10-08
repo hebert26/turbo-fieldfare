@@ -277,8 +277,35 @@ import TurboFieldfare
         let rejection = "Not sent. Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step. Use only the current choices."
         let supported = VisionCaptureToolLoop.coordinateImageSupportCorrection(rejection)
         #expect(!supported.contains("Choose screenshot now"))
-        #expect(supported.contains("use positions from the attached image"))
-        #expect(supported.hasSuffix("Use only the current choices."))
+        #expect(!supported.contains("Use only the current choices"))
+        #expect(supported.contains("the loop attached a current screenshot"))
+    }
+
+    @Test
+    func coordinateImageSupportPacketStatesOneVisualRule() throws {
+        let failure = try JSONValue.object([
+            "allowed_next": .array([.string("observe"), .string("screenshot"), .string("swipe"), .string("tap")]),
+            "last_action": .object(["action": .string("tap_coordinates"), "verdict": .string("not_sent")]),
+            "guidance": .string("Not sent. Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step. Use only the current choices."),
+        ]).encoded()
+        let original = try VisionCaptureToolLoop.addingProposalCorrection(to: failure)
+        let visual = try JSONValue.object([
+            "allowed_next": .array([.string("swipe"), .string("tap"), .string("tap_coordinates")]),
+            "observation": .object(["current_image_evidence": .bool(true)]),
+            "guidance": .string(VisionCaptureToolLoop.screenshotPairInstruction),
+        ]).encoded()
+        let packet = try VisionCaptureToolLoop.visualRecoveryContent(
+            originalPacket: original, visualPacket: visual, boundary: .coordinateWithoutImage)
+        let guidance = try JSONDecoder().decode(JSONValue.self, from: Data(packet.utf8)).objectValue?["guidance"]
+        guard case .string(let text)? = guidance else {
+            Issue.record("the packet has no guidance")
+            return
+        }
+        #expect(!text.contains("Use only the current choices"))
+        #expect(!text.contains("Use only these new target IDs"))
+        #expect(!text.contains("Do not guess a target or retry refused input"))
+        #expect(!text.contains("use positions from the attached image"))
+        #expect(text.components(separatedBy: VisionCaptureToolLoop.visualChoiceRule).count == 2)
     }
 
     @Test

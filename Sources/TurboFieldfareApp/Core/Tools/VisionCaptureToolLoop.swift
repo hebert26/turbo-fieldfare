@@ -2924,7 +2924,7 @@ actor VisionCaptureToolLoop {
         return canProvideVisualRecovery(configuration: configuration)
     }
 
-    private enum VisualRecoveryBoundary {
+    enum VisualRecoveryBoundary {
         case repeatedRead
         case repeatedTargetRejection
         case repeatedThought
@@ -3113,7 +3113,7 @@ actor VisionCaptureToolLoop {
 
     /// The model requested the original action. The host supplies this extra
     /// image/read only at the existing correction boundary, not as navigation.
-    private static func visualRecoveryContent(
+    static func visualRecoveryContent(
         originalPacket: String, visualPacket: String,
         boundary: VisualRecoveryBoundary, imageProvided: Bool = true
     ) throws -> String {
@@ -3152,7 +3152,8 @@ actor VisionCaptureToolLoop {
 
     static func coordinateImageSupportCorrection(_ guidance: String) -> String {
         guidance.replacingOccurrences(of: coordinateEvidenceReason,
-            with: "Coordinate actions need current screenshot evidence. The loop took this screenshot: use positions from the attached image.")
+            with: "Coordinate actions need current screenshot evidence; the loop attached a current screenshot.")
+            .replacingOccurrences(of: " Use only the current choices.", with: "")
     }
 
     static func repeatedThinkingReadNote(outcome: [String: JSONValue]) -> String {
@@ -3283,8 +3284,7 @@ actor VisionCaptureToolLoop {
                     "The image and subsequent read did not establish a current pair: \(pairState).")
             }
             body["observation_outcome"] = .string("succeeded")
-            body["instruction"] = .string(
-                "The image was captured before the current accessibility read. Choices and positions come from that read and any following cache validation; visual agreement is unverified. Use only these new target IDs. If a choice label matches a visible control but its position does not, do not use that target ID; use an offered visual click at the visible control. If the target remains ambiguous, report the uncertainty. Do not guess a target or retry refused input.")
+            body["instruction"] = .string(Self.screenshotPairInstruction)
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -5874,7 +5874,11 @@ actor VisionCaptureToolLoop {
         let candidates: [VisionCaptureScreenFacts.TapCandidate]
         if !result.isError, systemAlert == nil,
            let signature = currentScreenSignature, let facts {
-            candidates = facts.tapCandidates(excluding: manifest.actions.map { ($0.selector, $0.role) })
+            candidates = facts.tapCandidates(
+                excluding: manifest.actions.map { ($0.selector, $0.role) },
+                excludingLabels: manifest.actions.compactMap { action in
+                    action.displayLabel.map { ($0, action.role) }
+                })
                 .filter { candidate in
                     guard !facts.isLowValueSoftwareKeyboardControl(
                         selector: candidate.selector, role: candidate.role) else {
@@ -7754,6 +7758,14 @@ actor VisionCaptureToolLoop {
             + " Completed actions remain completed; do not repeat them.")
         return try JSONValue.object(packet).encoded()
     }
+
+    /// The one rule for choosing a target in a packet that carries a current image.
+    static let visualChoiceRule =
+        "Tap a current choice by ID, or use tap_coordinates on a control you can see in this image when no choice matches it. If the control you need is not visible, take another path (close the sheet, go back) or report a blocker. Do not repeat a coordinate tap that had no effect."
+
+    static let screenshotPairInstruction =
+        "The image was captured before the current accessibility read. Choices and positions come from that read and any following cache validation; visual agreement is unverified. If a choice label matches a visible control but its position does not, do not use that target ID; use an offered visual click at the visible control. If the target remains ambiguous, report the uncertainty. "
+            + visualChoiceRule
 
     private static let coordinateEvidenceReason =
         "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step."

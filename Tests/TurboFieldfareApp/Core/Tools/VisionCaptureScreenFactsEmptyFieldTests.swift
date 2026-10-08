@@ -59,6 +59,41 @@ import TurboFieldfare
         #expect(facts(fieldEnabled: false, covers: 2).coverageWarning(selector: "New item", role: "button") != nil)
     }
 
+    @Test
+    func positionedActionableFactBecomesATapCandidateUnlessDisabledOrPublished() {
+        func control(
+            _ label: String, enabled: Bool? = true, x: Int64,
+            visible: Bool = true, visibility: String? = nil
+        ) -> JSONValue {
+            var object: [String: JSONValue] = [
+                "element_id": .string(label + "-id"), "label": .string(label), "identifier": .string(label),
+                "role": .string("button"), "type": .string("XCUIElementTypeButton"),
+                "visible": .bool(visible), "x_norm": .integer(x), "y_norm": .integer(935),
+            ]
+            if let enabled { object["enabled"] = .bool(enabled) }
+            if let visibility { object["visibility"] = .string(visibility) }
+            return .object(object)
+        }
+        let facts = VisionCaptureScreenFacts(elements: [
+            control("Add", x: 694),
+            // An image with the same name is not a second tap target.
+            .object([
+                "element_id": .string("add-image"), "label": .string("Add"), "role": .string("image"),
+                "type": .string("XCUIElementTypeImage"), "visible": .bool(true),
+                "x_norm": .integer(100), "y_norm": .integer(400),
+            ]),
+            control("Archive", enabled: false, x: 300),
+            control("Search", x: 873),
+            control("More", x: 500, visible: false, visibility: "descendant_visible"),
+        ])
+        let selectors = facts.tapCandidates(
+            excluding: [], excludingLabels: [(label: "Search", role: "button")]).map(\.selector)
+        #expect(selectors.contains("Add"))
+        #expect(!selectors.contains("Archive"))
+        #expect(!selectors.contains("Search"))
+        #expect(selectors.contains("More"))
+    }
+
     /// A quick-add text field with the software keyboard open, decoded from
     /// JSON the way the loop receives returned elements.
     private static func facts(fieldValue: String, valueStatus: String) throws -> VisionCaptureScreenFacts {
