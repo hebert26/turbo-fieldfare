@@ -367,6 +367,10 @@ actor VisionCaptureToolLoop {
     typealias HasPendingUserInstruction = @Sendable () async -> Bool
 
     private struct UserInstructionPendingBeforeDispatch: Error {}
+    /// VisionCapture refused a name that matches two or more controls before submission.
+    private struct AmbiguousTargetBeforeDispatch: Error {
+        let failure: VisionCaptureServerOutcome
+    }
     private var activePendingUserInstructionCheck: HasPendingUserInstruction?
 
     /// Starts a later user instruction inside the same QA task. Completed
@@ -741,6 +745,52 @@ actor VisionCaptureToolLoop {
         var imageAttachments: [AppImageAttachment] = []
     }
 
+    /// Dispatched actions and the app facts that followed, to find a repeated
+    /// sequence that brings nothing new.
+    struct ActionCycleTracker {
+        struct Step: Equatable {
+            let action: String
+            let facts: String?
+        }
+
+        struct Cycle: Equatable {
+            let sequence: [String]
+            let repeats: Int
+        }
+
+        private var steps: [Step] = []
+
+        mutating func record(action: String, facts: String?) -> Cycle? {
+            steps.append(Step(action: action, facts: facts))
+            if steps.count > 24 { steps.removeFirst(steps.count - 24) }
+            return Self.cycle(in: steps)
+        }
+
+        mutating func reset() { steps.removeAll() }
+
+        /// The shortest sequence of 2 to 6 actions, not all the same, that ends
+        /// the history and repeats at least 3 times, when its latest repetition
+        /// showed no app facts that the earlier repetitions had not shown.
+        static func cycle(in steps: [Step]) -> Cycle? {
+            for length in 2...6 where steps.count >= length * 3 {
+                let latest = Array(steps.suffix(length))
+                let actions = latest.map(\.action)
+                guard Set(actions).count > 1 else { continue }
+                var repeats = 1
+                while steps.count >= length * (repeats + 1),
+                      steps[(steps.count - length * (repeats + 1))..<(steps.count - length * repeats)]
+                          .map(\.action) == actions {
+                    repeats += 1
+                }
+                guard repeats >= 3 else { continue }
+                let earlier = Set(steps[(steps.count - length * repeats)..<(steps.count - length)].map(\.facts))
+                guard latest.allSatisfy({ earlier.contains($0.facts) }) else { continue }
+                return Cycle(sequence: actions, repeats: repeats)
+            }
+            return nil
+        }
+    }
+
     private struct RecoverableColdMissTracker {
         private static let repeatLimit = 3
         private var previousActionShape: JSONValue?
@@ -931,6 +981,7 @@ actor VisionCaptureToolLoop {
     private var localProposals = LocalProposalTracker()
     private var recoverableColdMisses = RecoverableColdMissTracker()
     private var readOnlyNoProgress = ReadOnlyNoProgressTracker()
+    private var actionCycles = ActionCycleTracker()
     private var thoughtRecoveryUsed = false
     private var thoughtRecoveryFacts: String?
 
@@ -969,6 +1020,7 @@ actor VisionCaptureToolLoop {
             // A fresh model lineage starts with fresh no-progress counters.
             readOnlyNoProgress.reset()
             recoverableColdMisses.reset()
+            actionCycles.reset()
             staleCacheRefusals = 0
             coldPathIntents.removeAll()
             // The new model context has not observed these private targets.
@@ -1241,11 +1293,19 @@ actor VisionCaptureToolLoop {
                     // A successful recovery read can clear these flags while
                     // constructing its packet. Remember why it was permitted.
                     let requiredReadOnlyRecovery = requiresReadOnlyRecovery || uncertainAlertPress != nil
-                    let outcome = try await perform(
-                        intent,
-                        readyOffer: readyOffer,
-                        configuration: configuration,
-                        activity: activity)
+                    let outcome: NavigationOutcome
+                    do {
+                        outcome = try await perform(
+                            intent,
+                            readyOffer: readyOffer,
+                            configuration: configuration,
+                            activity: activity)
+                    } catch let refusal as AmbiguousTargetBeforeDispatch {
+                        // Nothing was sent. Read again and offer fresh choices.
+                        outcome = try await observeAfterAmbiguousTarget(
+                            intent, failure: refusal.failure,
+                            configuration: configuration, activity: activity)
+                    }
                     checkingLocalProposal = false
                     images = outcome.imageAttachments
                     executionOutcome = outcome.content
@@ -1337,6 +1397,19 @@ actor VisionCaptureToolLoop {
                                 repetitionCount: repetitionCount)
                         }
                     }
+                    if intent.operation != .observe, intent.operation != .screenshot,
+                       !outcome.successfulReadOnlyObservation,
+                       let cycle = actionCycles.record(
+                           action: Self.cycleStepLabel(content: content, intent: intent),
+                           facts: currentScreenContentIdentity?.factsDigest) {
+                        let sequence = cycle.sequence.joined(separator: " → ")
+                        if cycle.repeats >= 4 {
+                            actionCycles.reset()
+                            throw VisionCaptureAgentError.proposalCorrectionExhausted(
+                                "Agent paused after repeating the same \(cycle.sequence.count) actions 4 times without new app facts (\(sequence)). Completed work is retained. You can continue this chat.")
+                        }
+                        content = try Self.addingCycleNote(to: content, sequence: cycle.sequence)
+                    }
                     if let arguments = outcome.recoverableColdMissArguments {
                         if recoverableColdMisses.record(arguments: arguments) {
                             throw VisionCaptureAgentError.proposalCorrectionExhausted(
@@ -1377,6 +1450,8 @@ actor VisionCaptureToolLoop {
                     // not turn a refusal into eligibility for extra observation.
                     let maySupportRejectedTarget = rejectedTarget != nil
                         && canProvideRejectedTargetVisualRecovery(configuration: configuration)
+                    let maySupportCoordinateImage = error == .navigationUnavailable(Self.coordinateEvidenceReason)
+                        && canProvideRejectedTargetVisualRecovery(configuration: configuration)
                     // A correction declines the one confirming offer. Retiring only
                     // its public ID would let a later observation revive the attempt.
                     try retirePendingConfirmation()
@@ -1411,36 +1486,40 @@ actor VisionCaptureToolLoop {
                     }
                     if rejectedTarget != nil, rejection.count == 2 {
                         content = try Self.addingRepeatedTargetCorrection(to: content)
-                        if maySupportRejectedTarget,
-                           Self.hasVisualRecoveryCapacity(maxContextTokens: maxContextTokens,
-                               retainedTokens: completion.diagnostics.conversationTokens,
-                               packetBytes: content.utf8.count, packetCopies: 2) {
-                            let originalPacket = content
-                            do {
-                                let support = try await provideVisualRecovery(
-                                    originalPacket: originalPacket, originalOutcome: failure,
-                                    call: call, boundary: .repeatedTargetRejection,
-                                    configuration: configuration, maxContextTokens: maxContextTokens,
-                                    retainedTokens: completion.diagnostics.conversationTokens,
-                                    excludingTargetID: rejectedTarget,
-                                    activity: activity)
-                                content = support.content
-                                images = support.images
-                                executionOutcome = support.outcome
-                                executionOrigin = "model_rejected_with_host_read_only_visual_support"
-                                localProposals.preserveRejections(
-                                    afterHostObservation: currentScreenContentIdentity)
-                                // This support is not a model observation or progress.
-                                // Neither read-only counter nor its one-use latch resets.
-                            } catch {
-                                try taskCheckpoint.appendSettled(call: call,
-                                    result: AppToolResult(callID: call.id, name: call.name,
-                                        content: originalPacket),
-                                    outcome: failure, target: historicalTarget,
-                                    requestIDs: checkpointRequestIDs, session: checkpointSessionReference,
-                                    origin: "model_rejected_before_host_visual_support_stopped")
-                                throw error
-                            }
+                    }
+                    let supportBoundary: VisualRecoveryBoundary? =
+                        rejectedTarget != nil && rejection.count == 2 && maySupportRejectedTarget
+                            ? .repeatedTargetRejection
+                            : (maySupportCoordinateImage ? .coordinateWithoutImage : nil)
+                    if let supportBoundary,
+                       Self.hasVisualRecoveryCapacity(maxContextTokens: maxContextTokens,
+                           retainedTokens: completion.diagnostics.conversationTokens,
+                           packetBytes: content.utf8.count, packetCopies: 2) {
+                        let originalPacket = content
+                        do {
+                            let support = try await provideVisualRecovery(
+                                originalPacket: originalPacket, originalOutcome: failure,
+                                call: call, boundary: supportBoundary,
+                                configuration: configuration, maxContextTokens: maxContextTokens,
+                                retainedTokens: completion.diagnostics.conversationTokens,
+                                excludingTargetID: rejectedTarget,
+                                activity: activity)
+                            content = support.content
+                            images = support.images
+                            executionOutcome = support.outcome
+                            executionOrigin = "model_rejected_with_host_read_only_visual_support"
+                            localProposals.preserveRejections(
+                                afterHostObservation: currentScreenContentIdentity)
+                            // This support is not a model observation or progress.
+                            // Neither read-only counter nor its one-use latch resets.
+                        } catch {
+                            try taskCheckpoint.appendSettled(call: call,
+                                result: AppToolResult(callID: call.id, name: call.name,
+                                    content: originalPacket),
+                                outcome: failure, target: historicalTarget,
+                                requestIDs: checkpointRequestIDs, session: checkpointSessionReference,
+                                origin: "model_rejected_before_host_visual_support_stopped")
+                            throw error
                         }
                     }
                 }
@@ -1801,6 +1880,12 @@ actor VisionCaptureToolLoop {
                currentScreenSignature != staleConfirmation.screenSignature {
                 throw VisionCaptureAgentError.navigationUnavailable(
                     "The confirming action was not sent because the content signature for visible text and identifiers changed while obtaining fresh navigation evidence. Choose observe and make a new action decision from the current screen.")
+            }
+            if Self.fastHostPath, intent.operation == .tap {
+                // Fast path: no driver tap by name or cache handle. Tap at the
+                // read position, or send nothing.
+                return try await performDirectNameTap(
+                    intent, selector: action.selector, configuration: configuration, activity: activity)
             }
             let actionArguments = try makeActionArguments(
                 intent: intent,
@@ -2376,6 +2461,14 @@ actor VisionCaptureToolLoop {
             activity: activity)
     }
 
+    /// The first text that reads like a validation message, or nil.
+    static func validationMessage(in texts: [String]) -> String? {
+        let markers = ["not a", "invalid", "required", "error", "failed", "must be"]
+        return texts.first { text in
+            markers.contains { text.range(of: $0, options: .caseInsensitive) != nil }
+        }
+    }
+
     /// Keep the mutation's proof separate from the following read. Neither a
     /// successful request nor fresh screen facts can upgrade an inconclusive action.
     private func observeAfterMutation(
@@ -2499,10 +2592,10 @@ actor VisionCaptureToolLoop {
             if !appeared.isEmpty { parts.append("appeared: " + appeared.joined(separator: ", ")) }
             if !disappeared.isEmpty { parts.append("disappeared: " + disappeared.joined(separator: ", ")) }
             if !parts.isEmpty { body["effect"] = .string(parts.joined(separator: "; ")) }
-        } else if actionArguments?.objectValue?["request"] == .string("click pointer") {
-            // Temporary diagnostic (run 27): why the effect diff did not run.
-            body["effect_debug"] = .string(
-                "before=\(factsBeforeAction?.readableTexts.count.description ?? "nil") after=\(refreshed.screenFacts?.readableTexts.count.description ?? "nil") changes=\(changes.count)")
+            if let message = Self.validationMessage(in: Array(appeared)) {
+                body["warning"] = .string(
+                    "The screen shows: \(message). The input was not accepted; correct it before submitting.")
+            }
         }
         if let changed = changes.first?["screen_changed"], case .bool = changed {
             body["screen_changed"] = changed
@@ -2835,12 +2928,14 @@ actor VisionCaptureToolLoop {
         case repeatedRead
         case repeatedTargetRejection
         case repeatedThought
+        case coordinateWithoutImage
 
         var description: String {
             switch self {
             case .repeatedRead: "the repeated-read correction"
             case .repeatedTargetRejection: "the second equivalent expired or unavailable target rejection"
             case .repeatedThought: "discarding an unfinished model response with sustained exact thought repetition"
+            case .coordinateWithoutImage: "a coordinate action without current screenshot evidence"
             }
         }
     }
@@ -2858,6 +2953,39 @@ actor VisionCaptureToolLoop {
               body["delivery_unknown"] != .bool(true), body["is_error"] != .bool(true),
               body["refusal"] == nil, body["observation_refusal"] == nil,
               body["stale_recovery"] == nil else {
+            // Only the outcome was not a success (inconclusive, not sent,
+            // failed without delivery doubt): one plain read, then choose again.
+            if boundary.session == committedSessionIdentity,
+               let body = try JSONDecoder().decode(JSONValue.self,
+                   from: Data(boundary.outcome.utf8)).objectValue,
+               body["outcome"] != .string("succeeded"),
+               body["delivery_unknown"] != .bool(true), body["is_error"] != .bool(true),
+               body["refusal"] == nil, body["observation_refusal"] == nil,
+               body["stale_recovery"] == nil,
+               uncertainAlertPress == nil, staleActionConfirmation == nil {
+                let observed = try await perform(
+                    NavigationIntent(operation: .observe, selector: nil, selectorKind: nil,
+                                     role: nil, desiredState: nil, text: nil),
+                    readyOffer: nil, configuration: configuration, activity: activity)
+                try Task.checkCancellation()
+                guard boundary.session == committedSessionIdentity,
+                      var packet = try JSONDecoder().decode(JSONValue.self, from: Data(
+                          try decisionPacket(from: observed.content, call: boundary.call,
+                              configuration: configuration, images: []).content.utf8)).objectValue else {
+                    throw VisionCaptureAgentError.noProgress(
+                        "Thinking recovery did not obtain a current read in the same session. No action was replayed.")
+                }
+                let note = Self.repeatedThinkingReadNote(outcome: body)
+                if case .string(let guidance)? = packet["guidance"] {
+                    packet["guidance"] = .string(note + " " + guidance)
+                } else {
+                    packet["guidance"] = .string(note)
+                }
+                let result = AppToolResult(callID: boundary.result.callID, name: boundary.result.name,
+                    content: try JSONValue.object(packet).encoded())
+                return GenerationRetryBoundary(call: boundary.call, result: result,
+                    outcome: observed.content, session: committedSessionIdentity)
+            }
             throw VisionCaptureAgentError.noProgress(
                 "Repeated-thinking recovery has no permitted current screenshot/read route, or an earlier refusal, uncertainty or session change forbids it. No action was replayed.")
         }
@@ -2945,7 +3073,7 @@ actor VisionCaptureToolLoop {
             return nil
         }
         packet["generation_recovery"] = .string(
-            "The unfinished repeated response was discarded. No call from it was executed. Use this still-current screenshot/read pair to choose one permitted action now. Do not restate or compare the evidence. If no action can safely advance the goal, return one concise blocker. Earlier app actions retain their original outcomes and must not be repeated.")
+            "The unfinished repeated response was discarded. No call from it was executed. Use this still-current screenshot/read pair to choose one permitted action now. Do not restate or compare the evidence. If this part of the goal cannot advance with these choices, record it as a blocker and continue with the next unfinished part of the goal. Earlier app actions retain their original outcomes and must not be repeated.")
         packet["image_attachment_order"] = .string(
             "The single attached image is the current screenshot/read pair from the interrupted decision.")
         return try JSONValue.object(packet).encoded()
@@ -3013,9 +3141,38 @@ actor VisionCaptureToolLoop {
             : "The screenshot was captured but was not provided to the model because the conservative context allowance was insufficient. Current facts and choices come from the following read without image input. No current visual evidence is available to the model."
         visual["guidance"] = .string(
             "The host made one additional screenshot and following read after \(boundary.description). This was host observation support, not a navigation action chosen by the model. The original action result is unchanged. " + imageStatus + "\n"
-            + "Correction for the original proposal: " + priorGuidance + "\n"
+            + "Correction for the original proposal: "
+            + correctionListingCurrentActions(
+                boundary == .coordinateWithoutImage && imageProvided
+                    ? coordinateImageSupportCorrection(priorGuidance) : priorGuidance,
+                allowedNext: visual["allowed_next"]) + "\n"
             + "Current image/read: " + imageGuidance)
         return try JSONValue.object(visual).encoded()
+    }
+
+    static func coordinateImageSupportCorrection(_ guidance: String) -> String {
+        guidance.replacingOccurrences(of: coordinateEvidenceReason,
+            with: "Coordinate actions need current screenshot evidence. The loop took this screenshot: use positions from the attached image.")
+    }
+
+    static func repeatedThinkingReadNote(outcome: [String: JSONValue]) -> String {
+        outcome["screen_changed"] == .bool(false)
+            ? "Your last actions had no visible effect. Read the facts again and choose a different action."
+            : "Read the current facts again and choose the next action."
+    }
+
+    /// The correction was written for the earlier read. List the actions the new read permits.
+    static func correctionListingCurrentActions(_ guidance: String, allowedNext: JSONValue?) -> String {
+        guard case .array(let allowed)? = allowedNext,
+              let range = guidance.range(of: #"Allowed actions now: \[[^\]]*\]\."#,
+                                         options: .regularExpression) else { return guidance }
+        let actions = allowed.compactMap { value -> String? in
+            guard case .string(let action) = value else { return nil }
+            return action
+        }.joined(separator: ", ")
+        var updated = guidance
+        updated.replaceSubrange(range, with: "Allowed actions now: [\(actions)].")
+        return updated
     }
 
     private static func recordingVisualRecovery(
@@ -3503,8 +3660,8 @@ actor VisionCaptureToolLoop {
             screenFacts: result.isError ? nil : Self.returnedScreenFacts(from: result.value))
     }
 
-    /// Fast host path tap: one pointer click at the read position, or one
-    /// plain tap by name when no position is known.
+    /// Fast host path tap: one pointer click at the read position. Without a
+    /// known position nothing is sent: a driver tap by name can match two controls.
     private func performDirectNameTap(
         _ intent: NavigationIntent,
         selector: String,
@@ -3515,32 +3672,22 @@ actor VisionCaptureToolLoop {
         try rejectPreviouslyRejectedProposal(intent)
         try rejectExhaustedIntent(intent)
         let attemptedScreenScope = currentNavigationScreenScope
-        let knownPosition = currentScreenFacts?.normalizedPosition(
-            selector: selector, role: intent.role ?? "", selectorKind: intent.selectorKind)
-        let arguments: JSONValue
-        let result: VisionCaptureMCPResult
+        guard let knownPosition = currentScreenFacts?.normalizedPosition(
+            selector: selector, role: intent.role ?? "", selectorKind: intent.selectorKind) else {
+            // Not sent: a local rejection that keeps the current choices.
+            throw VisionCaptureAgentError.navigationUnavailable(
+                "This choice has no screen position. Take a screenshot and use tap_coordinates on the visible control.")
+        }
         currentManifest = AuthorityManifest()
         invalidateScreenObservation()
-        if let knownPosition {
-            // Gemma's taps go through the pointer at the read position, not
-            // through the driver's name or coordinate taps.
-            let label = resolvedJourneyLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let pointer = try await performFastPointerClick(
-                x: knownPosition.x, y: knownPosition.y, label: label.isEmpty ? selector : label,
-                configuration: configuration, activity: activity)
-            arguments = pointer.arguments
-            result = pointer.result
-        } else {
-            arguments = makeMCPArguments(
-                request: "tap \(selector)",
-                parameters: [:],
-                configuration: configuration)
-            result = try await executeHostRequest(
-                arguments,
-                configuration: configuration,
-                interruptibleByUserInstruction: true,
-                activity: activity)
-        }
+        // Gemma's taps go through the pointer at the read position, not
+        // through the driver's name or coordinate taps.
+        let label = resolvedJourneyLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let pointer = try await performFastPointerClick(
+            x: knownPosition.x, y: knownPosition.y, label: label.isEmpty ? selector : label,
+            configuration: configuration, activity: activity)
+        let arguments = pointer.arguments
+        let result = pointer.result
         let plainOutcome = { [self] in
             try outcome(
                 for: intent, result: result, arguments: arguments,
@@ -3618,6 +3765,36 @@ actor VisionCaptureToolLoop {
             progressed: false, observedScreenFacts: prepared.screenFacts,
             refusedObservedTapBeforeDispatch: failure,
             observationRefreshed: prepared.observationRefreshed)
+    }
+
+    /// VisionCapture refused a name shared by two or more controls before
+    /// submission. Read once and return fresh choices; the chat continues.
+    private func observeAfterAmbiguousTarget(
+        _ intent: NavigationIntent,
+        failure: VisionCaptureServerOutcome,
+        configuration: VisionCaptureAgentConfiguration,
+        activity: @escaping Activity
+    ) async throws -> NavigationOutcome {
+        let prepared = try await refreshNavigation(
+            configuration: configuration, activity: activity)
+        let observed = try outcome(
+            for: intent, result: prepared.result, arguments: prepared.arguments,
+            manifest: prepared.manifest, systemAlert: prepared.systemAlert,
+            progressed: false, observedScreenFacts: prepared.screenFacts,
+            reobservedBeforeDispatch: true,
+            observationRefreshed: prepared.observationRefreshed)
+        guard case .object(var body) = try JSONDecoder().decode(
+            JSONValue.self, from: Data(observed.content.utf8)) else {
+            throw VisionCaptureAgentError.noProgress(
+                "\(failure.description). The following read could not be retained. No input was sent.")
+        }
+        body["instruction"] = .string(
+            "Two or more controls share that name; choose one by its position.")
+        return NavigationOutcome(
+            content: try encodeOutcomeBody(body),
+            recoverableColdMissArguments: nil,
+            progressed: false,
+            successfulReadOnlyObservation: observed.successfulReadOnlyObservation)
     }
 
     /// The submitted action keeps its failed proof. Refresh once for a new
@@ -4175,6 +4352,13 @@ actor VisionCaptureToolLoop {
                 elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
             return result
         }
+        if Self.isAmbiguousTargetBeforeSubmission(result) {
+            await activity(.requestStatus(
+                id: activityID,
+                status: .recoverablePreDispatchRefusal(serverOutcome),
+                elapsedSeconds: Self.elapsedSeconds(since: activityStart)))
+            throw AmbiguousTargetBeforeDispatch(failure: serverOutcome)
+        }
         if result.isError {
             let code = result.refusalCode ?? "MCP_TOOL_REFUSED"
             await activity(.requestStatus(
@@ -4209,6 +4393,26 @@ actor VisionCaptureToolLoop {
         }
         return request.trimmingCharacters(
             in: .whitespacesAndNewlines).lowercased() == "inspect cache"
+    }
+
+    /// TARGET_AMBIGUOUS with every dispatch envelope rejected before submission:
+    /// no input was sent.
+    static func isAmbiguousTargetBeforeSubmission(_ result: VisionCaptureMCPResult) -> Bool {
+        guard result.isError, result.refusalCode == "TARGET_AMBIGUOUS",
+              result.dispatchAttempted != true,
+              !result.hasConflictingDispatchAttemptEvidence else { return false }
+        var dispatches: [[String: JSONValue]] = []
+        do {
+            try collectStructuredObjects(named: "dispatch", in: result.value) { dispatches.append($0) }
+        } catch {
+            return false
+        }
+        guard !dispatches.isEmpty else { return false }
+        return dispatches.allSatisfy {
+            $0["status"] == .string("rejected_before_submission")
+                && $0["submission_started"] != .bool(true)
+                && $0["delivery_acknowledged"] != .bool(true)
+        }
     }
 
     private static func isRecoverableStaleCacheAction(
@@ -4498,6 +4702,7 @@ actor VisionCaptureToolLoop {
         - If a form remains after a verified tap, do not repeat that choice. Use a fresh screenshot and the visible submit control.
         - An accepted request is not proof. A verified action proves only that action. Visible state does not prove an interaction was tested.
         - Keep failed, refused, inconclusive, and delivery-unknown results. Never replay uncertain input. Continue other reachable checks.
+        - If an instruction asks for something the app does not offer, do not keep trying: record it as a blocker that names the missing feature, continue with the remaining parts of the task, and list the blocker in your final report.
         - Do not repeat completed work unless requested.
         - Finish only when each requested check has evidence or a factual blocker. Report verified results, failures, and blockers only.
         """
@@ -4598,8 +4803,7 @@ actor VisionCaptureToolLoop {
             if operation == .tapCoordinates || operation == .computerUseClick,
                currentImageObservation != observationGeneration,
                allowedNow.contains(.screenshot) {
-                throw VisionCaptureAgentError.navigationUnavailable(
-                    "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step.")
+                throw VisionCaptureAgentError.navigationUnavailable(Self.coordinateEvidenceReason)
             }
             throw VisionCaptureAgentError.navigationUnavailable(
                 "This action is not currently permitted. Choose from allowed_next.")
@@ -5244,6 +5448,7 @@ actor VisionCaptureToolLoop {
         if let instruction = body["instruction"], instruction != .string("Observation is complete.") {
             packet["guidance"] = instruction
         }
+        if let warning = body["warning"] { packet["warning"] = warning }
         if !swipeDirections.isEmpty {
             packet["can_swipe"] = .array(swipeDirections.map { .string($0.rawValue) })
         }
@@ -5959,6 +6164,34 @@ actor VisionCaptureToolLoop {
             content: try JSONValue.object(body).encoded(),
             recoverableColdMissArguments: nil, progressed: false,
             successfulReadOnlyObservation: false)
+    }
+
+    private static func cycleStepLabel(content: String, intent: NavigationIntent) -> String {
+        let lastAction = (try? JSONDecoder().decode(JSONValue.self, from: Data(content.utf8)))?
+            .objectValue?["last_action"]?.objectValue
+        var parts: [String] = []
+        if case .string(let action)? = lastAction?["action"] { parts.append(action) }
+        if case .string(let label)? = lastAction?["label"] {
+            parts.append(label)
+        } else if let target = intent.selector ?? intent.visualIntent {
+            parts.append(target)
+        }
+        if let text = intent.text { parts.append("\"\(text)\"") }
+        return parts.joined(separator: " ")
+    }
+
+    static func addingCycleNote(to content: String, sequence: [String]) throws -> String {
+        guard case .object(var body)? = try? JSONDecoder().decode(
+            JSONValue.self, from: Data(content.utf8)) else {
+            throw VisionCaptureAgentError.malformedCall("the loop could not add its repeated-sequence note")
+        }
+        let note = "You repeated the same \(sequence.count) actions 3 times without new app facts: \(sequence.joined(separator: " → ")). Do something different, or record a blocker and continue with the next part of the task."
+        if case .string(let guidance)? = body["guidance"] {
+            body["guidance"] = .string(note + " " + guidance)
+        } else {
+            body["guidance"] = .string(note)
+        }
+        return try JSONValue.object(body).encoded()
     }
 
     private static func addingReadOnlyNoProgressCorrection(
@@ -7521,6 +7754,9 @@ actor VisionCaptureToolLoop {
             + " Completed actions remain completed; do not repeat them.")
         return try JSONValue.object(packet).encoded()
     }
+
+    private static let coordinateEvidenceReason =
+        "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step."
 
     private static let expiredTargetReason =
         "The target ID is expired, ambiguous, or unavailable. Choose a current choice. Old IDs cannot be restored."

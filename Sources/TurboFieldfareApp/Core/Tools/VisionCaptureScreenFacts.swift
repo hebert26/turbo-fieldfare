@@ -26,6 +26,9 @@ struct VisionCaptureScreenFacts {
         let ocrConfirmed: Bool
         /// Other controls whose centre lies inside this control's frame.
         let coversControls: Int
+        /// Frame and centre in device points, when returned.
+        let frame: (x: Double, y: Double, width: Double, height: Double)?
+        let center: (x: Double, y: Double)?
     }
 
     private let elements: [Element]
@@ -74,7 +77,9 @@ struct VisionCaptureScreenFacts {
                 selected: Self.boolean(object["selected"]),
                 position: Self.position(in: object),
                 ocrConfirmed: ocrConfirmed,
-                coversControls: coversControls)
+                coversControls: coversControls,
+                frame: Self.frame(in: object["frame"]),
+                center: Self.point(in: object["center"]))
         }
         navigationFacts = navigation.flatMap { navigation in
             [("tab_bars", "Selected tab"), ("segmented_controls", "Selected segment")]
@@ -351,6 +356,29 @@ struct VisionCaptureScreenFacts {
         return text.isEmpty ? nil : text
     }
 
+    private static func double(_ value: JSONValue?) -> Double? {
+        switch value {
+        case .integer(let number)?: Double(number)
+        case .unsignedInteger(let number)?: Double(number)
+        case .number(let number)?: number
+        case .decimal(let number)?: NSDecimalNumber(decimal: number).doubleValue
+        default: nil
+        }
+    }
+
+    private static func frame(in value: JSONValue?) -> (x: Double, y: Double, width: Double, height: Double)? {
+        guard case .object(let object)? = value,
+              let x = double(object["x"]), let y = double(object["y"]),
+              let width = double(object["width"]), let height = double(object["height"]) else { return nil }
+        return (x, y, width, height)
+    }
+
+    private static func point(in value: JSONValue?) -> (x: Double, y: Double)? {
+        guard case .object(let object)? = value,
+              let x = double(object["x"]), let y = double(object["y"]) else { return nil }
+        return (x, y)
+    }
+
     private static func boolean(_ value: JSONValue?) -> Bool? {
         guard case .bool(let boolean) = value else { return nil }
         return boolean
@@ -401,8 +429,24 @@ struct VisionCaptureScreenFacts {
 
     func coverageWarning(selector: String, role: String, selectorKind: String? = nil) -> String? {
         guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
-              elements[index].coversControls > 0 else { return nil }
+              elements[index].coversControls > 0,
+              !coversOnlyDisabledControls(index) else { return nil }
         return "its frame covers \(elements[index].coversControls) other controls, so an element tap may hit one of them; if the tap has no effect, take a screenshot and use tap_coordinates on the visible control"
+    }
+
+    /// True when every control centred inside this frame is disabled, so a tap
+    /// cannot reach another enabled control. Unknown frames or a count that
+    /// differs from the returned coverage keep the warning.
+    private func coversOnlyDisabledControls(_ index: Int) -> Bool {
+        guard let frame = elements[index].frame else { return false }
+        let covered = elements.indices.filter { other in
+            guard other != index, !["static_text", "image", "other"].contains(elements[other].role),
+                  let center = elements[other].center else { return false }
+            return center.x >= frame.x && center.x <= frame.x + frame.width
+                && center.y >= frame.y && center.y <= frame.y + frame.height
+        }
+        return covered.count == elements[index].coversControls
+            && covered.allSatisfy { elements[$0].enabled == false }
     }
 
     /// True when an editable field on screen still contains the text.

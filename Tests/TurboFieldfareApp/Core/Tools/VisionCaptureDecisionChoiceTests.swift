@@ -253,6 +253,117 @@ import TurboFieldfare
         #expect(missingImage == nil)
     }
 
+    @Test
+    func visualRecoveryCorrectionListsTheNewAllowedActions() {
+        let old = "Not sent. Return a corrected response. Allowed actions now: [observe, screenshot, swipe, tap]. Use an action from this list."
+        let updated = VisionCaptureToolLoop.correctionListingCurrentActions(old,
+            allowedNext: .array([.string("swipe"), .string("tap"), .string("tap_coordinates")]))
+        #expect(updated.contains("Allowed actions now: [swipe, tap, tap_coordinates]."))
+        #expect(!updated.contains("observe, screenshot"))
+        #expect(VisionCaptureToolLoop.correctionListingCurrentActions(old, allowedNext: nil) == old)
+    }
+
+    @Test
+    func repeatedThinkingReadNoteClaimsNoEffectOnlyWhenTheScreenDidNotChange() {
+        #expect(VisionCaptureToolLoop.repeatedThinkingReadNote(
+            outcome: ["screen_changed": .bool(false)]).contains("no visible effect"))
+        #expect(!VisionCaptureToolLoop.repeatedThinkingReadNote(
+            outcome: ["screen_changed": .bool(true)]).contains("no visible effect"))
+        #expect(!VisionCaptureToolLoop.repeatedThinkingReadNote(outcome: [:]).contains("no visible effect"))
+    }
+
+    @Test
+    func coordinateImageSupportReplacesTheScreenshotRequest() {
+        let rejection = "Not sent. Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step. Use only the current choices."
+        let supported = VisionCaptureToolLoop.coordinateImageSupportCorrection(rejection)
+        #expect(!supported.contains("Choose screenshot now"))
+        #expect(supported.contains("use positions from the attached image"))
+        #expect(supported.hasSuffix("Use only the current choices."))
+    }
+
+    @Test
+    func actionCycleNotesThreeRepeatsAndPausesOnTheFourth() throws {
+        typealias Tracker = VisionCaptureToolLoop.ActionCycleTracker
+        let sequence = ["tap Edit", "tap Tags", "tap Title", "tap Save"]
+        func steps(_ repeats: Int, facts: (Int) -> String = { "f\($0 % 4)" }) -> [Tracker.Step] {
+            (0..<(sequence.count * repeats)).map {
+                Tracker.Step(action: sequence[$0 % sequence.count], facts: facts($0))
+            }
+        }
+        #expect(Tracker.cycle(in: steps(2)) == nil)
+        #expect(Tracker.cycle(in: steps(3)) == Tracker.Cycle(sequence: sequence, repeats: 3))
+        #expect(Tracker.cycle(in: steps(4))?.repeats == 4)
+        // New app facts in the latest repetition are progress.
+        #expect(Tracker.cycle(in: steps(3, facts: { "f\($0)" })) == nil)
+        // One action repeated alone is left to the identical-call rules.
+        #expect(Tracker.cycle(in: Array(repeating: Tracker.Step(action: "tap A", facts: "f"), count: 9)) == nil)
+
+        var tracker = Tracker()
+        let cycles = steps(4).map { tracker.record(action: $0.action, facts: $0.facts) }
+        #expect(cycles.firstIndex { $0 != nil } == 11)
+        #expect(cycles.last??.repeats == 4)
+
+        let noted = try VisionCaptureToolLoop.addingCycleNote(
+            to: JSONValue.object(["guidance": .string("Choose again.")]).encoded(), sequence: sequence)
+        #expect(noted.contains("You repeated the same 4 actions 3 times without new app facts"))
+        #expect(noted.contains("Choose again."))
+    }
+
+    @Test
+    func validationMessageIsTheFirstAppearedTextThatReadsLikeOne() {
+        #expect(VisionCaptureToolLoop.validationMessage(
+            in: ["Step 2 of 6", "Not a YouTube link", "Invalid URL"]) == "Not a YouTube link")
+        #expect(VisionCaptureToolLoop.validationMessage(in: ["Title is REQUIRED"]) == "Title is REQUIRED")
+        #expect(VisionCaptureToolLoop.validationMessage(
+            in: ["Password must be 8 characters"]) == "Password must be 8 characters")
+        #expect(VisionCaptureToolLoop.validationMessage(in: ["Upload failed"]) == "Upload failed")
+        #expect(VisionCaptureToolLoop.validationMessage(in: ["Network error"]) == "Network error")
+        #expect(VisionCaptureToolLoop.validationMessage(in: ["Bookmark saved", "Step 3 of 6"]) == nil)
+        #expect(VisionCaptureToolLoop.validationMessage(in: []) == nil)
+    }
+
+    @Test
+    func ambiguousTargetIsRecoverableOnlyBeforeSubmission() {
+        func result(
+            code: String, dispatchAttempted: Bool? = nil, dispatch: [String: JSONValue]?
+        ) -> VisionCaptureMCPResult {
+            var evidence: [String: JSONValue] = [
+                "target": .object(["status": .string("ambiguous"), "reason_code": .string(code)]),
+            ]
+            if let dispatch { evidence["dispatch"] = .object(dispatch) }
+            return VisionCaptureMCPResult(
+                value: .object(["isError": .bool(true),
+                    "payload": .object(["interaction_evidence": .object(evidence)])]),
+                isError: true, refusalCode: code, dispatchAttempted: dispatchAttempted,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+        let rejected: [String: JSONValue] = [
+            "status": .string("rejected_before_submission"),
+            "submission_started": .bool(false), "delivery_acknowledged": .bool(false),
+        ]
+        let submitted: [String: JSONValue] = [
+            "status": .string("submitted"),
+            "submission_started": .bool(true), "delivery_acknowledged": .bool(true),
+        ]
+        #expect(VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "TARGET_AMBIGUOUS", dispatch: rejected)))
+        #expect(!VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "TARGET_AMBIGUOUS", dispatch: submitted)))
+        #expect(!VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "TARGET_AMBIGUOUS", dispatchAttempted: true, dispatch: rejected)))
+        #expect(!VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "TARGET_AMBIGUOUS", dispatch: nil)))
+        #expect(!VisionCaptureToolLoop.isAmbiguousTargetBeforeSubmission(
+            result(code: "TARGET_UNAVAILABLE", dispatch: rejected)))
+    }
+
     private static func field(
         id: String?, label: String, identifier: String, x: Int, y: Int
     ) -> JSONValue {

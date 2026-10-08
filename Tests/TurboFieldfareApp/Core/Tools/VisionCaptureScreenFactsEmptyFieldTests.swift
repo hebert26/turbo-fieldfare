@@ -35,6 +35,30 @@ import TurboFieldfare
         #expect(!filled.contains("the focused field is empty"))
     }
 
+    @Test
+    func coveringControlKeepsItsWarningUnlessEveryCoveredControlIsDisabled() {
+        func facts(fieldEnabled: Bool, covers: Int64) -> VisionCaptureScreenFacts {
+            VisionCaptureScreenFacts(elements: [
+                .object([
+                    "element_id": .string("chip"), "label": .string("New item"), "role": .string("button"),
+                    "type": .string("XCUIElementTypeButton"), "visible": .bool(true), "enabled": .bool(true),
+                    "frame_covers_controls": .integer(covers),
+                    "frame": .object(["x": .integer(16), "y": .integer(440), "width": .integer(120), "height": .integer(36)]),
+                    "center": .object(["x": .integer(76), "y": .integer(458)]),
+                ]),
+                .object([
+                    "element_id": .string("name"), "role": .string("text_field"),
+                    "type": .string("XCUIElementTypeTextField"), "visible": .bool(true), "enabled": .bool(fieldEnabled),
+                    "frame": .object(["x": .integer(20), "y": .integer(444), "width": .integer(40), "height": .integer(28)]),
+                    "center": .object(["x": .integer(40), "y": .integer(458)]),
+                ]),
+            ])
+        }
+        #expect(facts(fieldEnabled: false, covers: 1).coverageWarning(selector: "New item", role: "button") == nil)
+        #expect(facts(fieldEnabled: true, covers: 1).coverageWarning(selector: "New item", role: "button") != nil)
+        #expect(facts(fieldEnabled: false, covers: 2).coverageWarning(selector: "New item", role: "button") != nil)
+    }
+
     /// A quick-add text field with the software keyboard open, decoded from
     /// JSON the way the loop receives returned elements.
     private static func facts(fieldValue: String, valueStatus: String) throws -> VisionCaptureScreenFacts {
