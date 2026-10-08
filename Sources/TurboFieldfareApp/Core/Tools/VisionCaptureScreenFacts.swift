@@ -7,6 +7,8 @@ struct VisionCaptureScreenFacts {
     struct TapCandidate {
         let selector: String
         let role: String
+        /// "ocr_label" when the selector is a name read from pixels: position taps only.
+        var selectorKind: String? = nil
     }
 
     private struct Element {
@@ -29,6 +31,8 @@ struct VisionCaptureScreenFacts {
         /// Frame and centre in device points, when returned.
         let frame: (x: Double, y: Double, width: Double, height: Double)?
         let center: (x: Double, y: Double)?
+        /// A name VisionCapture read by OCR inside the frame of a control without a label.
+        let ocrLabel: String?
     }
 
     private let elements: [Element]
@@ -64,6 +68,10 @@ struct VisionCaptureScreenFacts {
             } else if object["value_hash"] != nil || rawValue?.contains("[REDACTED]") == true {
                 valueStatus = "redacted"
             } else { valueStatus = nil }
+            let ownLabel = label == Self.rawText(object["element_id"]) ? nil : label
+            let ocrLabel = ownLabel.flatMap(Self.displayText) == nil
+                && Self.text(object["resolved_label_source"]) == "ocr"
+                ? Self.text(object["resolved_label"]) : nil
             return Element(
                 elementID: Self.rawText(object["element_id"]),
                 role: role,
@@ -80,7 +88,8 @@ struct VisionCaptureScreenFacts {
                 ocrConfirmed: ocrConfirmed,
                 coversControls: coversControls,
                 frame: Self.frame(in: object["frame"]),
-                center: Self.point(in: object["center"]))
+                center: Self.point(in: object["center"]),
+                ocrLabel: ocrLabel)
         }
         navigationFacts = navigation.flatMap { navigation in
             [("tab_bars", "Selected tab"), ("segmented_controls", "Selected segment")]
@@ -104,6 +113,8 @@ struct VisionCaptureScreenFacts {
         var properties: [String: JSONValue] = [:]
         if let label = element.label.flatMap(Self.displayText), label != selector {
             properties["label"] = .string(label)
+        } else if let ocrLabel = element.ocrLabel {
+            properties["label"] = .string(ocrLabel + " (ocr)")
         }
         if let selected = element.selected { properties["selected"] = .bool(selected) }
         if let enabled = element.enabled { properties["enabled"] = .bool(enabled) }
@@ -221,6 +232,10 @@ struct VisionCaptureScreenFacts {
                       matchingIndex(selector: selector, role: element.role) == index else { continue }
                 return TapCandidate(selector: selector, role: element.role)
             }
+            if element.identifier == nil, element.label == nil, let ocrLabel = element.ocrLabel,
+               matchingIndex(selector: ocrLabel, role: element.role, selectorKind: "ocr_label") == index {
+                return TapCandidate(selector: ocrLabel, role: element.role, selectorKind: "ocr_label")
+            }
             return nil
         }
     }
@@ -254,7 +269,8 @@ struct VisionCaptureScreenFacts {
             }
             // A field without a label is named by its placeholder ("Tag name"
             // against "What do you want to do?"), so the model can tell them apart.
-            let content = [element.label ?? element.placeholder, element.value]
+            let content = [element.label ?? element.placeholder ?? element.ocrLabel.map { $0 + " (ocr)" },
+                           element.value]
                 .compactMap { $0.flatMap(Self.displayText) }
                 .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
                 .joined(separator: ": ")
@@ -272,7 +288,7 @@ struct VisionCaptureScreenFacts {
                 line += " at (\(x), \(y))"
             }
             if element.ocrConfirmed {
-                line += " ocr-confirmed: type or tap_coordinates at this position is allowed without a screenshot; for type, pass this line as target"
+                line += " ocr-confirmed: type, or \(VisionCaptureToolDefinitions.coordinateTapCall) at this position, is allowed without a screenshot; for type, pass this line as target"
             }
             if element.coversControls > 0 {
                 line += " frame-covers-\(element.coversControls)-controls: an element tap may hit one of them"
@@ -329,6 +345,7 @@ struct VisionCaptureScreenFacts {
             case "identifier": return exactMatch(element.identifier)
             case "label": return exactMatch(element.label)
             case "placeholder": return exactMatch(element.placeholder)
+            case "ocr_label": return exactMatch(element.ocrLabel)
             case nil: return exactMatch(element.identifier) || exactMatch(element.label)
             default: return false
             }
@@ -438,7 +455,7 @@ struct VisionCaptureScreenFacts {
         guard let index = matchingIndex(selector: selector, role: role, selectorKind: selectorKind),
               elements[index].coversControls > 0,
               !coversOnlyDisabledControls(index) else { return nil }
-        return "its frame covers \(elements[index].coversControls) other controls, so an element tap may hit one of them; if the tap has no effect, take a screenshot and use tap_coordinates on the visible control"
+        return "its frame covers \(elements[index].coversControls) other controls, so an element tap may hit one of them; if the tap has no effect, take a screenshot, then send \(VisionCaptureToolDefinitions.coordinateTapCall) at the visible control"
     }
 
     /// True when every control centred inside this frame is disabled, so a tap

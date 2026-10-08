@@ -94,6 +94,39 @@ import TurboFieldfare
         #expect(selectors.contains("More"))
     }
 
+    @Test
+    func ocrResolvedNameLabelsAnUnlabeledControlAsAPositionChoice() throws {
+        func segment(label: String?, resolved: String, x: Int64) -> JSONValue {
+            var object: [String: JSONValue] = [
+                "element_id": .string("segment-\(x)"), "role": .string("segmented_item"),
+                "type": .string("XCUIElementTypeButton"), "visible": .bool(true), "enabled": .bool(true),
+                "x_norm": .integer(x), "y_norm": .integer(935),
+                "resolved_label": .string(resolved), "resolved_label_source": .string("ocr"),
+            ]
+            if let label { object["label"] = .string(label) }
+            return .object(object)
+        }
+        let facts = VisionCaptureScreenFacts(elements: [
+            segment(label: nil, resolved: "Assistant", x: 318),
+            segment(label: "Home", resolved: "Hone", x: 138),
+        ])
+        let summary = try #require(facts.summary())
+        #expect(summary.contains("[segmented_item] Assistant (ocr) at (318, 935)"))
+        #expect(summary.contains("[segmented_item] Home at (138, 935)"))
+        #expect(!summary.contains("Hone"))
+
+        let candidates = facts.tapCandidates(excluding: [])
+        let assistant = try #require(candidates.first { $0.selector == "Assistant" })
+        #expect(assistant.selectorKind == "ocr_label")
+        #expect(facts.normalizedPosition(selector: "Assistant", role: "segmented_item", selectorKind: "ocr_label")! == (318, 935))
+        #expect(facts.properties(selector: "Assistant", role: "segmented_item", selectorKind: "ocr_label")["label"]
+            == .string("Assistant (ocr)"))
+        // The pixel name never resolves as an ordinary name.
+        #expect(facts.normalizedPosition(selector: "Assistant", role: "segmented_item") == nil)
+        let home = try #require(candidates.first { $0.selector == "Home" })
+        #expect(home.selectorKind == nil)
+    }
+
     /// A quick-add text field with the software keyboard open, decoded from
     /// JSON the way the loop receives returned elements.
     private static func facts(fieldValue: String, valueStatus: String) throws -> VisionCaptureScreenFacts {

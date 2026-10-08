@@ -1787,7 +1787,8 @@ actor VisionCaptureToolLoop {
             fallthrough
 
         case .setBoolean:
-            if Self.fastHostPath, intent.operation == .tap, staleConfirmation == nil,
+            if Self.fastHostPath, intent.operation == .tap,
+               staleConfirmation == nil || intent.selectorKind == "ocr_label",
                let selector = intent.selector, isCurrentFastTapTarget(intent) {
                 return try await performDirectNameTap(
                     intent, selector: selector, configuration: configuration, activity: activity)
@@ -2077,7 +2078,7 @@ actor VisionCaptureToolLoop {
                !(currentScreenFacts?.tapCandidates(
                    excluding: terminalManifest.actions.map { ($0.selector, $0.role) }).contains { candidate in
                    isEligibleOfferedAction(NavigationIntent(
-                       operation: .tap, selector: candidate.selector, selectorKind: nil,
+                       operation: .tap, selector: candidate.selector, selectorKind: candidate.selectorKind,
                        role: candidate.role, desiredState: nil, text: nil))
                } ?? false) {
                 // Typing can enable a button. Retire its old observations and
@@ -2190,7 +2191,7 @@ actor VisionCaptureToolLoop {
         guard let x = intent.xNorm, let y = intent.yNorm,
               let visualIntent = intent.visualIntent else {
             throw VisionCaptureAgentError.malformedCall(
-                "tap_coordinates requires normalized coordinates and intent")
+                "A coordinate tap needs every field of \(VisionCaptureToolDefinitions.coordinateTapCall).")
         }
         var arguments = makeMCPArguments(
             request: "tap coordinates",
@@ -2332,7 +2333,7 @@ actor VisionCaptureToolLoop {
         guard let x = intent.xNorm, let y = intent.yNorm,
               let visualIntent = intent.visualIntent else {
             throw VisionCaptureAgentError.malformedCall(
-                "computer_use_click requires normalized coordinates and intent")
+                "A visual click needs every field of \(VisionCaptureToolDefinitions.visualClickCall).")
         }
         let activateArguments = makeMCPArguments(
             request: "activate computer use",
@@ -2424,7 +2425,7 @@ actor VisionCaptureToolLoop {
                 "reason": .string("before_click_evidence_unavailable"),
             ]),
             "instruction": .string(
-                "No click was sent. Take a fresh screenshot. If the same visible control is still present, choose computer_use_click again with its current coordinates. Do not claim success."),
+                "No click was sent. Take a fresh screenshot. If the same visible control is still present, send \(VisionCaptureToolDefinitions.visualClickCall) again with its current coordinates. Do not claim success."),
         ]
         return NavigationOutcome(
             content: try encodeOutcomeBody(body),
@@ -3150,6 +3151,14 @@ actor VisionCaptureToolLoop {
         return try JSONValue.object(visual).encoded()
     }
 
+    /// True when a published position lies within 10 normalized units (about 4 points
+    /// across, 9 points down) of an OCR-named control.
+    static func isOCRDuplicate(position: JSONValue?, ocrPositions: [(x: Int64, y: Int64)]) -> Bool {
+        guard case .object(let point)? = position,
+              case .integer(let x)? = point["x_norm"], case .integer(let y)? = point["y_norm"] else { return false }
+        return ocrPositions.contains { abs($0.x - x) <= 10 && abs($0.y - y) <= 10 }
+    }
+
     static func coordinateImageSupportCorrection(_ guidance: String) -> String {
         guidance.replacingOccurrences(of: coordinateEvidenceReason,
             with: "Coordinate actions need current screenshot evidence; the loop attached a current screenshot.")
@@ -3676,7 +3685,7 @@ actor VisionCaptureToolLoop {
             selector: selector, role: intent.role ?? "", selectorKind: intent.selectorKind) else {
             // Not sent: a local rejection that keeps the current choices.
             throw VisionCaptureAgentError.navigationUnavailable(
-                "This choice has no screen position. Take a screenshot and use tap_coordinates on the visible control.")
+                "This choice has no screen position. Take a screenshot, then send \(VisionCaptureToolDefinitions.coordinateTapCall) at the visible control.")
         }
         currentManifest = AuthorityManifest()
         invalidateScreenObservation()
@@ -4696,8 +4705,8 @@ actor VisionCaptureToolLoop {
         - Use only allowed_next and exact current choice IDs. Never invent controls. Each result replaces earlier choices.
         - observation, facts, and choices describe the current screen. last_action describes the previous step.
         - Use useful content already visible. If a choice advances unfinished work, act before reading the same screen again.
-        - When current_image_evidence is true, use positions to match unlabeled choices. If a label and visible position conflict, use computer_use_click on the visible control.
-        - Use tap_coordinates or computer_use_click only with current image evidence. A focused field may omit target when the software keyboard is visible. Use screenshots or Computer Use when accessibility information is not enough.
+        - When current_image_evidence is true, use positions to match unlabeled choices. If a label and visible position conflict, send \(VisionCaptureToolDefinitions.visualClickCall) at the visible control.
+        - Send \(VisionCaptureToolDefinitions.coordinateTapCall), or \(VisionCaptureToolDefinitions.visualClickCall), only with current image evidence. A focused field may omit target when the software keyboard is visible. Use screenshots or Computer Use when accessibility information is not enough.
         - Take a screenshot when a control requires_screenshot, a form has no editable fields, or a read exposes only keyboard controls.
         - If a form remains after a verified tap, do not repeat that choice. Use a fresh screenshot and the visible submit control.
         - An accepted request is not proof. A verified action proves only that action. Visible state does not prove an interaction was tested.
@@ -5885,13 +5894,18 @@ actor VisionCaptureToolLoop {
                         return false
                     }
                     let proposal = NavigationIntent(
-                        operation: .tap, selector: candidate.selector, selectorKind: nil,
+                        operation: .tap, selector: candidate.selector, selectorKind: candidate.selectorKind,
                         role: candidate.role, desiredState: nil, text: nil)
                     return isEligibleOfferedAction(proposal)
                 }
             offeredTapCandidates = (signature, candidates)
         } else {
             candidates = []
+        }
+        let ocrPositions = candidates.compactMap { candidate -> (x: Int64, y: Int64)? in
+            guard candidate.selectorKind == "ocr_label" else { return nil }
+            return facts?.normalizedPosition(
+                selector: candidate.selector, role: candidate.role, selectorKind: "ocr_label")
         }
         let publishedActions = eligibleOfferedActions(manifest.actions).filter { action in
             guard let facts else { return true }
@@ -5900,15 +5914,24 @@ actor VisionCaptureToolLoop {
                 role: action.role,
                 displayLabel: action.displayLabel,
                 position: action.displayPosition)
+        }.filter { action in
+            // An unlabeled published choice at an OCR-named control cannot be told
+            // apart or tapped by ID; the "(ocr)" choice replaces it.
+            !(action.displayLabel == nil
+                && facts?.readableLabel(selector: action.selector, role: action.role) == nil
+                && Self.isOCRDuplicate(position: action.displayPosition, ocrPositions: ocrPositions))
         }
         let availableActions = Self.deduplicatedDecisionActions(
             Self.sanitizedActions(publishedActions, facts: facts)
             + Self.sanitizedSystemAlertActions(systemAlert)
             + candidates.map { candidate in
-                var object = facts?.properties(selector: candidate.selector, role: candidate.role) ?? [:]
+                var object = facts?.properties(
+                    selector: candidate.selector, role: candidate.role,
+                    selectorKind: candidate.selectorKind) ?? [:]
                 object["action"] = .string("tap")
                 object["selector"] = .string(candidate.selector)
                 object["role"] = .string(candidate.role)
+                if let kind = candidate.selectorKind { object["selector_kind"] = .string(kind) }
                 object["requires_validation"] = .bool(true)
                 return .object(object)
             }, facts: facts)
@@ -7043,7 +7066,7 @@ actor VisionCaptureToolLoop {
     private func rejectExhaustedIntent(_ intent: NavigationIntent) throws {
         guard unverifiedAttempts[intent, default: 0] >= Self.unverifiedAttemptLimit else { return }
         throw VisionCaptureAgentError.navigationUnavailable(
-            "This action was already sent \(Self.unverifiedAttemptLimit) times without a verified effect, so it is withheld now. Do not repeat it. Use another way to reach the goal: type into the field, choose the return key, or take a screenshot and use tap_coordinates on the visible control.")
+            "This action was already sent \(Self.unverifiedAttemptLimit) times without a verified effect, so it is withheld now. Do not repeat it. Use another way to reach the goal: type into the field, choose the return key, or take a screenshot, then send \(VisionCaptureToolDefinitions.coordinateTapCall) at the visible control.")
     }
 
     private func rememberRejectedBeforeSubmissionProposal(
@@ -7761,7 +7784,7 @@ actor VisionCaptureToolLoop {
 
     /// The one rule for choosing a target in a packet that carries a current image.
     static let visualChoiceRule =
-        "Tap a current choice by ID, or use tap_coordinates on a control you can see in this image when no choice matches it. If the control you need is not visible, take another path (close the sheet, go back) or report a blocker. Do not repeat a coordinate tap that had no effect."
+        "Tap a current choice by ID, or send \(VisionCaptureToolDefinitions.coordinateTapCall) for a control you can see in this image when no choice matches it. If the control you need is not visible, take another path (close the sheet, go back) or report a blocker. Do not repeat a coordinate tap that had no effect."
 
     static let screenshotPairInstruction =
         "The image was captured before the current accessibility read. Choices and positions come from that read and any following cache validation; visual agreement is unverified. If a choice label matches a visible control but its position does not, do not use that target ID; use an offered visual click at the visible control. If the target remains ambiguous, report the uncertainty. "

@@ -337,6 +337,51 @@ import TurboFieldfare
     }
 
     @Test
+    func guidanceNamesCoordinateActionsInTheAcceptedCallForm() throws {
+        // The accepted form names the tool, the action value and its fields.
+        let schema = try #require(VisionCaptureToolDefinitions.all.first {
+            $0.name == VisionCaptureToolDefinitions.navigateName })
+        let schemaText = try schema.parameters.encoded()
+        for (action, call) in [("tap_coordinates", VisionCaptureToolDefinitions.coordinateTapCall),
+                               ("computer_use_click", VisionCaptureToolDefinitions.visualClickCall)] {
+            #expect(call.hasPrefix(VisionCaptureToolDefinitions.navigateName + " with action \"\(action)\""))
+            #expect(schemaText.contains("\"\(action)\""))
+            for field in ["x_norm", "y_norm", "intent"] {
+                #expect(call.contains(field))
+                #expect(schemaText.contains("\"\(field)\""))
+            }
+        }
+        #expect(VisionCaptureToolLoop.visualChoiceRule.contains(VisionCaptureToolDefinitions.coordinateTapCall))
+        // No other model-facing sentence names a coordinate action by itself.
+        let tools = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/TurboFieldfareApp/Core/Tools")
+        for file in ["VisionCaptureToolLoop.swift", "VisionCaptureScreenFacts.swift"] {
+            let source = try String(contentsOf: tools.appendingPathComponent(file), encoding: .utf8)
+            for line in source.split(separator: "\n") {
+                let text = line.trimmingCharacters(in: .whitespaces)
+                guard text.contains("tap_coordinates") || text.contains("computer_use_click"),
+                      !text.hasPrefix("//"), !text.hasPrefix("case ") else { continue }
+                Issue.record("\(file) names a coordinate action outside the call form: \(text)")
+            }
+        }
+    }
+
+    @Test
+    func unlabeledPublishedChoiceAtAnOCRNamedControlIsADuplicate() {
+        let ocr: [(x: Int64, y: Int64)] = [(x: 318, y: 935)]
+        func position(_ x: Int64, _ y: Int64) -> JSONValue {
+            .object(["x_norm": .integer(x), "y_norm": .integer(y)])
+        }
+        #expect(VisionCaptureToolLoop.isOCRDuplicate(position: position(318, 935), ocrPositions: ocr))
+        #expect(VisionCaptureToolLoop.isOCRDuplicate(position: position(322, 931), ocrPositions: ocr))
+        #expect(!VisionCaptureToolLoop.isOCRDuplicate(position: position(501, 935), ocrPositions: ocr))
+        #expect(!VisionCaptureToolLoop.isOCRDuplicate(position: nil, ocrPositions: ocr))
+        #expect(!VisionCaptureToolLoop.isOCRDuplicate(position: position(318, 935), ocrPositions: []))
+    }
+
+    @Test
     func validationMessageIsTheFirstAppearedTextThatReadsLikeOne() {
         #expect(VisionCaptureToolLoop.validationMessage(
             in: ["Step 2 of 6", "Not a YouTube link", "Invalid URL"]) == "Not a YouTube link")

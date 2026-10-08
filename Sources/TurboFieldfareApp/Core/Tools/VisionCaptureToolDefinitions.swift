@@ -14,6 +14,11 @@ public enum VisionCaptureAgentProfile {
 enum VisionCaptureToolDefinitions {
     static let navigateName = "visioncapture_navigate"
     static let historyReadName = "task_history_read"
+    /// How guidance names a coordinate action: the exact call the parser accepts.
+    static let coordinateTapCall =
+        "visioncapture_navigate with action \"tap_coordinates\", x_norm, y_norm and intent"
+    static let visualClickCall =
+        "visioncapture_navigate with action \"computer_use_click\", x_norm, y_norm and intent"
 
     static let all: [AppToolDefinition] = [
         AppToolDefinition(
