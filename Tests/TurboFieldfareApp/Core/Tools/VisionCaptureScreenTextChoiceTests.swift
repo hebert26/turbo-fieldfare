@@ -535,9 +535,10 @@ import TurboFieldfare
         try reply(.object(["blocks": .array(rows.map { block($0.0, $0.1, $0.2, $0.3, $0.4) })]))
     }
 
+    /// Wheel lines in a packet: the one-wheel and the several-wheel line both end so.
     private func wheelNoteCount(_ packet: String) throws -> Int {
         guard case .string(let text)? = try packetObject(packet)["guidance"] else { return 0 }
-        return text.components(separatedBy: VisionCaptureToolLoop.pickerWheelNote).count - 1
+        return text.components(separatedBy: "do not swipe these rows.").count - 1
     }
 
     private func afterTap(ocr: JSONValue, elements: [JSONValue]) async throws -> String {
@@ -554,8 +555,8 @@ import TurboFieldfare
             let months = words.filter { Self.monthNames.contains($0.text) }
             let years = words.filter { $0.text.count == 4 && Int($0.text) != nil }
             #expect(months.count == 7 && years.count == 7)
-            #expect(VisionCaptureToolLoop.looksLikePickerWheel(months))
-            #expect(VisionCaptureToolLoop.looksLikePickerWheel(years))
+            #expect(!VisionCaptureToolLoop.looksLikePickerWheel(months).isEmpty)
+            #expect(!VisionCaptureToolLoop.looksLikePickerWheel(years).isEmpty)
             let packet = try await afterTap(ocr: try ocrReply(screen), elements: [element("agenda", "Agenda", 393, 941)])
             #expect(try wheelNoteCount(packet) == 1)
         }
@@ -629,10 +630,48 @@ import TurboFieldfare
             let words = VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(screen)).blocks
             let months = words.filter { Self.monthNames.contains($0.text) }
             #expect(months.count == 7)
-            #expect(VisionCaptureToolLoop.looksLikePickerWheel(months))
+            #expect(!VisionCaptureToolLoop.looksLikePickerWheel(months).isEmpty)
             let packet = try await afterTap(ocr: try ocrReply(screen), elements: [element("agenda", "Agenda", 393, 941)])
             #expect(try wheelNoteCount(packet) == 1)
         }
+    }
+
+    // MARK: Hint v3: each wheel by its visible rows
+
+    private func guidanceText(_ packet: String) throws -> String {
+        guard case .string(let text)? = try packetObject(packet)["guidance"] else { return "" }
+        return text
+    }
+
+    @Test
+    func twoWheelsAreNamedByTheirVisibleRows() async throws {
+        let packet = try await afterTap(ocr: try ocrReply(Self.taskWheelScreen), elements: [element("agenda", "Agenda", 393, 941)])
+        let note = "These rows are 2 picker wheels side by side: July to January, and 2023 to 2029. Set each wheel by tapping its own rows; if the value is not visible, tap that wheel's end row nearest to it; do not swipe these rows."
+        let guidance = try guidanceText(packet)
+        #expect(guidance.components(separatedBy: note).count == 2)
+        #expect(!guidance.contains(VisionCaptureToolLoop.pickerWheelNote))
+        let wheels = VisionCaptureToolLoop.looksLikePickerWheel(VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(Self.taskWheelScreen)).blocks)
+        #expect(wheels.map { $0.map(\.text) } == [
+            ["July", "August", "September", "October", "November", "December", "January"],
+            ["2023", "2024", "2025", "2026", "2027", "2028", "2029"],
+        ])
+    }
+
+    @Test
+    func wheelsAreListedLeftToRight() async throws {
+        // In this read the year column's top row sits higher than the month column's.
+        let packet = try await afterTap(ocr: try ocrReply(Self.taskJulyScreen), elements: [element("agenda", "Agenda", 393, 941)])
+        #expect(try guidanceText(packet).contains("These rows are 2 picker wheels side by side: April to October, and 2027 to 2033."))
+    }
+
+    @Test
+    func oneWheelKeepsTheOneWheelNote() async throws {
+        let monthsOnly = Self.taskWheelScreen.filter { !($0.0.count == 4 && Int($0.0) != nil) }
+        let packet = try await afterTap(ocr: try ocrReply(monthsOnly), elements: [element("agenda", "Agenda", 393, 941)])
+        let guidance = try guidanceText(packet)
+        #expect(guidance.components(separatedBy: VisionCaptureToolLoop.pickerWheelNote).count == 2)
+        #expect(!guidance.contains("picker wheels side by side"))
+        #expect(VisionCaptureToolLoop.pickerWheelNote == "These look like picker wheel rows: tap the row you want; if it is not visible, tap the end row nearest to it; do not swipe these rows.")
     }
 
     @Test
@@ -649,8 +688,8 @@ import TurboFieldfare
     func aColumnOfFourDoesNotFire() async throws {
         let words = VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(Self.calendarWheelScreen)).blocks
         let months = words.filter { Self.monthNames.contains($0.text) }.sorted { $0.yNorm < $1.yNorm }
-        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(Array(months.prefix(4))))
-        #expect(VisionCaptureToolLoop.looksLikePickerWheel(Array(months.prefix(5))))
+        #expect(VisionCaptureToolLoop.looksLikePickerWheel(Array(months.prefix(4))).isEmpty)
+        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(Array(months.prefix(5))).isEmpty)
         let four = Self.calendarWheelScreen.filter { ["October", "November", "December", "January"].contains($0.0) }
         #expect(try wheelNoteCount(try await afterTap(ocr: try ocrReply(four), elements: [element("agenda", "Agenda", 393, 941)])) == 0)
     }
@@ -658,9 +697,9 @@ import TurboFieldfare
     @Test
     func calendarDayGridDoesNotFire() async throws {
         let grid = Self.dayGridScreen.map { VisionCaptureToolLoop.ScreenTextBlock(text: $0.0, xNorm: $0.1, yNorm: $0.2) }
-        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(grid))
+        #expect(VisionCaptureToolLoop.looksLikePickerWheel(grid).isEmpty)
         // Day numbers stack in columns 50 to 53 apart: "1", "8", "15", "22", "29".
-        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(grid.filter { ["1", "8", "15", "22", "29"].contains($0.text) }))
+        #expect(VisionCaptureToolLoop.looksLikePickerWheel(grid.filter { ["1", "8", "15", "22", "29"].contains($0.text) }).isEmpty)
         let rows = Self.dayGridScreen.map { word -> (String, Double, Double, Double, Double) in
             let width = 30.0 * Double(word.0.count), height = 46.0
             return (word.0, Double(word.1) * 1.206 - width / 2, Double(word.2) * 2.622 - height / 2, width, height)

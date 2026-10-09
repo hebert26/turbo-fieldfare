@@ -5775,8 +5775,8 @@ actor VisionCaptureToolLoop {
         if let directions = packet["can_swipe"] { comparison["can_swipe"] = directions }
         if !images.isEmpty { comparison["images"] = .array(images.map { .string($0.sha256) }) }
         var encoded = try Self.addingScreenTextNote(to: JSONValue.object(packet).encoded(), body: body)
-        if offersScreenText, Self.looksLikePickerWheel(offeredScreenText) {
-            encoded = try Self.addingGuidanceNote(to: encoded, note: Self.pickerWheelNote)
+        if offersScreenText, let note = Self.pickerWheelsNote(Self.looksLikePickerWheel(offeredScreenText)) {
+            encoded = try Self.addingGuidanceNote(to: encoded, note: note)
         }
         if packet["journey_hint"] != nil { lastEmittedJourneyHint = currentJourneyHint }
         return DecisionPacket(content: encoded, comparison: .object(comparison), offersScreenText: offersScreenText)
@@ -8353,20 +8353,39 @@ actor VisionCaptureToolLoop {
     /// spreads at most 110; day-grid columns are about 105 apart. Known limit: any 5
     /// or more OCR-only lines 18 to 44 apart (a wrapped paragraph in an image) also
     /// fire; the hint is harmless there.
-    static func looksLikePickerWheel(_ blocks: [ScreenTextBlock]) -> Bool {
+    /// Returns the wheels it finds: runs that share no block, left to right.
+    static func looksLikePickerWheel(_ blocks: [ScreenTextBlock]) -> [[ScreenTextBlock]] {
         let rows = blocks.sorted { $0.yNorm < $1.yNorm }
-        for (index, first) in rows.enumerated() {
-            var run = [first]
-            for block in rows[(index + 1)...] where abs(block.xNorm - first.xNorm) <= 80 {
-                let gap = block.yNorm - run[run.count - 1].yNorm
+        var wheels: [[ScreenTextBlock]] = []
+        var used = Set<Int>()
+        for (index, first) in rows.enumerated() where !used.contains(index) {
+            var run = [(index, first)]
+            for (offset, block) in rows[(index + 1)...].enumerated()
+            where abs(block.xNorm - first.xNorm) <= 80 && !used.contains(index + 1 + offset) {
+                let gap = block.yNorm - run[run.count - 1].1.yNorm
                 if gap < 18 { continue }
                 if gap > 44 { break }
-                run.append(block)
+                run.append((index + 1 + offset, block))
             }
-            let xs = run.map(\.xNorm)
-            if run.count >= 5, let low = xs.min(), let high = xs.max(), high - low <= 110 { return true }
+            let xs = run.map(\.1.xNorm)
+            if run.count >= 5, let low = xs.min(), let high = xs.max(), high - low <= 110 {
+                wheels.append(run.map(\.1))
+                used.formUnion(run.map(\.0))
+            }
         }
-        return false
+        let centre = { (wheel: [ScreenTextBlock]) in wheel.map(\.xNorm).reduce(0, +) / Int64(wheel.count) }
+        return wheels.sorted { centre($0) < centre($1) }
+    }
+
+    /// The packet line for the wheels on screen: nil without a wheel; the one-wheel
+    /// line for one; for two or more, each wheel by its visible top and bottom rows,
+    /// as read, side by side.
+    static func pickerWheelsNote(_ wheels: [[ScreenTextBlock]]) -> String? {
+        guard !wheels.isEmpty else { return nil }
+        guard wheels.count > 1 else { return pickerWheelNote }
+        let ranges = wheels.map { wheel in "\(wheel[0].text) to \(wheel[wheel.count - 1].text)" }
+        let listed = ranges.dropLast().joined(separator: ", ") + ", and " + ranges[ranges.count - 1]
+        return "These rows are \(wheels.count) picker wheels side by side: \(listed). Set each wheel by tapping its own rows; if the value is not visible, tap that wheel's end row nearest to it; do not swipe these rows."
     }
 
     /// The status bar (clock, signal, battery) has its centre at y_norm 50 or less.
