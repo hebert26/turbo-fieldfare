@@ -4880,7 +4880,7 @@ actor VisionCaptureToolLoop {
                 + Double(components.attoseconds) / 1_000_000_000_000_000_000)
     }
 
-    private static func instructions(
+    static func instructions(
         configuration _: VisionCaptureAgentConfiguration
     ) -> String {
         return """
@@ -4894,6 +4894,7 @@ actor VisionCaptureToolLoop {
         - When current_image_evidence is true, use positions to match unlabeled choices. If a label and visible position conflict, send \(VisionCaptureToolDefinitions.visualClickCall) at the visible control.
         - Send \(VisionCaptureToolDefinitions.coordinateTapCall), or \(VisionCaptureToolDefinitions.visualClickCall), only with current image evidence. A fact marked ocr-confirmed needs no screenshot: tap it with \(VisionCaptureToolDefinitions.coordinateTapCall), or type into it with \(VisionCaptureToolDefinitions.typeAtPositionCall), using its position. A focused field may omit target when the software keyboard is visible. Use screenshots or Computer Use when accessibility information is not enough.
         - Take a screenshot when a control requires_screenshot, a form has no editable fields, or a read exposes only keyboard controls.
+        - Wheel pickers (columns of stacked values where the middle row is the current value, for example a date picker's month and year): set each column separately. To choose a value, tap its row when you can see it. If it is not visible, tap the row at the end of that column closest to it (the top or bottom row); the column moves and shows the next values. Check the screen again and repeat until the value is visible, then tap it. Do not swipe a picker wheel.
         - If a form remains after a verified tap, do not repeat that choice. Use a fresh screenshot and the visible submit control.
         - An accepted request is not proof. A verified action proves only that action. Visible state does not prove an interaction was tested.
         - Keep failed, refused, inconclusive, and delivery-unknown results. Never replay uncertain input. Continue other reachable checks.
