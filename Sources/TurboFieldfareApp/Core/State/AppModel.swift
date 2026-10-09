@@ -86,6 +86,8 @@ public final class AppModel {
     public private(set) var agentModeEnabled: Bool = false
     public private(set) var agentBundleIdentifier = "com.hebertgo.nestmind.debug"
     public private(set) var agentSimulatorUDID = "7BE1EC4B-8A9F-4C00-8A2C-D4321F9AB382"
+    /// Settings file only (agentAutoScreenImage); no control in the window.
+    public private(set) var agentAutoScreenImage = true
     public var diagnostics: AppDiagnostics?
     public var error: AppInferenceError?
     public var installState: AppModelInstallState = .idle
@@ -364,6 +366,7 @@ public final class AppModel {
         if let udid = settings.agentSimulatorUDID, !udid.isEmpty {
             self.agentSimulatorUDID = udid
         }
+        self.agentAutoScreenImage = settings.agentAutoScreenImage
         self.installationStatus = installationStatusProvider(directory, selectedEntry)
         self.visionInstallationStatus = AppVisionPackInstallationProbe.status(
             at: directory,
@@ -1211,7 +1214,8 @@ public final class AppModel {
                 in: .whitespacesAndNewlines),
             simulatorUDID: agentSimulatorUDID.trimmingCharacters(
                 in: .whitespacesAndNewlines),
-            modelDirectory: URL(fileURLWithPath: modelPathText, isDirectory: true))
+            modelDirectory: URL(fileURLWithPath: modelPathText, isDirectory: true),
+            autoScreenImage: agentAutoScreenImage)
     }
 
     /// Starts the launch load if it is switched on and the model can be loaded.
@@ -2402,6 +2406,7 @@ public final class AppModel {
         if let udid = settings.agentSimulatorUDID, !udid.isEmpty {
             agentSimulatorUDID = udid
         }
+        agentAutoScreenImage = settings.agentAutoScreenImage
         agentToolLoop = VisionCaptureToolLoop()
     }
 

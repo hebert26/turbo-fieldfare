@@ -8,15 +8,19 @@ public struct VisionCaptureAgentConfiguration: Equatable, Sendable {
     public let bundleIdentifier: String
     public let simulatorUDID: String
     public let modelDirectory: URL
+    /// The after-action OCR capture's image joins the next input (setting agentAutoScreenImage).
+    public let autoScreenImage: Bool
 
     public init(
         bundleIdentifier: String,
         simulatorUDID: String,
-        modelDirectory: URL
+        modelDirectory: URL,
+        autoScreenImage: Bool = true
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.simulatorUDID = simulatorUDID
         self.modelDirectory = modelDirectory.standardizedFileURL
+        self.autoScreenImage = autoScreenImage
     }
 
     public func validate() throws {
@@ -704,6 +708,8 @@ actor VisionCaptureToolLoop {
     private struct DecisionPacket {
         let content: String
         let comparison: JSONValue
+        /// At least one screen-text word survived the lean rule.
+        var offersScreenText = false
     }
 
     private struct AuthorityManifest: Equatable {
@@ -980,6 +986,12 @@ actor VisionCaptureToolLoop {
     private var resolvedJourneyLabel: String?
     private var mcpClient: VisionCaptureMCPClient?
     private let screenshotStore = AppImageAttachmentStore()
+    /// The last after-action OCR capture, staged for the next input (fix c).
+    private var autoScreenImage: AppImageAttachment?
+    #if DEBUG
+    /// Tests stand in for the vision pack probe (nil: the real probe).
+    private var visionPackCompleteForTesting: Bool?
+    #endif
     private var taskCheckpoint = AgentTaskCheckpoint()
     private var checkpointRequestIDs: [UUID] = []
     private var modelConversationEpoch: UUID?
@@ -1290,6 +1302,7 @@ actor VisionCaptureToolLoop {
                     excerpt: content, imageCount: 0))
             } else {
                 do {
+                    autoScreenImage = nil
                     checkingLocalProposal = true
                     let intent = try navigationIntent(from: call, configuration: configuration)
                     try configuration.validate()
@@ -1327,7 +1340,8 @@ actor VisionCaptureToolLoop {
                     let packet = try decisionPacket(
                         from: outcome.content, call: call, configuration: configuration,
                         images: images)
-                    content = packet.content
+                    // Added after the packet: the auto image is not coordinate evidence.
+                    content = try attachingAutoScreenImage(to: packet, images: &images)
                     if usedCoordinatesOverTarget {
                         content = try Self.addingGuidanceNote(to: content, note: Self.coordinatesOverTargetNote)
                     }
@@ -2505,16 +2519,20 @@ actor VisionCaptureToolLoop {
         afterAction: Bool = false,
         configuration: VisionCaptureAgentConfiguration, activity: @escaping Activity
     ) async throws -> (blocks: [ScreenTextBlock], unavailableReason: String?) {
+        if afterAction { autoScreenImage = nil }
         let ocrArguments = makeMCPArguments(
             request: "take a screenshot", parameters: ["include_ocr": .bool(true)],
             configuration: configuration, includeFlowSession: false)
         do {
             let ocrResult = try await executeHostRequest(
                 ocrArguments, configuration: configuration, activity: activity)
-            return ocrResult.isError
-                ? ([], Self.screenTextRefusalReason(
+            guard !ocrResult.isError else {
+                return ([], Self.screenTextRefusalReason(
                     code: ocrResult.refusalCode, reason: ocrResult.serverOutcome.reason))
-                : Self.screenTextBlocks(in: ocrResult.value)
+            }
+            let screenText = Self.screenTextBlocks(in: ocrResult.value)
+            if afterAction { keepAutoScreenImage(ocrResult, blocks: screenText.blocks, configuration: configuration) }
+            return screenText
         } catch is CancellationError {
             throw CancellationError()
         } catch {
@@ -2522,8 +2540,49 @@ actor VisionCaptureToolLoop {
         }
     }
 
+    /// Keeps the after-action OCR capture's image, the same capture as its words,
+    /// when the setting allows it and the read found words. It joins the next input
+    /// only if a word survives the lean rule. It is never coordinate evidence:
+    /// tap_coordinates still needs the model's own screenshot, and the screen-text
+    /// choices tap exact positions anyway.
+    private func keepAutoScreenImage(
+        _ result: VisionCaptureMCPResult, blocks: [ScreenTextBlock],
+        configuration: VisionCaptureAgentConfiguration
+    ) {
+        // Without the vision pack an image would stop the model turn.
+        guard configuration.autoScreenImage, !blocks.isEmpty, visionPackComplete(configuration) else { return }
+        autoScreenImage = try? VisionCaptureScreenshot.stage(
+            result, in: screenshotStore, expectedDeviceID: configuration.simulatorUDID)
+    }
+
+    private func visionPackComplete(_ configuration: VisionCaptureAgentConfiguration) -> Bool {
+        #if DEBUG
+        if let visionPackCompleteForTesting { return visionPackCompleteForTesting }
+        #endif
+        return AppVisionPackInstallationProbe.status(at: configuration.modelDirectory) == .complete
+    }
+
+    static let autoScreenImageNote = "The attached image shows the screen after your action. Tap words by their screen-text choice IDs; for a tap by position, take a screenshot first."
+
+    /// The packet text for the next input. With the auto image it gets the note.
+    private func attachingAutoScreenImage(
+        to packet: DecisionPacket, images: inout [AppImageAttachment]
+    ) throws -> String {
+        guard let image = takeAutoScreenImage(for: packet) else { return packet.content }
+        images.append(image)
+        return try Self.addingGuidanceNote(to: packet.content, note: Self.autoScreenImageNote)
+    }
+
+    /// The kept capture for the input of `packet`, if a screen-text word survived;
+    /// the slot is cleared either way.
+    private func takeAutoScreenImage(for packet: DecisionPacket) -> AppImageAttachment? {
+        defer { autoScreenImage = nil }
+        return packet.offersScreenText ? autoScreenImage : nil
+    }
+
     /// After a dispatched action (not type): one OCR read when the screen changed
-    /// and a current read follows, its words into the packet body. No image.
+    /// and a current read follows, its words into the packet body. The capture's
+    /// image is kept for the next input (keepAutoScreenImage).
     private func addingScreenTextAfterAction(
         _ outcome: NavigationOutcome, signatureBefore: String?,
         configuration: VisionCaptureAgentConfiguration, activity: @escaping Activity
@@ -2689,7 +2748,7 @@ actor VisionCaptureToolLoop {
             }
         }
         // A changed screen gets one plain OCR read: its words become tap choices
-        // in the next packet. No image is attached.
+        // in the next packet, with the capture's image if a word is offered.
         if Self.readsScreenTextAfterAction(
             body, signatureBefore: signatureBeforeAction, signatureAfter: currentScreenSignature) {
             Self.recordScreenText(
@@ -5460,6 +5519,7 @@ actor VisionCaptureToolLoop {
                 }
             }
         }
+        var offersScreenText = false
         if !readOnlyRequired, !unavailable, recovery == nil, currentScreenSignature != nil,
            case .array(let rawBlocks)? = body["screen_text"] {
             let blocks = rawBlocks.compactMap { value -> ScreenTextBlock? in
@@ -5492,6 +5552,7 @@ actor VisionCaptureToolLoop {
                     role: "text", displayLabel: Self.screenTextLabel(block.text), allowedStates: [],
                     route: .screenText(x: block.xNorm, y: block.yNorm))
                 choices.append(choice)
+                offersScreenText = true
                 var semantic = choice.objectValue ?? [:]
                 semantic.removeValue(forKey: "id")
                 semantic["selector"] = .string(block.text)
@@ -5502,9 +5563,7 @@ actor VisionCaptureToolLoop {
         // A screenshot packet already includes a fresh accessibility read.
         // Offering another read immediately discards the pixels and can trap
         // the model in an observe/screenshot loop around unnamed controls.
-        let visionAvailable = AppVisionPackInstallationProbe.status(
-            at: configuration.modelDirectory
-        ) == .complete
+        let visionAvailable = visionPackComplete(configuration)
         var allowed: Set<NavigationOperation> = currentImageObservation == observationGeneration
             ? []
             : [.observe]
@@ -5584,6 +5643,8 @@ actor VisionCaptureToolLoop {
             currentChoiceBindings.removeAll(keepingCapacity: true)
             currentImageObservation = nil
         }
+        // Wiped choices offer no screen text, so no auto image goes with them.
+        if choices.isEmpty { offersScreenText = false }
         permittedNextOperations = allowed
         var observation: [String: JSONValue] = [
             "id": .string("o\(observationGeneration)"),
@@ -5673,7 +5734,7 @@ actor VisionCaptureToolLoop {
         if !images.isEmpty { comparison["images"] = .array(images.map { .string($0.sha256) }) }
         let encoded = try Self.addingScreenTextNote(to: JSONValue.object(packet).encoded(), body: body)
         if packet["journey_hint"] != nil { lastEmittedJourneyHint = currentJourneyHint }
-        return DecisionPacket(content: encoded, comparison: .object(comparison))
+        return DecisionPacket(content: encoded, comparison: .object(comparison), offersScreenText: offersScreenText)
     }
 
     private static func choicesForDisplay(_ choices: [JSONValue], includesImage: Bool) -> [JSONValue] {
@@ -6559,12 +6620,18 @@ actor VisionCaptureToolLoop {
     /// observation record, outcome, after-action gate and decision-packet code.
     /// `read` is the follow-up read (nil: none), `body` adds result fields such as
     /// screen_changed or effect, and `screenTextReply` or `screenTextError` stands
-    /// for the OCR read when the gate asks for one.
+    /// for the OCR read when the gate asks for one. `visionPackComplete` stands in
+    /// for the vision pack probe (nil: the real probe). `userInstruction` is applied
+    /// as the user's restrictions. `image` is the capture the loop adds to the next input.
     func actionPacketForTesting(
         operation: String = "tap", read: VisionCaptureMCPResult?, signatureBefore: String? = nil,
         body extra: [String: JSONValue], screenTextReply: JSONValue? = nil, screenTextError: Error? = nil,
+        visionPackComplete: Bool? = nil, userInstruction: String? = nil,
         configuration: VisionCaptureAgentConfiguration
-    ) throws -> (packet: String, readScreenText: Bool) {
+    ) throws -> (packet: String, readScreenText: Bool, image: AppImageAttachment?) {
+        autoScreenImage = nil
+        if let userInstruction { userRestrictions.apply(userInstruction) }
+        visionPackCompleteForTesting = visionPackComplete
         var body: [String: JSONValue] = [:]
         if let read {
             try recordScreenObservation(from: read.value)
@@ -6586,14 +6653,41 @@ actor VisionCaptureToolLoop {
         if reads {
             let screenText = try screenTextError.map { try Self.screenTextReadFailure($0, afterAction: true) }
                 ?? Self.screenTextBlocks(in: screenTextReply ?? .object([:]))
+            if screenTextError == nil, let reply = screenTextReply {
+                keepAutoScreenImage(VisionCaptureMCPResult(
+                    value: reply, isError: false, refusalCode: nil, dispatchAttempted: nil,
+                    hasConflictingDispatchAttemptEvidence: false,
+                    isGuardedTargetRejectedBeforeSubmission: false,
+                    isStaleActionCapabilityBeforeDispatch: false,
+                    isSourceLayoutChangedBeforeRevalidation: false,
+                    isActionAuthorizationExpiredBeforeDispatch: false,
+                    isObservedTapTargetUnavailableBeforeDispatch: false,
+                    isDeliveredTransitionContinuation: false,
+                    isPointerPreCaptureFailureBeforeSubmission: false),
+                    blocks: screenText.blocks, configuration: configuration)
+            }
             Self.recordScreenText(screenText, into: &body)
         }
         let packet = try decisionPacket(
             from: JSONValue.object(body).encoded(),
             call: AppToolCall(id: "action-test", name: "visioncapture_navigate",
                 arguments: .object(["action": .string(operation)])),
-            configuration: configuration, images: []).content
-        return (packet, reads)
+            configuration: configuration, images: [])
+        var images: [AppImageAttachment] = []
+        let content = try attachingAutoScreenImage(to: packet, images: &images)
+        return (content, reads, images.first)
+    }
+
+    /// Test entry: the loop's refusal of a proposed call on the last packet (nil: accepted).
+    func proposalRefusalForTesting(
+        _ arguments: JSONValue, configuration: VisionCaptureAgentConfiguration
+    ) -> String? {
+        do {
+            _ = try navigationIntent(
+                from: AppToolCall(id: "proposal-test", name: "visioncapture_navigate", arguments: arguments),
+                configuration: configuration)
+            return nil
+        } catch { return "\(error)" }
     }
     #endif
 

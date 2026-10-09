@@ -34,6 +34,9 @@ struct MacAppSettings: Codable, Equatable, Sendable {
     /// Agent Mode targets. Absent in older files; the app keeps its defaults then.
     var agentBundleIdentifier: String? = nil
     var agentSimulatorUDID: String? = nil
+    /// After an action that changed the screen, attach the OCR capture's image
+    /// when it shows words the host does not know. Absent in older files: on.
+    var agentAutoScreenImage: Bool = true
 
     var gemmaToolThinkingEnabled: Bool {
         get { toolThinkingEnabled }
@@ -64,6 +67,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         case qwenRegistrationPath
         case agentBundleIdentifier
         case agentSimulatorUDID
+        case agentAutoScreenImage
     }
 
     init(version: Int = currentVersion,
@@ -88,7 +92,8 @@ struct MacAppSettings: Codable, Equatable, Sendable {
          qwenSourceRoot: String? = nil,
          qwenRegistrationPath: String? = nil,
          agentBundleIdentifier: String? = nil,
-         agentSimulatorUDID: String? = nil) {
+         agentSimulatorUDID: String? = nil,
+         agentAutoScreenImage: Bool = true) {
         self.version = version
         self.contextTokens = contextTokens
         self.qwenContextTokens = qwenContextTokens
@@ -112,6 +117,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         self.qwenRegistrationPath = qwenRegistrationPath
         self.agentBundleIdentifier = agentBundleIdentifier
         self.agentSimulatorUDID = agentSimulatorUDID
+        self.agentAutoScreenImage = agentAutoScreenImage
     }
 
     init(from decoder: Decoder) throws {
@@ -159,6 +165,7 @@ struct MacAppSettings: Codable, Equatable, Sendable {
         qwenRegistrationPath = try container.decodeIfPresent(String.self, forKey: .qwenRegistrationPath)
         agentBundleIdentifier = try container.decodeIfPresent(String.self, forKey: .agentBundleIdentifier)
         agentSimulatorUDID = try container.decodeIfPresent(String.self, forKey: .agentSimulatorUDID)
+        agentAutoScreenImage = try container.decodeIfPresent(Bool.self, forKey: .agentAutoScreenImage) ?? true
     }
 
     func contextTokens(for modelID: AppModelID) -> Int {

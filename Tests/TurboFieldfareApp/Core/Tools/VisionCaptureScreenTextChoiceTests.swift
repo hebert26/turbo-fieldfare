@@ -1,17 +1,22 @@
+import CryptoKit
+import CoreGraphics
 import Foundation
+import ImageIO
 import Testing
 import TurboFieldfare
 @testable import TurboFieldfareAppCore
 
 @Suite struct VisionCaptureScreenTextChoiceTests {
     /// A plain screenshot reply: the PNG block, then the metadata text with OCR.
-    private func reply(_ ocr: JSONValue, width: Int64 = 1206, height: Int64 = 2622) throws -> JSONValue {
+    private func reply(_ ocr: JSONValue, width: Int64 = 1206, height: Int64 = 2622,
+                       png: Data? = nil, udid: String = "DE8B571C-2234-498F-9FAC-71C96B614792") throws -> JSONValue {
         let metadata = try JSONValue.object([
-            "udid": .string("DE8B571C-2234-498F-9FAC-71C96B614792"),
+            "udid": .string(udid),
             "width": .integer(width), "height": .integer(height), "ocr": ocr,
         ]).encoded()
         return .object(["content": .array([
-            .object(["type": .string("image"), "mimeType": .string("image/png"), "data": .string("AAAA")]),
+            .object(["type": .string("image"), "mimeType": .string("image/png"),
+                     "data": .string(png?.base64EncodedString() ?? "AAAA")]),
             .object(["type": .string("text"), "text": .string(metadata)]),
         ])])
     }
@@ -419,5 +424,186 @@ import TurboFieldfare
             read: screen, signatureBefore: "screen-text-test", body: ["screen_changed": .bool(true)],
             screenTextReply: after, configuration: Self.configuration)
         #expect(try textChoices(result.packet) == ["March (screen text)", "2025 (screen text)"])
+    }
+
+    // MARK: Automatic image after actions (fix c)
+
+    /// A real 2 x 2 PNG, so the capture stages like a screenshot.
+    private func smallPNG() throws -> Data {
+        let context = try #require(CGContext(data: nil, width: 2, height: 2, bitsPerComponent: 8, bytesPerRow: 8,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+        context.setFillColor(CGColor(red: 0.2, green: 0.4, blue: 0.6, alpha: 1)); context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+        let image = try #require(context.makeImage())
+        let data = NSMutableData()
+        let destination = try #require(CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(destination, image, nil)
+        #expect(CGImageDestinationFinalize(destination))
+        return data as Data
+    }
+
+    private func capture(_ blocks: [JSONValue]) throws -> (reply: JSONValue, png: Data) {
+        let png = try smallPNG()
+        return (try reply(.object(["blocks": .array(blocks)]), png: png, udid: Self.configuration.simulatorUDID), png)
+    }
+
+    @Test
+    func unknownWordAfterAnActionAttachesThatCapturesImage() async throws {
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr.reply, visionPackComplete: true, configuration: Self.configuration)
+        let image = try #require(result.image)
+        #expect(image.sha256 == SHA256.hash(data: ocr.png).map { String(format: "%02x", $0) }.joined())
+        #expect(try textChoices(result.packet) == ["2025 (screen text)"])
+    }
+
+    @Test
+    func onlyKnownWordsAttachNoImage() async throws {
+        // "Date" is a host static text: the lean rule skips it, so nothing new is shown.
+        let date: JSONValue = .object([
+            "element_id": .string("date"), "role": .string("static_text"), "label": .string("Date"),
+            "visible": .bool(true), "x_norm": .integer(126), "y_norm": .integer(308),
+        ])
+        let ocr = try capture([block("Date", 95, 785, 114, 46)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([date]), signatureBefore: "an-earlier-screen", body: ["screen_changed": .bool(true)],
+            screenTextReply: ocr.reply, visionPackComplete: true, configuration: Self.configuration)
+        #expect(result.readScreenText)
+        #expect(try textChoices(result.packet).isEmpty)
+        #expect(result.image == nil)
+    }
+
+    @Test
+    func failedReadAttachesNoImageAndGivesTheNote() async throws {
+        let png = try smallPNG()
+        let failed = try reply(.object(["error": .string("Text recognition failed.")]), png: png,
+                               udid: Self.configuration.simulatorUDID)
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: failed, visionPackComplete: true, configuration: Self.configuration)
+        #expect(result.image == nil)
+        guard case .string(let guidance)? = try packetObject(result.packet)["guidance"] else {
+            Issue.record("the packet has no guidance"); return
+        }
+        #expect(guidance.contains("Screen text positions unavailable: Text recognition failed."))
+    }
+
+    @Test
+    func settingOffAttachesNoImage() async throws {
+        let off = VisionCaptureAgentConfiguration(
+            bundleIdentifier: Self.configuration.bundleIdentifier, simulatorUDID: Self.configuration.simulatorUDID,
+            modelDirectory: Self.configuration.modelDirectory, autoScreenImage: false)
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr.reply, visionPackComplete: true, configuration: off)
+        #expect(result.image == nil)
+        #expect(try textChoices(result.packet) == ["2025 (screen text)"])
+    }
+
+    @Test
+    func autoImageIsNotCoordinateEvidence() async throws {
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let loop = VisionCaptureToolLoop()
+        let result = try await loop.actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr.reply, visionPackComplete: true, configuration: Self.configuration)
+        #expect(result.image != nil)
+        let packet = try packetObject(result.packet)
+        #expect(packet["observation"]?.objectValue?["current_image_evidence"] == .bool(false))
+        guard case .array(let allowed)? = packet["allowed_next"] else { Issue.record("no allowed_next"); return }
+        #expect(!allowed.contains(.string("tap_coordinates")))
+        #expect(allowed.contains(.string("screenshot")))
+        let refusal = await loop.proposalRefusalForTesting(.object([
+            "action": .string("tap_coordinates"), "x_norm": .integer(700), "y_norm": .integer(586),
+            "intent": .string("tap 2025"),
+        ]), configuration: Self.configuration)
+        #expect(refusal?.contains("Coordinate actions need current screenshot evidence. Choose screenshot now") == true)
+    }
+
+    @Test
+    func noAfterActionReadAttachesNoImage() async throws {
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "screen-text-test",
+            body: ["screen_changed": .bool(false), "effect": .string("Same elements as before the action.")],
+            screenTextReply: ocr.reply, visionPackComplete: true, configuration: Self.configuration)
+        #expect(!result.readScreenText)
+        #expect(result.image == nil)
+    }
+
+    @Test
+    func noVisionPackAttachesNoImage() async throws {
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr.reply, visionPackComplete: false,
+            configuration: Self.configuration)
+        #expect(result.image == nil)
+        #expect(try textChoices(result.packet) == ["2025 (screen text)"])
+    }
+
+    private func guidance(_ packet: String) throws -> String {
+        guard case .string(let text)? = try packetObject(packet)["guidance"] else { return "" }
+        return text
+    }
+
+    @Test
+    func noteComesOnlyWithTheAutoImage() async throws {
+        let note = VisionCaptureToolLoop.autoScreenImageNote
+        #expect(note == "The attached image shows the screen after your action. Tap words by their screen-text choice IDs; for a tap by position, take a screenshot first.")
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let screen = read([element("agenda", "Agenda", 393, 941)])
+        let withImage = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: screen, signatureBefore: "an-earlier-screen", body: ["screen_changed": .bool(true)],
+            screenTextReply: ocr.reply, visionPackComplete: true, configuration: Self.configuration)
+        #expect(withImage.image != nil)
+        #expect(try guidance(withImage.packet).contains(note))
+        let off = VisionCaptureAgentConfiguration(
+            bundleIdentifier: Self.configuration.bundleIdentifier, simulatorUDID: Self.configuration.simulatorUDID,
+            modelDirectory: Self.configuration.modelDirectory, autoScreenImage: false)
+        let settingOff = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: screen, signatureBefore: "an-earlier-screen", body: ["screen_changed": .bool(true)],
+            screenTextReply: ocr.reply, visionPackComplete: true, configuration: off)
+        let noVision = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: screen, signatureBefore: "an-earlier-screen", body: ["screen_changed": .bool(true)],
+            screenTextReply: ocr.reply, visionPackComplete: false, configuration: Self.configuration)
+        let noRead = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: screen, signatureBefore: "screen-text-test",
+            body: ["screen_changed": .bool(false), "effect": .string("Same elements as before the action.")],
+            screenTextReply: ocr.reply, visionPackComplete: true, configuration: Self.configuration)
+        for result in [settingOff, noVision, noRead] {
+            #expect(result.image == nil)
+            #expect(try !guidance(result.packet).contains(note))
+        }
+    }
+
+    @Test
+    func choicesWipedForVisualDisambiguationAttachNoImage() async throws {
+        // With a user restriction, a control with no readable label (only a symbol)
+        // asks for the model's own screenshot; the loop clears every choice,
+        // screen text included.
+        let unlabeled = element("more", "›", 500, 800)
+        let ocr = try capture([block("2025", 768, 1509, 152, 53)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941), unlabeled]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr.reply, visionPackComplete: true,
+            userInstruction: "Never tap Delete.", configuration: Self.configuration)
+        #expect(result.readScreenText)
+        #expect(try packetObject(result.packet)["allowed_next"] == .array([.string("screenshot")]))
+        #expect(try textChoices(result.packet).isEmpty)
+        #expect(result.image == nil)
+        #expect(try !guidance(result.packet).contains(VisionCaptureToolLoop.autoScreenImageNote))
+    }
+
+    @Test
+    func autoScreenImageSettingDefaultsToOnAndReadsTheKey() throws {
+        #expect(MacAppSettings().agentAutoScreenImage)
+        var file = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(MacAppSettings())) as? [String: Any])
+        #expect(file["agentAutoScreenImage"] as? Bool == true)
+        file.removeValue(forKey: "agentAutoScreenImage")  // a file written before the setting existed
+        #expect(try JSONDecoder().decode(MacAppSettings.self, from: JSONSerialization.data(withJSONObject: file)).agentAutoScreenImage)
+        file["agentAutoScreenImage"] = false
+        #expect(try !JSONDecoder().decode(MacAppSettings.self, from: JSONSerialization.data(withJSONObject: file)).agentAutoScreenImage)
     }
 }
