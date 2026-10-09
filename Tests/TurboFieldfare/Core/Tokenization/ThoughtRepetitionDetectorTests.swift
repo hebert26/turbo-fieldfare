@@ -56,6 +56,19 @@ import Testing
         }
     }
 
+    /// B3 (9 October 2026): real visible thinking of successful steps, the longest and
+    /// the ones with the widest exact repeat that is still normal, must not be reported.
+    @Test
+    func normalThinkingOfSuccessfulStepsDoesNotTrigger() {
+        #expect(ThoughtRepetitionNormalFixtures.all.count >= 3)
+        for text in ThoughtRepetitionNormalFixtures.all {
+            // A broken fixture decode would pass an empty text; the count guards against that.
+            #expect(text.tokens.count == text.tokenCount, "\(text.name) decoded \(text.tokens.count) tokens")
+            let hit = firstDetection(text.tokens)
+            #expect(hit == nil, "\(text.name) (\(text.source), \(text.tokens.count) tokens) triggered: \(String(describing: hit))")
+        }
+    }
+
     @Test
     func todaysRuleStillReportsAMediumBlock() {
         // A 20-token block with 20 distinct tokens, eight copies: today's rule, width 20.
