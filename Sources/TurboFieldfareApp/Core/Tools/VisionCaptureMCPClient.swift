@@ -162,6 +162,39 @@ struct VisionCaptureMCPResult: Sendable {
     }
 }
 
+/// The loop's `click pointer` request. It asks VisionCapture for the screen after
+/// the click (ADR 0054 amendment of 9 October): the reply's `after_screen` and
+/// `changes` replace the loop's own wait and read. A reply without them (an older
+/// host) still gets that read.
+enum VisionCapturePointerClick {
+    static let keys: Set<String> = [
+        "udid", "computer_use_task_id", "computer_use_generation",
+        "x_norm", "y_norm", "intent", "cache_policy", "include_after_screen",
+    ]
+
+    static func parameters(
+        taskID: String, generation: Int64, x: Int64, y: Int64, intent: String
+    ) -> [String: JSONValue] {
+        [
+            "computer_use_task_id": .string(taskID),
+            "computer_use_generation": .integer(generation),
+            "x_norm": .integer(x),
+            "y_norm": .integer(y),
+            "intent": .string(intent),
+            "cache_policy": .string("visual_bypass"),
+            "include_after_screen": .bool(true),
+        ]
+    }
+
+    /// A loop click as sent: every key, the after-screen request optional (older
+    /// records lack it) and true when present.
+    static func hasKeys(_ parameters: [String: JSONValue]) -> Bool {
+        Set(parameters.keys).union(["include_after_screen"]) == keys
+            && (parameters["include_after_screen"] == nil
+                || parameters["include_after_screen"] == .bool(true))
+    }
+}
+
 enum VisionCaptureMCPError: Error, CustomStringConvertible {
     case invalidProtocol
     case executeUnavailable
@@ -454,10 +487,7 @@ actor VisionCaptureMCPClient {
               case .string(let bundleID)? = request["bundle_id"], !bundleID.isEmpty,
               request["session_id"] == nil, request["session_kind"] == nil,
               let parameters = request["parameters"]?.objectValue,
-              Set(parameters.keys) == [
-                  "udid", "computer_use_task_id", "computer_use_generation",
-                  "x_norm", "y_norm", "intent", "cache_policy",
-              ],
+              VisionCapturePointerClick.hasKeys(parameters),
               case .string(let udid)? = parameters["udid"], !udid.isEmpty,
               case .string(let taskID)? = parameters["computer_use_task_id"],
               UUID(uuidString: taskID) != nil,

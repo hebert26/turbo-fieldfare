@@ -2328,14 +2328,8 @@ actor VisionCaptureToolLoop {
                 }
                 let arguments = makeMCPArguments(
                     request: "click pointer",
-                    parameters: [
-                        "computer_use_task_id": .string(task.id),
-                        "computer_use_generation": .integer(Int64(task.generation)),
-                        "x_norm": .integer(x),
-                        "y_norm": .integer(y),
-                        "intent": .string(label),
-                        "cache_policy": .string("visual_bypass"),
-                    ],
+                    parameters: VisionCapturePointerClick.parameters(
+                        taskID: task.id, generation: Int64(task.generation), x: x, y: y, intent: label),
                     configuration: configuration,
                     includeFlowSession: false)
                 let result = try await executeHostRequest(
@@ -2404,14 +2398,9 @@ actor VisionCaptureToolLoop {
 
         let clickArguments = makeMCPArguments(
             request: "click pointer",
-            parameters: [
-                "computer_use_task_id": .string(task.id),
-                "computer_use_generation": .integer(Int64(task.generation)),
-                "x_norm": .integer(Int64(x)),
-                "y_norm": .integer(Int64(y)),
-                "intent": .string(visualIntent),
-                "cache_policy": .string("visual_bypass"),
-            ],
+            parameters: VisionCapturePointerClick.parameters(
+                taskID: task.id, generation: Int64(task.generation),
+                x: Int64(x), y: Int64(y), intent: visualIntent),
             configuration: configuration,
             includeFlowSession: false)
         let clickResult: VisionCaptureMCPResult
@@ -4721,10 +4710,7 @@ actor VisionCaptureToolLoop {
               request["session_id"] == nil,
               request["session_kind"] == nil,
               let parameters = request["parameters"]?.objectValue,
-              Set(parameters.keys) == [
-                  "computer_use_task_id", "computer_use_generation",
-                  "x_norm", "y_norm", "intent", "cache_policy", "udid",
-              ],
+              VisionCapturePointerClick.hasKeys(parameters),
               case .string(let taskID)? = parameters["computer_use_task_id"],
               UUID(uuidString: taskID) != nil,
               case .integer(let generation)? = parameters["computer_use_generation"],
