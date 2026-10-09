@@ -2896,23 +2896,30 @@ public final class AppModel {
                             generation: generation)
                     }
                     try Task.checkCancellation()
+                    await self.recordAgentRunEnd(Self.agentRunEndReason(result), detail: nil)
                     await self.finishAgentSuccessfully(
                         result,
                         generation: generation)
                 } catch is CancellationError {
+                    await self.recordAgentRunEnd("user_cancel", detail: nil)
                     await self.finishAgentFailure(.cancelled, generation: generation)
                 } catch VisionCaptureAgentError.proposalCorrectionExhausted(let message) {
+                    await self.recordAgentRunEnd("proposal_pause", detail: message)
                     await self.finishAgentProposalPause(message, generation: generation)
                 } catch AppInferenceError.structuredToolFailure(let message, true, _) {
                     // A malformed model request sent nothing. Pause, do not end the chat.
+                    await self.recordAgentRunEnd("malformed_request_pause", detail: message)
                     await self.finishAgentProposalPause(message, generation: generation)
                 } catch let error as VisionCaptureAgentError {
+                    await self.recordAgentRunEnd(Self.agentRunEndReason(error), detail: error.description)
                     await self.finishAgentFailure(
                         .conversationLineageLost(error.description),
                         generation: generation)
                 } catch let appError as AppInferenceError {
+                    await self.recordAgentRunEnd(Self.agentRunEndReason(appError), detail: String(describing: appError))
                     await self.finishAgentFailure(appError, generation: generation)
                 } catch {
+                    await self.recordAgentRunEnd(Self.agentRunEndReason(error), detail: String(describing: error))
                     await self.finishAgentFailure(
                         .conversationLineageLost(String(describing: error)),
                         generation: generation)
@@ -3598,6 +3605,45 @@ public final class AppModel {
             return "Unable to display this tool call."
         }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// One chat_ended trace record per agent run. A pending user instruction turns a
+    /// final answer or a cancel into a continuation; the record says so.
+    private func recordAgentRunEnd(_ reason: String, detail: String?) async {
+        let continued = pendingAgentInstruction != nil
+            && ["final_answer", "final_answer_with_follow_up", "user_cancel"].contains(reason)
+        let recorded = continued ? (reason == "user_cancel" ? "user_instruction" : reason + "_then_user_instruction") : reason
+        await AgentInferenceTrace.shared?.chatEnded(reason: recorded, detail: detail)
+    }
+
+    /// How an agent run that returned ended: a stop at a token boundary returns the
+    /// partial text with stop reason cancelled.
+    nonisolated static func agentRunEndReason(_ result: VisionCaptureAgentRunResult) -> String {
+        if result.diagnostics.stopReason == .cancelled { return "user_cancel" }
+        return result.followUpPrompt == nil ? "final_answer" : "final_answer_with_follow_up"
+    }
+
+    /// How an agent run that threw ended, for the chat_ended trace record.
+    nonisolated static func agentRunEndReason(_ error: Error) -> String {
+        switch error {
+        case is CancellationError: return "user_cancel"
+        case let error as VisionCaptureAgentError:
+            switch error {
+            case .proposalCorrectionExhausted: return "proposal_pause"
+            case .mcpOutcome, .mcpRefused, .unsupportedSystemInteraction, .returnedIdentityMismatch,
+                 .sessionIdentityMismatch, .launchOutcomeUnproven:
+                return "host_refusal"
+            case .mcpUnavailable, .skillReadFailed: return "host_unavailable"
+            case .invalidConfiguration, .malformedCall, .navigationUnavailable, .identityMismatch,
+                 .unsupportedVisualRequest, .noProgress, .incompleteAnswer:
+                return "loop_error"
+            }
+        case let error as AppInferenceError:
+            if case .structuredToolFailure(_, true, _) = error { return "malformed_request_pause" }
+            if error == .cancelled { return "user_cancel" }
+            return "model_error"
+        default: return "other_error"
+        }
     }
 
     private func finishAgentSuccessfully(

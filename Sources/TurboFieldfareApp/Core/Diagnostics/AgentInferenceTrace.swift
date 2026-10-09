@@ -799,17 +799,29 @@ actor AgentInferenceTrace {
                maximumBytes: 16 * 1_024)
     }
 
+    /// One record for every way an agent run ends; `reason` names the path
+    /// (AppModel.agentRunEndReason). The step is the last one, if any.
+    func chatEnded(reason: String, detail: String?) {
+        var body: [String: JSONValue] = ["reason": .string(reason)]
+        if let detail { body["detail"] = .string(String(detail.prefix(500))) }
+        append(step: latestStep, event: "chat_ended", body: body)
+    }
+
+    #if DEBUG
+    static func forTesting(path: String) -> AgentInferenceTrace? { AgentInferenceTrace(path: path) }
+    #endif
+
     private func append(
-        step: Step, event: String, body: [String: JSONValue], maximumBytes: Int? = nil
+        step: Step?, event: String, body: [String: JSONValue], maximumBytes: Int? = nil
     ) {
         var record = body
         record["schema_version"] = .integer(1)
         record["event"] = .string(event)
         record["process_id"] = .integer(Int64(ProcessInfo.processInfo.processIdentifier))
-        record["step_id"] = .string(step.id.uuidString)
-        record["step_index"] = Self.integer(step.index)
-        record["conversation_id"] = step.conversation.map { .string($0.uuidString) } ?? .null
-        record["turn_index"] = Self.integer(step.turn)
+        record["step_id"] = step.map { .string($0.id.uuidString) } ?? .null
+        record["step_index"] = Self.integer(step?.index)
+        record["conversation_id"] = step?.conversation.map { .string($0.uuidString) } ?? .null
+        record["turn_index"] = Self.integer(step?.turn)
         record["timestamp_unix_seconds"] = .number(Date().timeIntervalSince1970)
         // Trace failures must not affect inference or put captured text in logs.
         guard var data = try? JSONEncoder().encode(JSONValue.object(record)) else { return }
