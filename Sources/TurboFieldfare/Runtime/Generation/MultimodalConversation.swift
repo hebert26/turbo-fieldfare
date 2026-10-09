@@ -1289,7 +1289,7 @@ public actor GemmaMultimodalConversation {
                     generatedTokens: generatedTokenCount,
                     thinkingTokens: decoder?.progress.thinkingTokens ?? 0,
                     blockTokens: repetition.blockTokens,
-                    repetitions: ThoughtRepetitionDetector.repetitions)
+                    repetitions: repetition.repetitions)
             }
             if let parserError = generationError as? GemmaToolCallParserError {
                 var evidence = decoder?.failureEvidence

@@ -16,22 +16,34 @@ public struct ThoughtRepetitionRecovery: Error, Codable, Equatable, Sendable {
 
 struct RepeatedThoughtDetected: Error {
     let blockTokens: Int
+    /// Exact copies in a row: 8 for 16 to 128 tokens, the run length divided by
+    /// the period for 1 to 15 tokens, 4 for 129 to 512 tokens.
+    let repetitions: Int
 }
 
 /// Exact periodic token matching, independent of words, app names or elapsed time.
-/// At most 1,024 token IDs. Check every four tokens, with early mismatches.
+/// At most 2,048 token IDs. Check every four tokens, with early mismatches.
 struct ThoughtRepetitionDetector {
-    static let capacity = 1_024
+    static let capacity = 2_048
     static let repetitions = 8
     static let minimumBlock = 16
     static let maximumBlock = 128
+    /// A period of 1 to 15 tokens counts once its exact run covers at least
+    /// max(160, 12 periods) tokens. Normal thinking stays far below that
+    /// (29 tokens at most in today's saved texts).
+    static let shortPeriodSpan = 160
+    static let shortPeriodRepetitions = 12
+    /// A block of 129 to 512 tokens counts after 4 exact copies (saved texts:
+    /// 1.65 copies at most).
+    static let longMaximumBlock = 512
+    static let longRepetitions = 4
     private var ring = [Int32](repeating: 0, count: capacity)
     private var count = 0
     private var next = 0
 
     mutating func reset() { count = 0; next = 0 }
 
-    mutating func append(_ token: Int32) -> Int? {
+    mutating func append(_ token: Int32) -> (blockTokens: Int, repetitions: Int)? {
         ring[next] = token
         next = (next + 1) % Self.capacity
         count = min(count + 1, Self.capacity)
@@ -52,7 +64,35 @@ struct ThoughtRepetitionDetector {
                     previous($0) == previous($0 % period)
                 }
             }
-            if !shortPeriod { return width }
+            if !shortPeriod { return (width, Self.repetitions) }
+        }
+        // A period of 1 to 15 tokens repeated in a row.
+        for period in 1..<Self.minimumBlock {
+            let span = max(Self.shortPeriodSpan, period * Self.shortPeriodRepetitions)
+            guard count >= span else { continue }
+            guard (period..<span).allSatisfy({ previous($0) == previous($0 % period) }) else { continue }
+            // The copies cover the whole exact run in the window.
+            var run = span
+            while run < count, previous(run) == previous(run % period) { run += 1 }
+            return (period, run / period)
+        }
+        // A block of 129 to 512 tokens repeated four times.
+        guard count >= (Self.maximumBlock + 1) * Self.longRepetitions else { return nil }
+        let widest = min(Self.longMaximumBlock, count / Self.longRepetitions)
+        var widestHasEightDistinct: Bool?
+        for width in (Self.maximumBlock + 1)...widest {
+            var matches = true
+            for offset in width..<(width * Self.longRepetitions) {
+                if previous(offset) != previous(offset % width) { matches = false; break }
+            }
+            guard matches else { continue }
+            // Fewer than 8 distinct tokens in the widest block: no block can count.
+            if widestHasEightDistinct == nil {
+                widestHasEightDistinct = Set((0..<widest).map(previous)).count >= 8
+            }
+            guard widestHasEightDistinct == true else { return nil }
+            guard Set((0..<width).map(previous)).count >= 8 else { continue }
+            return (width, Self.longRepetitions)
         }
         return nil
     }
@@ -250,8 +290,9 @@ public final class StructuredAssistantDecoder: @unchecked Sendable {
             || tokenID == tokenizer.toolResponseEndID
         if isControl || channel != .thought || !isKnownThoughtChannel || toolTokens != nil {
             thoughtRepetition?.reset()
-        } else if emittedCalls == 0, let width = thoughtRepetition?.append(tokenID) {
-            throw RepeatedThoughtDetected(blockTokens: width)
+        } else if emittedCalls == 0, let repetition = thoughtRepetition?.append(tokenID) {
+            throw RepeatedThoughtDetected(
+                blockTokens: repetition.blockTokens, repetitions: repetition.repetitions)
         }
         var events: [StructuredAssistantEvent] = []
         if isControl, !delta.isEmpty, toolTokens == nil {

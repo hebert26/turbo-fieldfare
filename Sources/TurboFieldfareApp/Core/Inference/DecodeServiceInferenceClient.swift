@@ -2423,14 +2423,8 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                        let data = json.data(using: .utf8),
                        let recovery = try? JSONDecoder().decode(
                         ThoughtRepetitionRecovery.self, from: data),
-                       recovery.restoredTokenCount >= 0,
-                       recovery.restoredTokenCount <= request.maxContextTokens,
-                       (16...128).contains(recovery.blockTokens),
-                       recovery.repetitions == 8,
-                       recovery.generatedTokens > 0,
-                       recovery.generatedTokens <= request.maxContextTokens,
-                       recovery.generatedTokens >= recovery.thinkingTokens,
-                       recovery.thinkingTokens >= recovery.blockTokens * 8 {
+                       Self.admitsThoughtRepetitionRecovery(
+                        recovery, maxContextTokens: request.maxContextTokens) {
                         error = .repeatedThought(recovery)
                     } else {
                         error = .invalidRequest(
@@ -2461,6 +2455,23 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
                 return .continueReceiving
             }
         }
+    }
+
+    /// The receipt numbers fit a detector rule: a block of 1 to 512 tokens, at
+    /// least 4 copies, and thinking tokens for every reported copy.
+    static func admitsThoughtRepetitionRecovery(
+        _ recovery: ThoughtRepetitionRecovery, maxContextTokens: Int
+    ) -> Bool {
+        let copies = recovery.blockTokens.multipliedReportingOverflow(by: recovery.repetitions)
+        return recovery.restoredTokenCount >= 0
+            && recovery.restoredTokenCount <= maxContextTokens
+            && (1...512).contains(recovery.blockTokens)
+            && recovery.repetitions >= 4
+            && recovery.generatedTokens > 0
+            && recovery.generatedTokens <= maxContextTokens
+            && recovery.generatedTokens >= recovery.thinkingTokens
+            && !copies.overflow
+            && recovery.thinkingTokens >= copies.partialValue
     }
 
     private static func isTerminal(_ kind: DecodeServiceEventKind) -> Bool {
