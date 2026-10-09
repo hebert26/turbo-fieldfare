@@ -985,6 +985,8 @@ actor VisionCaptureToolLoop {
     private var recoverableColdMisses = RecoverableColdMissTracker()
     private var readOnlyNoProgress = ReadOnlyNoProgressTracker()
     private var actionCycles = ActionCycleTracker()
+    /// The last proposal sent free text together with coordinates; the coordinates were used.
+    private var usedCoordinatesOverTarget = false
     private var thoughtRecoveryUsed = false
     private var thoughtRecoveryFacts: String?
 
@@ -1323,6 +1325,9 @@ actor VisionCaptureToolLoop {
                         from: outcome.content, call: call, configuration: configuration,
                         images: images)
                     content = packet.content
+                    if usedCoordinatesOverTarget {
+                        content = try Self.addingGuidanceNote(to: content, note: Self.coordinatesOverTargetNote)
+                    }
                     if outcome.successfulReadOnlyObservation {
                         readOnlyNoProgress.observeAppFacts(currentScreenContentIdentity?.factsDigest)
                         if thoughtRecoveryUsed, let previous = thoughtRecoveryFacts,
@@ -4812,8 +4817,16 @@ actor VisionCaptureToolLoop {
             throw VisionCaptureAgentError.malformedCall(
                 "Use only visioncapture_navigate for the app. The unknown tool was not executed.")
         }
-        guard case .object(let object) = call.arguments,
-              case .string(let name)? = object["action"],
+        usedCoordinatesOverTarget = false
+        guard case .object(let proposed) = call.arguments,
+              case .string? = proposed["action"] else {
+            throw VisionCaptureAgentError.malformedCall(
+                "Choose one visioncapture_navigate action from allowed_next.")
+        }
+        let normalized = Self.normalizedTargetAndCoordinates(proposed)
+        let object = normalized.object
+        usedCoordinatesOverTarget = normalized.usedCoordinates
+        guard case .string(let name)? = object["action"],
               let operation = NavigationOperation(rawValue: name) else {
             throw VisionCaptureAgentError.malformedCall(
                 "Choose one visioncapture_navigate action from allowed_next.")
@@ -7849,6 +7862,45 @@ actor VisionCaptureToolLoop {
         "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step."
 
     static let choiceTargetReason = "Targets are choice IDs; for positions use x_norm and y_norm."
+
+    static let coordinatesOverTargetNote =
+        "Used your coordinates; next time send x_norm and y_norm without a target, or a choice ID alone."
+
+    /// A tap or type with both a target and coordinates: a choice ID wins and the
+    /// coordinates are ignored; free text yields to the coordinates, so a tap becomes
+    /// tap_coordinates and a type takes the position path with its field guard.
+    static func normalizedTargetAndCoordinates(
+        _ proposed: [String: JSONValue]
+    ) -> (object: [String: JSONValue], usedCoordinates: Bool) {
+        guard case .string(let action)? = proposed["action"], action == "tap" || action == "type",
+              case .string(let target)? = proposed["target"],
+              proposed["x_norm"] != nil || proposed["y_norm"] != nil else { return (proposed, false) }
+        var object = proposed
+        if isChoiceIDShaped(target) {
+            object.removeValue(forKey: "x_norm")
+            object.removeValue(forKey: "y_norm")
+            return (object, false)
+        }
+        object.removeValue(forKey: "target")
+        if action == "tap" {
+            object["action"] = .string(NavigationOperation.tapCoordinates.rawValue)
+            if object["intent"] == nil { object["intent"] = .string("tap at the given position") }
+        }
+        return (object, true)
+    }
+
+    static func addingGuidanceNote(to content: String, note: String) throws -> String {
+        guard case .object(var body)? = try? JSONDecoder().decode(
+            JSONValue.self, from: Data(content.utf8)) else {
+            throw VisionCaptureAgentError.malformedCall("the loop could not add its note")
+        }
+        if case .string(let guidance)? = body["guidance"], !guidance.isEmpty {
+            body["guidance"] = .string(note + " " + guidance)
+        } else {
+            body["guidance"] = .string(note)
+        }
+        return try JSONValue.object(body).encoded()
+    }
 
     /// Choice IDs are "c" followed by digits. Anything else (a fact line, a label)
     /// is free text and never selects a control.

@@ -382,6 +382,47 @@ import TurboFieldfare
     }
 
     @Test
+    func targetWithCoordinatesUsesTheChoiceIDOrElseTheCoordinates() throws {
+        // Run 37 steps 80 to 85: a fact line as target together with coordinates.
+        let freeText = VisionCaptureToolLoop.normalizedTargetAndCoordinates([
+            "action": .string("type"), "target": .string("[text_field] Name your profile (ocr)"),
+            "text": .string("gemma-test-2"), "x_norm": .integer(500), "y_norm": .integer(237),
+        ])
+        #expect(freeText.usedCoordinates)
+        #expect(freeText.object["target"] == nil)
+        #expect(freeText.object["x_norm"] == .integer(500))
+        #expect(freeText.object["action"] == .string("type"))
+
+        let freeTap = VisionCaptureToolLoop.normalizedTargetAndCoordinates([
+            "action": .string("tap"), "target": .string("Create Profile"),
+            "x_norm": .integer(500), "y_norm": .integer(800),
+        ])
+        #expect(freeTap.usedCoordinates)
+        #expect(freeTap.object["action"] == .string("tap_coordinates"))
+        #expect(freeTap.object["target"] == nil)
+        #expect(freeTap.object["intent"] != nil)
+
+        // A choice ID wins; the coordinates are ignored and no note is due.
+        let choice = VisionCaptureToolLoop.normalizedTargetAndCoordinates([
+            "action": .string("type"), "target": .string("c343"), "text": .string("gemma-test-2"),
+            "x_norm": .integer(500), "y_norm": .integer(237),
+        ])
+        #expect(!choice.usedCoordinates)
+        #expect(choice.object["target"] == .string("c343"))
+        #expect(choice.object["x_norm"] == nil && choice.object["y_norm"] == nil)
+
+        // Nothing to normalize without coordinates.
+        let plain: [String: JSONValue] = ["action": .string("tap"), "target": .string("c12")]
+        #expect(VisionCaptureToolLoop.normalizedTargetAndCoordinates(plain).object == plain)
+
+        let noted = try VisionCaptureToolLoop.addingGuidanceNote(
+            to: JSONValue.object(["guidance": .string("Choose again.")]).encoded(),
+            note: VisionCaptureToolLoop.coordinatesOverTargetNote)
+        #expect(noted.contains("Used your coordinates; next time send x_norm and y_norm without a target"))
+        #expect(noted.contains("Choose again."))
+    }
+
+    @Test
     func validationMessageIsTheFirstAppearedTextThatReadsLikeOne() {
         #expect(VisionCaptureToolLoop.validationMessage(
             in: ["Step 2 of 6", "Not a YouTube link", "Invalid URL"]) == "Not a YouTube link")
