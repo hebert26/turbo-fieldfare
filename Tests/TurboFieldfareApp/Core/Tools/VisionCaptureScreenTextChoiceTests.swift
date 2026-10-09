@@ -146,10 +146,10 @@ import TurboFieldfare
     }
 
     /// One accessibility read, as the loop's own observation code takes it.
-    private func read(_ elements: [JSONValue]) -> VisionCaptureMCPResult {
+    private func read(_ elements: [JSONValue], signature: String = "screen-text-test") -> VisionCaptureMCPResult {
         VisionCaptureMCPResult(
             value: .object([
-                "view": .object(["signature_fine": .string("screen-text-test")]),
+                "view": .object(["signature_fine": .string(signature)]),
                 "elements": .array(elements),
             ]),
             isError: false, refusalCode: nil, dispatchAttempted: nil,
@@ -783,6 +783,85 @@ import TurboFieldfare
             let id = try #require(after["\(year) (screen text)"])
             #expect(!earlierYearIDs.contains(id), "\(year)")
         }
+    }
+
+    // MARK: Guards for kept screen-text words and IDs
+
+    private func refusalWords(_ loop: VisionCaptureToolLoop, target: String = "c9999") async throws -> [String: String] {
+        try screenTextIDs(try await loop.refusalPacketForTesting(
+            .object(["action": .string("tap"), "target": .string(target)]), configuration: Self.configuration))
+    }
+
+    /// An after-action packet with no OCR read: the screen did not change.
+    private func unchangedRead(_ loop: VisionCaptureToolLoop, signature: String = "screen-text-test") async throws {
+        _ = try await loop.actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)], signature: signature), signatureBefore: signature,
+            body: ["screen_changed": .bool(false), "effect": .string("Same elements as before the action.")],
+            visionPackComplete: true, configuration: Self.configuration)
+    }
+
+    @Test
+    func failedReadClearsTheKeptWords() async throws {
+        let loop = VisionCaptureToolLoop()
+        #expect(try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen)).count == 27)
+        // The next read changed the screen but its OCR failed; the signature is the same.
+        _ = try await loop.actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "screen-text-earlier",
+            body: ["screen_changed": .bool(true)], screenTextReply: try reply(.object(["error": .string("Text recognition failed.")])),
+            visionPackComplete: true, configuration: Self.configuration)
+        #expect(try await refusalWords(loop).isEmpty)
+    }
+
+    @Test
+    func anotherScreenGetsNoKeptWords() async throws {
+        let loop = VisionCaptureToolLoop()
+        #expect(try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen)).count == 27)
+        try await unchangedRead(loop, signature: "another-screen")
+        #expect(try await refusalWords(loop).isEmpty)
+    }
+
+    @Test
+    func theRefusedIDIsNotKept() async throws {
+        let loop = VisionCaptureToolLoop()
+        let first = try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen))
+        let july = try #require(first["July (screen text)"])
+        // A packet with no words, then a tap on July's old ID: refused as expired.
+        try await unchangedRead(loop)
+        let repair = try await refusalWords(loop, target: july)
+        #expect(repair.count == first.count)
+        #expect(repair["July (screen text)"] != july)
+        for (label, id) in first where label != "July (screen text)" { #expect(repair[label] == id, "\(label)") }
+    }
+
+    @Test
+    func twoMatchesForOneKeptIDGetDistinctIDs() async throws {
+        let loop = VisionCaptureToolLoop()
+        let one = [("Alpha", 400.0, 700.0, 120.0, 46.0)]
+        let first = try screenTextIDs(try await wheelRead(loop, one))
+        let kept = try #require(first["Alpha (screen text)"])
+        // The same text found twice near its old place (2 units apart).
+        let twice = [("Alpha", 400.0, 700.0, 120.0, 46.0), ("Alpha", 402.4, 705.2, 120.0, 46.0)]
+        let packet = try await wheelRead(loop, twice, signatureBefore: "screen-text-earlier")
+        guard case .array(let choices)? = try packetObject(packet)["choices"] else { Issue.record("no choices"); return }
+        let ids = choices.compactMap { choice -> String? in
+            guard case .string(let label)? = choice.objectValue?["label"], label == "Alpha (screen text)",
+                  case .string(let id)? = choice.objectValue?["id"] else { return nil }
+            return id
+        }
+        #expect(ids.count == 2)
+        #expect(Set(ids).count == 2)
+        #expect(ids.contains(kept))
+    }
+
+    @Test
+    func aNewModelContextForgetsTheKeptWords() async throws {
+        // The run calls the same function when a new model context starts (no test can drive the run itself).
+        let loop = VisionCaptureToolLoop()
+        let first = try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen))
+        await loop.forgetKeptScreenTextForTesting()
+        #expect(try await refusalWords(loop).isEmpty)
+        let again = try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen, signatureBefore: "screen-text-earlier"))
+        #expect(Set(again.values).isDisjoint(with: Set(first.values)))
     }
 
     // MARK: Automatic image after actions (fix c)

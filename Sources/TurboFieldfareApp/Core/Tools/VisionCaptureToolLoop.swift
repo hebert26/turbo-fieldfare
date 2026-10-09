@@ -993,6 +993,8 @@ actor VisionCaptureToolLoop {
     private var lastScreenText: (signature: String, blocks: JSONValue)?
     /// The screen-text choices of the last packet that offered any. The same word at
     /// the same place keeps its ID in the next packet (bound again to that read).
+    /// Known limit: they carry no screen signature, so the same text at the same place
+    /// on another screen keeps the ID too; the tap still hits that visible word.
     private var lastScreenTextIDs: [(block: ScreenTextBlock, id: String)] = []
     #if DEBUG
     /// Tests stand in for the vision pack probe (nil: the real probe).
@@ -1052,9 +1054,7 @@ actor VisionCaptureToolLoop {
             // The new model context has not observed these private targets.
             // Retire their host capabilities before it can choose another app action.
             invalidateScreenObservation()
-            // Kept screen-text words and IDs belong to the old context.
-            lastScreenText = nil
-            lastScreenTextIDs.removeAll()
+            forgetKeptScreenText()
             currentManifest = AuthorityManifest()
             currentSystemAlert = nil
             permittedNextOperations = [.observe]
@@ -2562,6 +2562,12 @@ actor VisionCaptureToolLoop {
         guard configuration.autoScreenImage, !blocks.isEmpty, visionPackComplete(configuration) else { return }
         autoScreenImage = try? VisionCaptureScreenshot.stage(
             result, in: screenshotStore, expectedDeviceID: configuration.simulatorUDID)
+    }
+
+    /// Kept screen-text words and IDs belong to the model context that saw them.
+    private func forgetKeptScreenText() {
+        lastScreenText = nil
+        lastScreenTextIDs.removeAll()
     }
 
     private func visionPackComplete(_ configuration: VisionCaptureAgentConfiguration) -> Bool {
@@ -5532,6 +5538,8 @@ actor VisionCaptureToolLoop {
         var offersScreenText = false
         var offeredScreenText: [ScreenTextBlock] = []
         var screenText = body["screen_text"]
+        // A failed read may follow a change: the kept words could be stale.
+        if body["screen_text_unavailable"] != nil { lastScreenText = nil }
         if let signature = currentScreenSignature {
             if let fresh = screenText {
                 lastScreenText = (signature, fresh)
@@ -6714,6 +6722,9 @@ actor VisionCaptureToolLoop {
         let content = try attachingAutoScreenImage(to: packet, images: &images)
         return (content, reads, images.first)
     }
+
+    /// Test entry: what a new model context does to the kept screen-text words and IDs.
+    func forgetKeptScreenTextForTesting() { forgetKeptScreenText() }
 
     /// Test entry: the repair packet the loop sends when it refuses a proposed call
     /// before dispatch, built as the main loop builds it.
