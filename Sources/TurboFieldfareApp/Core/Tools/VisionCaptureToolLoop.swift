@@ -988,6 +988,12 @@ actor VisionCaptureToolLoop {
     private let screenshotStore = AppImageAttachmentStore()
     /// The last after-action OCR capture, staged for the next input (fix c).
     private var autoScreenImage: AppImageAttachment?
+    /// The last read's OCR words and the screen they were read on: a repair packet
+    /// for a refused proposal (nothing was sent, nothing was read) offers them again.
+    private var lastScreenText: (signature: String, blocks: JSONValue)?
+    /// The screen-text choices of the last packet that offered any. The same word at
+    /// the same place keeps its ID in the next packet (bound again to that read).
+    private var lastScreenTextIDs: [(block: ScreenTextBlock, id: String)] = []
     #if DEBUG
     /// Tests stand in for the vision pack probe (nil: the real probe).
     private var visionPackCompleteForTesting: Bool?
@@ -1046,6 +1052,9 @@ actor VisionCaptureToolLoop {
             // The new model context has not observed these private targets.
             // Retire their host capabilities before it can choose another app action.
             invalidateScreenObservation()
+            // Kept screen-text words and IDs belong to the old context.
+            lastScreenText = nil
+            lastScreenTextIDs.removeAll()
             currentManifest = AuthorityManifest()
             currentSystemAlert = nil
             permittedNextOperations = [.observe]
@@ -5522,8 +5531,18 @@ actor VisionCaptureToolLoop {
         }
         var offersScreenText = false
         var offeredScreenText: [ScreenTextBlock] = []
+        var screenText = body["screen_text"]
+        if let signature = currentScreenSignature {
+            if let fresh = screenText {
+                lastScreenText = (signature, fresh)
+            } else if preservingChoiceIDs, let kept = lastScreenText, kept.signature == signature {
+                // A refused proposal sent and read nothing: offer the same words again.
+                screenText = kept.blocks
+            }
+        }
+        var screenTextIDs: [(block: ScreenTextBlock, id: String)] = []
         if !readOnlyRequired, !unavailable, recovery == nil, currentScreenSignature != nil,
-           case .array(let rawBlocks)? = body["screen_text"] {
+           case .array(let rawBlocks)? = screenText {
             let blocks = rawBlocks.compactMap { value -> ScreenTextBlock? in
                 guard let object = value.objectValue, case .string(let text)? = object["text"],
                       case .integer(let x)? = object["x_norm"], case .integer(let y)? = object["y_norm"]
@@ -5539,13 +5558,24 @@ actor VisionCaptureToolLoop {
                 restrictions: userRestrictions, screenContext: restrictionScreenContext)
             where isEligibleOfferedAction(Self.screenTextTapIntent(block)) {
                 var id: String
-                repeat {
-                    guard nextChoiceNumber < UInt64.max else {
-                        throw VisionCaptureAgentError.noProgress("The conversation exhausted its choice IDs. Start a new chat.")
-                    }
-                    nextChoiceNumber += 1
-                    id = "c\(nextChoiceNumber)"
-                } while id == excludingTargetID
+                // The same text within 4 units of its last place keeps its ID; OCR
+                // places a word that did not move within 3 units from read to read.
+                if let kept = lastScreenTextIDs.first(where: { previous in
+                    previous.block.text == block.text && abs(previous.block.xNorm - block.xNorm) <= 4
+                        && abs(previous.block.yNorm - block.yNorm) <= 4 && previous.id != excludingTargetID
+                        && currentChoiceBindings[previous.id] == nil
+                }) {
+                    id = kept.id
+                } else {
+                    repeat {
+                        guard nextChoiceNumber < UInt64.max else {
+                            throw VisionCaptureAgentError.noProgress("The conversation exhausted its choice IDs. Start a new chat.")
+                        }
+                        nextChoiceNumber += 1
+                        id = "c\(nextChoiceNumber)"
+                    } while id == excludingTargetID
+                }
+                screenTextIDs.append((block, id))
                 let choice = Self.screenTextChoice(block, id: id)
                 currentChoiceBindings[id] = ChoiceBinding(
                     observation: observationGeneration, targetKey: configuration.targetKey,
@@ -5648,6 +5678,7 @@ actor VisionCaptureToolLoop {
         }
         // Wiped choices offer no screen text, so no auto image goes with them.
         if choices.isEmpty { offersScreenText = false }
+        if offersScreenText { lastScreenTextIDs = screenTextIDs }
         permittedNextOperations = allowed
         var observation: [String: JSONValue] = [
             "id": .string("o\(observationGeneration)"),
@@ -6682,6 +6713,26 @@ actor VisionCaptureToolLoop {
         var images: [AppImageAttachment] = []
         let content = try attachingAutoScreenImage(to: packet, images: &images)
         return (content, reads, images.first)
+    }
+
+    /// Test entry: the repair packet the loop sends when it refuses a proposed call
+    /// before dispatch, built as the main loop builds it.
+    func refusalPacketForTesting(
+        _ arguments: JSONValue, configuration: VisionCaptureAgentConfiguration
+    ) throws -> String {
+        let call = AppToolCall(id: "refusal-test", name: "visioncapture_navigate", arguments: arguments)
+        do {
+            _ = try navigationIntent(from: call, configuration: configuration)
+        } catch let error as VisionCaptureAgentError where Self.isRecoverableProposalError(error) {
+            let rejectedTarget = Self.expiredProposalTarget(call: call, error: error)
+            let failure = try Self.proposalFailureResult(
+                error, facts: currentProposalRepairFacts(configuration: configuration), rejectedTarget: rejectedTarget)
+            let repairPacket = try decisionPacket(
+                from: failure, call: call, configuration: configuration, images: [],
+                excludingTargetID: rejectedTarget, preservingChoiceIDs: true)
+            return try Self.addingProposalCorrection(to: repairPacket.content)
+        }
+        throw VisionCaptureAgentError.malformedCall("the proposal was accepted")
     }
 
     /// Test entry: the loop's refusal of a proposed call on the last packet (nil: accepted).

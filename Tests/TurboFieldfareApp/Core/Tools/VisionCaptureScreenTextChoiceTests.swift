@@ -670,6 +670,121 @@ import TurboFieldfare
         #expect(try wheelNoteCount(packet) == 0)
     }
 
+    // MARK: Refusal packets and stable screen-text IDs
+
+    /// Screen-text choices of a packet: label -> ID.
+    private func screenTextIDs(_ packet: String) throws -> [String: String] {
+        guard case .array(let choices)? = try packetObject(packet)["choices"] else { return [:] }
+        var ids: [String: String] = [:]
+        for choice in choices {
+            guard case .string(let label)? = choice.objectValue?["label"], label.hasSuffix(" (screen text)"),
+                  case .string(let id)? = choice.objectValue?["id"], ids[label] == nil else { continue }
+            ids[label] = id
+        }
+        return ids
+    }
+
+    private func wheelRead(_ loop: VisionCaptureToolLoop, _ screen: [(String, Double, Double, Double, Double)],
+                           signatureBefore: String = "an-earlier-screen") async throws -> String {
+        try await loop.actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: signatureBefore,
+            body: ["screen_changed": .bool(true)], screenTextReply: try ocrReply(screen), visionPackComplete: true,
+            configuration: Self.configuration).packet
+    }
+
+    @Test
+    func refusedProposalOffersTheScreenTextAgain() async throws {
+        let loop = VisionCaptureToolLoop()
+        let first = try await wheelRead(loop, Self.taskWheelScreen)
+        let offered = try screenTextIDs(first)
+        // 29 OCR blocks; the clock and the back link sit in the status-bar strip.
+        #expect(offered.count == 27)
+        // An expired ID, then a coordinate tap with no screenshot: nothing is sent or read.
+        for proposal: JSONValue in [
+            .object(["action": .string("tap"), "target": .string("c9999")]),
+            .object(["action": .string("tap_coordinates"), "x_norm": .integer(350), "y_norm": .integer(600),
+                     "intent": .string("tap July")]),
+        ] {
+            let refusal = try await loop.refusalPacketForTesting(proposal, configuration: Self.configuration)
+            guard case .string(let guidance)? = try packetObject(refusal)["guidance"] else {
+                Issue.record("the refusal has no guidance"); return
+            }
+            #expect(guidance.contains("Not sent."))
+            #expect(try screenTextIDs(refusal) == offered)
+            #expect(try wheelNoteCount(refusal) == 1)
+        }
+    }
+
+    @Test
+    func sameWordAtTheSamePlaceKeepsItsID() async throws {
+        let loop = VisionCaptureToolLoop()
+        let first = try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen))
+        // The next read: every word in place except "July", 30 units lower.
+        let moved = Self.taskWheelScreen.map { row in row.0 == "July" ? (row.0, row.1, row.2 + 30 * 2.622, row.3, row.4) : row }
+        let second = try screenTextIDs(try await wheelRead(loop, moved, signatureBefore: "screen-text-earlier"))
+        #expect(second.count == first.count)
+        for (label, id) in first where label != "July (screen text)" { #expect(second[label] == id, "\(label)") }
+        let july = try #require(second["July (screen text)"])
+        #expect(july != first["July (screen text)"])
+        #expect(!first.values.contains(july))
+        // A kept ID is a current choice: the tap is accepted.
+        let kept = try #require(second["August (screen text)"])
+        #expect(kept == first["August (screen text)"])
+        #expect(await loop.proposalRefusalForTesting(
+            .object(["action": .string("tap"), "target": .string(kept)]), configuration: Self.configuration) == nil)
+    }
+
+    /// The task form's wheels after the tap on 2029 (walk 06:47:50, second-app/walk/shots/064750-w2-after-tap-2029.json):
+    /// the year column moved 3 rows, so other years now sit where 2023 to 2029 were.
+    private static let taskWheelAfter2029: [(String, Double, Double, Double, Double)] = [
+        ("06:47", 148.37, 49.54, 148.37, 49.54),
+        ("‹ MuckCalendar", 34.24, 102.9, 273.92, 34.3),
+        ("Cancel", 94.98, 281.52, 163.85, 42.93),
+        ("Save", 992.95, 282.02, 114.13, 45.73),
+        ("Create Task", 49.46, 430.65, 559.25, 80.35),
+        ("New Task", 98.54, 588.9, 232.82, 53.17),
+        ("Title", 95.11, 727.91, 102.72, 49.54),
+        ("Product", 94.66, 882.4, 187.33, 53.07),
+        ("Priority", 94.77, 1039.33, 168.08, 55.54),
+        ("Medium", 874.67, 1038.57, 232.77, 49.42),
+        ("Due", 98.91, 1223.35, 91.31, 41.92),
+        ("10 Oct 2029", 563.05, 1215.72, 289.14, 49.54),
+        ("06:46", 931.85, 1215.05, 141.24, 50.9),
+        ("October 2029 v", 216.85, 1402.0, 388.05, 46.2),
+        ("No", 98.91, 1429.14, 64.68, 45.73),
+        ("July", 346.2, 1612.07, 110.33, 49.54),
+        ("August", 327.18, 1680.67, 205.44, 45.73),
+        ("September", 330.7, 1751.61, 312.53, 63.92),
+        ("October", 323.24, 1843.96, 251.36, 58.34),
+        ("November", 334.79, 1943.63, 289.14, 49.54),
+        ("December", 342.4, 2031.29, 277.72, 41.92),
+        ("January", 345.83, 2093.94, 206.19, 42.38),
+        ("2026", 764.08, 1617.37, 153.4, 46.57),
+        ("2027", 768.29, 1676.19, 152.58, 47.08),
+        ("2028", 771.85, 1755.54, 149.26, 52.25),
+        ("2029", 757.0, 1844.32, 175.16, 61.42),
+        ("2030", 768.28, 1942.98, 152.6, 50.86),
+        ("2031", 772.23, 2027.27, 148.5, 46.15),
+        ("2032", 764.69, 2092.26, 152.18, 34.3)
+    ]
+
+    @Test
+    func aDifferentWordAtAnOldPlaceGetsANewID() async throws {
+        let loop = VisionCaptureToolLoop()
+        let before = try screenTextIDs(try await wheelRead(loop, Self.taskWheelScreen))
+        let after = try screenTextIDs(try await wheelRead(loop, Self.taskWheelAfter2029, signatureBefore: "screen-text-earlier"))
+        // The months did not move: same IDs.
+        for month in ["July", "August", "September", "October", "November", "December", "January"] {
+            #expect(after["\(month) (screen text)"] == before["\(month) (screen text)"], "\(month)")
+        }
+        // Every year moved or is new: no year takes any earlier year's ID.
+        let earlierYearIDs = Set(before.filter { $0.key.first?.isNumber == true && $0.key.count == 18 }.values)
+        for year in 2026...2032 {
+            let id = try #require(after["\(year) (screen text)"])
+            #expect(!earlierYearIDs.contains(id), "\(year)")
+        }
+    }
+
     // MARK: Automatic image after actions (fix c)
 
     /// A real 2 x 2 PNG, so the capture stages like a screenshot.
