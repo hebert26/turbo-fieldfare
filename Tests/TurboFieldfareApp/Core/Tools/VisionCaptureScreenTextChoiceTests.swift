@@ -426,6 +426,250 @@ import TurboFieldfare
         #expect(try textChoices(result.packet) == ["March (screen text)", "2025 (screen text)"])
     }
 
+    // MARK: Picker wheel hint
+
+    /// Every OCR block (pixel frames, 1206 x 2622) of an open month and year wheel picker: a
+    /// calendar form (hand check, 9 Oct 06:24:42, wheel/shots/062442-check1-wheels-open.json).
+    private static let calendarWheelScreen: [(String, Double, Double, Double, Double)] = [
+        ("06:24", 148.37, 72.41, 152.18, 53.35),
+        ("Cancel", 94.95, 281.37, 163.92, 43.22),
+        ("Add", 1008.17, 278.21, 102.72, 45.73),
+        ("New Event", 49.32, 429.84, 502.45, 85.47),
+        ("Event title", 94.79, 611.77, 228.91, 45.55),
+        ("Date", 95.11, 785.08, 114.13, 45.73),
+        ("15 Jan 2024", 566.86, 785.0, 285.33, 46.0),
+        ("12:00", 935.47, 783.91, 137.79, 51.88),
+        ("January 2024 v", 216.85, 968.0, 384.25, 57.17),
+        ("October", 350.01, 1196.67, 209.24, 26.68),
+        ("November", 338.59, 1250.02, 281.53, 38.11),
+        ("December", 334.62, 1321.52, 289.47, 55.18),
+        ("January", 317.98, 1418.74, 249.81, 59.1),
+        ("February", 334.6, 1512.17, 247.66, 58.8),
+        ("March", 342.27, 1600.09, 163.85, 39.22),
+        ("April", 346.2, 1661.62, 121.74, 34.3),
+        ("2021", 772.3, 1192.86, 144.57, 34.3),
+        ("2022", 768.43, 1245.98, 152.3, 42.38),
+        ("2023", 771.97, 1321.52, 149.02, 55.17),
+        ("2024", 757.01, 1409.9, 171.34, 65.17),
+        ("2025", 768.49, 1509.17, 152.18, 53.35),
+        ("2026", 768.49, 1593.02, 152.18, 45.73),
+        ("2027", 764.69, 1661.62, 140.76, 34.3)
+    ]
+    /// The same in a task form's due-date picker (walk, 9 Oct 06:47:35, second-app/walk/shots/064735-w1-wheels-open.json).
+    private static let taskWheelScreen: [(String, Double, Double, Double, Double)] = [
+        ("06:47", 148.37, 49.54, 148.37, 49.54),
+        ("‹ MuckCalendar", 34.24, 102.9, 273.92, 34.3),
+        ("Cancel", 94.98, 281.52, 163.85, 42.93),
+        ("Save", 992.95, 282.02, 114.13, 45.73),
+        ("Create Task", 49.46, 430.65, 559.25, 80.35),
+        ("New Task", 98.54, 588.9, 232.82, 53.17),
+        ("Title", 95.11, 727.91, 102.72, 49.54),
+        ("Product", 94.66, 882.4, 187.33, 53.07),
+        ("Priority", 94.93, 1039.86, 167.75, 54.47),
+        ("Medium", 874.63, 1038.4, 232.83, 49.77),
+        ("Due", 98.91, 1223.35, 91.31, 41.92),
+        ("10 Oct 2026", 563.05, 1215.72, 289.14, 49.54),
+        ("06:46", 932.03, 1215.57, 140.87, 49.85),
+        ("October 2026 v", 216.85, 1402.0, 388.05, 46.2),
+        ("No", 98.91, 1429.14, 64.68, 45.73),
+        ("July", 346.2, 1612.07, 110.33, 49.54),
+        ("August", 327.18, 1680.67, 205.44, 45.73),
+        ("September", 330.7, 1751.61, 312.53, 63.92),
+        ("October", 323.24, 1843.96, 251.36, 58.34),
+        ("November", 334.79, 1943.63, 289.14, 49.54),
+        ("December", 342.4, 2031.29, 277.72, 41.92),
+        ("January", 345.82, 2093.94, 206.19, 42.39),
+        ("2023", 764.41, 1626.07, 152.72, 36.8),
+        ("2024", 768.49, 1676.86, 152.18, 45.73),
+        ("2025", 768.49, 1753.08, 152.18, 53.35),
+        ("2026", 756.99, 1844.29, 175.18, 61.5),
+        ("2027", 768.37, 1943.25, 152.43, 50.31),
+        ("2028", 768.24, 2026.61, 152.69, 47.46),
+        ("2029", 764.69, 2092.26, 152.18, 34.3)
+    ]
+    /// The words of an open calendar day grid with their positions (rerun 2, 9 Oct, trace line 38).
+    private static let dayGridScreen: [(String, Int64, Int64)] = [
+        ("New Event", 249, 180),
+        ("Dentist visit", 191, 241),
+        ("Date", 126, 308),
+        ("12:00", 833, 309),
+        ("January 2024 >", 338, 380),
+        ("MON TUE WED THU FRI", 418, 428),
+        ("1", 208, 465),
+        ("8", 210, 515),
+        ("15", 210, 568),
+        ("22", 210, 621),
+        ("29", 211, 672),
+        ("2", 315, 464),
+        ("9", 315, 516),
+        ("16", 317, 568),
+        ("23", 317, 621),
+        ("30", 317, 672),
+        ("3", 421, 464),
+        ("10", 423, 515),
+        ("17", 420, 569),
+        ("24", 423, 621),
+        ("31", 423, 672),
+        ("4", 528, 464),
+        ("11", 528, 516),
+        ("18", 527, 568),
+        ("25", 528, 621),
+        ("5", 632, 464),
+        ("12", 634, 516),
+        ("19", 634, 568),
+        ("26", 634, 620),
+        ("<", 754, 379),
+        ("SAT SUN", 789, 428),
+        ("13", 738, 516),
+        ("20", 741, 568),
+        ("27", 738, 621),
+        ("7", 845, 464),
+        ("14", 845, 516),
+        ("21", 845, 569),
+        ("28", 845, 620)
+    ]
+    private static let monthNames = ["January", "February", "March", "April", "May", "June", "July", "August",
+                                     "September", "October", "November", "December"]
+
+    private func ocrReply(_ rows: [(String, Double, Double, Double, Double)]) throws -> JSONValue {
+        try reply(.object(["blocks": .array(rows.map { block($0.0, $0.1, $0.2, $0.3, $0.4) })]))
+    }
+
+    private func wheelNoteCount(_ packet: String) throws -> Int {
+        guard case .string(let text)? = try packetObject(packet)["guidance"] else { return 0 }
+        return text.components(separatedBy: VisionCaptureToolLoop.pickerWheelNote).count - 1
+    }
+
+    private func afterTap(ocr: JSONValue, elements: [JSONValue]) async throws -> String {
+        try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read(elements), signatureBefore: "an-earlier-screen", body: ["screen_changed": .bool(true)],
+            screenTextReply: ocr, configuration: Self.configuration).packet
+    }
+
+    @Test
+    func realWheelColumnsFireOnce() async throws {
+        #expect(VisionCaptureToolLoop.pickerWheelNote == "These look like picker wheel rows: tap the row you want; if it is not visible, tap the end row nearest to it; do not swipe these rows.")
+        for screen in [Self.calendarWheelScreen, Self.taskWheelScreen] {
+            let words = VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(screen)).blocks
+            let months = words.filter { Self.monthNames.contains($0.text) }
+            let years = words.filter { $0.text.count == 4 && Int($0.text) != nil }
+            #expect(months.count == 7 && years.count == 7)
+            #expect(VisionCaptureToolLoop.looksLikePickerWheel(months))
+            #expect(VisionCaptureToolLoop.looksLikePickerWheel(years))
+            let packet = try await afterTap(ocr: try ocrReply(screen), elements: [element("agenda", "Agenda", 393, 941)])
+            #expect(try wheelNoteCount(packet) == 1)
+        }
+    }
+
+    /// The widest real month columns: the calendar after August (hand check 06:25:37,
+    /// wheel/shots/062537-check3c-after-tap-august.json; its month column alone needs a band of 69)
+    /// and the task form after the upward tap (walk 06:48:16, second-app/walk/shots/064816-w4-after-tap-july-top.json;
+    /// month centres spread 90).
+    private static let calendarAugustScreen: [(String, Double, Double, Double, Double)] = [
+        ("06:25", 148.29, 72.19, 148.53, 53.8),
+        ("....", 859.8, 102.9, 79.89, 19.06),
+        ("Cancel", 94.95, 281.37, 163.92, 43.22),
+        ("Add", 1008.17, 278.21, 102.72, 45.73),
+        ("New Event", 49.35, 430.02, 502.39, 85.09),
+        ("Event title", 94.73, 611.43, 229.02, 46.22),
+        ("Date", 95.11, 785.08, 114.13, 45.73),
+        ("15 Aug 2029", 555.27, 784.08, 297.1, 55.34),
+        ("12:00", 935.66, 784.45, 137.41, 50.79),
+        ("August 2029 v", 216.85, 968.0, 361.42, 57.17),
+        ("May", 346.2, 1177.61, 117.94, 49.54),
+        ("June", 334.45, 1248.8, 133.84, 40.56),
+        ("July", 330.98, 1326.24, 117.94, 57.17),
+        ("August", 315.66, 1413.55, 224.67, 69.29),
+        ("September", 334.4, 1507.15, 308.94, 65.02),
+        ("October", 338.45, 1596.09, 220.93, 43.41),
+        ("November", 346.2, 1661.62, 270.11, 38.11),
+        ("2026", 764.64, 1196.45, 152.26, 30.93),
+        ("2027", 768.25, 1245.33, 152.65, 43.68),
+        ("2028", 772.01, 1321.63, 148.95, 54.97),
+        ("2029", 756.94, 1409.72, 175.27, 65.52),
+        ("2030", 768.22, 1508.4, 152.71, 54.9),
+        ("2031", 768.01, 1591.36, 153.14, 49.05),
+        ("2032", 764.45, 1660.37, 152.66, 32.98)
+    ]
+    private static let taskJulyScreen: [(String, Double, Double, Double, Double)] = [
+        ("06:48", 148.28, 49.27, 152.36, 50.1),
+        ("‹ MuckCalendar", 34.24, 102.9, 273.92, 34.3),
+        ("Cancel", 95.11, 282.02, 163.59, 41.92),
+        ("Save", 992.95, 282.02, 114.13, 45.73),
+        ("Create Task", 49.46, 430.65, 559.25, 80.35),
+        ("New Task", 98.54, 588.9, 232.82, 53.17),
+        ("Title", 95.11, 727.91, 102.72, 49.54),
+        ("Product", 94.61, 882.23, 187.41, 53.41),
+        ("Priority", 94.93, 1039.86, 167.75, 54.47),
+        ("Medium", 874.63, 1038.4, 232.83, 49.77),
+        ("Due", 98.91, 1223.35, 91.31, 41.92),
+        ("10 Jul 2030", 578.17, 1215.16, 277.92, 50.67),
+        ("06:46", 931.91, 1215.24, 141.1, 50.5),
+        ("No", 98.91, 1429.14, 64.68, 45.73),
+        ("July 2030 v", 216.69, 1401.55, 300.87, 55.19),
+        ("April", 346.2, 1627.32, 121.74, 34.3),
+        ("May", 342.4, 1676.86, 117.94, 49.54),
+        ("June", 330.61, 1755.8, 141.52, 51.73),
+        ("July", 311.96, 1848.36, 136.96, 68.6),
+        ("August", 334.44, 1942.42, 198.52, 59.59),
+        ("September", 338.59, 2031.29, 300.55, 45.73),
+        ("October", 346.2, 2092.26, 216.85, 34.3),
+        ("2027", 764.62, 1619.46, 152.31, 42.4),
+        ("2028", 768.14, 1675.66, 152.88, 48.13),
+        ("2029", 771.48, 1750.74, 150.0, 58.04),
+        ("2030", 757.0, 1844.31, 175.17, 61.45),
+        ("2031", 772.14, 1943.15, 148.69, 50.51),
+        ("2032", 768.21, 2026.51, 152.75, 47.66),
+        ("2033", 764.62, 2095.74, 152.31, 31.15)
+    ]
+
+    @Test
+    func widestRealWheelColumnsFire() async throws {
+        for screen in [Self.calendarAugustScreen, Self.taskJulyScreen] {
+            let words = VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(screen)).blocks
+            let months = words.filter { Self.monthNames.contains($0.text) }
+            #expect(months.count == 7)
+            #expect(VisionCaptureToolLoop.looksLikePickerWheel(months))
+            let packet = try await afterTap(ocr: try ocrReply(screen), elements: [element("agenda", "Agenda", 393, 941)])
+            #expect(try wheelNoteCount(packet) == 1)
+        }
+    }
+
+    @Test
+    func hostKnownRowsDoNotFire() async throws {
+        // The same rows, each also in the host's element list: the lean rule skips them.
+        let words = VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(Self.calendarWheelScreen)).blocks
+        let known = words.enumerated().map { index, word in element("e\(index)", word.text, word.xNorm, word.yNorm) }
+        let packet = try await afterTap(ocr: try ocrReply(Self.calendarWheelScreen), elements: known)
+        #expect(try textChoices(packet).isEmpty)
+        #expect(try wheelNoteCount(packet) == 0)
+    }
+
+    @Test
+    func aColumnOfFourDoesNotFire() async throws {
+        let words = VisionCaptureToolLoop.screenTextBlocks(in: try ocrReply(Self.calendarWheelScreen)).blocks
+        let months = words.filter { Self.monthNames.contains($0.text) }.sorted { $0.yNorm < $1.yNorm }
+        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(Array(months.prefix(4))))
+        #expect(VisionCaptureToolLoop.looksLikePickerWheel(Array(months.prefix(5))))
+        let four = Self.calendarWheelScreen.filter { ["October", "November", "December", "January"].contains($0.0) }
+        #expect(try wheelNoteCount(try await afterTap(ocr: try ocrReply(four), elements: [element("agenda", "Agenda", 393, 941)])) == 0)
+    }
+
+    @Test
+    func calendarDayGridDoesNotFire() async throws {
+        let grid = Self.dayGridScreen.map { VisionCaptureToolLoop.ScreenTextBlock(text: $0.0, xNorm: $0.1, yNorm: $0.2) }
+        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(grid))
+        // Day numbers stack in columns 50 to 53 apart: "1", "8", "15", "22", "29".
+        #expect(!VisionCaptureToolLoop.looksLikePickerWheel(grid.filter { ["1", "8", "15", "22", "29"].contains($0.text) }))
+        let rows = Self.dayGridScreen.map { word -> (String, Double, Double, Double, Double) in
+            let width = 30.0 * Double(word.0.count), height = 46.0
+            return (word.0, Double(word.1) * 1.206 - width / 2, Double(word.2) * 2.622 - height / 2, width, height)
+        }
+        let packet = try await afterTap(ocr: try ocrReply(rows), elements: [element("agenda", "Agenda", 393, 941)])
+        #expect(try textChoices(packet).count == 38)
+        #expect(try wheelNoteCount(packet) == 0)
+    }
+
     // MARK: Automatic image after actions (fix c)
 
     /// A real 2 x 2 PNG, so the capture stages like a screenshot.

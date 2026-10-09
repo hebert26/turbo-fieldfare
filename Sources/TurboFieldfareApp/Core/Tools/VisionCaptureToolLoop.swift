@@ -5521,6 +5521,7 @@ actor VisionCaptureToolLoop {
             }
         }
         var offersScreenText = false
+        var offeredScreenText: [ScreenTextBlock] = []
         if !readOnlyRequired, !unavailable, recovery == nil, currentScreenSignature != nil,
            case .array(let rawBlocks)? = body["screen_text"] {
             let blocks = rawBlocks.compactMap { value -> ScreenTextBlock? in
@@ -5554,6 +5555,7 @@ actor VisionCaptureToolLoop {
                     route: .screenText(x: block.xNorm, y: block.yNorm))
                 choices.append(choice)
                 offersScreenText = true
+                offeredScreenText.append(block)
                 var semantic = choice.objectValue ?? [:]
                 semantic.removeValue(forKey: "id")
                 semantic["selector"] = .string(block.text)
@@ -5733,7 +5735,10 @@ actor VisionCaptureToolLoop {
         ]
         if let directions = packet["can_swipe"] { comparison["can_swipe"] = directions }
         if !images.isEmpty { comparison["images"] = .array(images.map { .string($0.sha256) }) }
-        let encoded = try Self.addingScreenTextNote(to: JSONValue.object(packet).encoded(), body: body)
+        var encoded = try Self.addingScreenTextNote(to: JSONValue.object(packet).encoded(), body: body)
+        if offersScreenText, Self.looksLikePickerWheel(offeredScreenText) {
+            encoded = try Self.addingGuidanceNote(to: encoded, note: Self.pickerWheelNote)
+        }
         if packet["journey_hint"] != nil { lastEmittedJourneyHint = currentJourneyHint }
         return DecisionPacket(content: encoded, comparison: .object(comparison), offersScreenText: offersScreenText)
     }
@@ -8272,6 +8277,34 @@ actor VisionCaptureToolLoop {
                 && !named.contains { $0.label == block.text && abs($0.x - block.xNorm) <= 15 && abs($0.y - block.yNorm) <= 15 }
                 && !restrictions.prohibits(label: block.text, selector: block.text, screenContext: screenContext)
         }
+    }
+
+    static let pickerWheelNote = "These look like picker wheel rows: tap the row you want; if it is not visible, tap the end row nearest to it; do not swipe these rows."
+
+    /// Picker wheel rows among the offered screen-text words (words the host does not
+    /// know, after the lean rule): at least 5 words in one vertical column, each the
+    /// next row down. Thresholds from measured wheels (two date pickers, 15 reads):
+    /// row gaps are 21 to 38 units (rows are closer at the ends than in the middle),
+    /// so a gap must be 18 to 44; a calendar day grid's rows are 50 to 53 apart and
+    /// never qualify. Word centres in a column of left-aligned names spread up to 90
+    /// units (years up to 10), so a row joins within 80 of the first row and a run
+    /// spreads at most 110; day-grid columns are about 105 apart. Known limit: any 5
+    /// or more OCR-only lines 18 to 44 apart (a wrapped paragraph in an image) also
+    /// fire; the hint is harmless there.
+    static func looksLikePickerWheel(_ blocks: [ScreenTextBlock]) -> Bool {
+        let rows = blocks.sorted { $0.yNorm < $1.yNorm }
+        for (index, first) in rows.enumerated() {
+            var run = [first]
+            for block in rows[(index + 1)...] where abs(block.xNorm - first.xNorm) <= 80 {
+                let gap = block.yNorm - run[run.count - 1].yNorm
+                if gap < 18 { continue }
+                if gap > 44 { break }
+                run.append(block)
+            }
+            let xs = run.map(\.xNorm)
+            if run.count >= 5, let low = xs.min(), let high = xs.max(), high - low <= 110 { return true }
+        }
+        return false
     }
 
     /// The status bar (clock, signal, battery) has its centre at y_norm 50 or less.
