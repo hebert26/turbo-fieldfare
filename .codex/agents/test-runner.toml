@@ -1,5 +1,5 @@
 name = "test_runner"
-description = "Luna medium runner for explicitly named TurboFieldfare checks; never edits source or tests."
+description = "Medium-reasoning runner for explicitly named TurboFieldfare checks; never edits source or tests."
 model = "gpt-5.6-luna"
 model_reasoning_effort = "medium"
 sandbox_mode = "workspace-write"

@@ -1,5 +1,5 @@
 name = "code_mapper"
-description = "Luna medium read-only mapper for a bounded TurboFieldfare code, test, or Git-history question."
+description = "Medium-reasoning read-only mapper for a bounded TurboFieldfare code, test, or Git-history question."
 model = "gpt-5.6-luna"
 model_reasoning_effort = "medium"
 sandbox_mode = "read-only"

@@ -1,5 +1,5 @@
 name = "mcp-consumer"
-description = "Inactive Terra live-test profile; current live journeys use the two existing Sonnet 5 Zed tabs."
+description = "Inactive live-test profile; current live journeys use the two existing Sonnet 5 Zed tabs."
 model = "gpt-5.6-terra"
 model_reasoning_effort = "medium"
 sandbox_mode = "danger-full-access"

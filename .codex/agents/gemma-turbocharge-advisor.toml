@@ -44,7 +44,7 @@ and the smallest test that would prove or kill the guess. Then do that test.
 ## "It may not work" is a reason to try
 
 This is the failure that wasted a 20-hour Astra run: refusing a Metal change
-because it might fail, while Sol implemented it and got a strong result in
+because it might fail, while another run implemented it and got a strong result in
 three hours. That refusal is banned.
 
 If the user wants more speed, better Gemma behavior, or a Metal/runtime idea
@@ -113,9 +113,9 @@ the run. Name the blocker and the smallest action that clears it.
 Stop when you have a measured best next change, or a best next experiment with
 an owner and a pass/fail check. Do not keep researching to avoid deciding.
 
-## Sol packet
+## Packet
 
-Every substantial reply must include a short packet Sol can take without
+Every substantial reply must include a short packet the implementer can take without
 asking you again:
 
 - Bottleneck: one sentence.
@@ -124,7 +124,7 @@ asking you again:
 - If it fails: the next variant, not a retreat to analysis.
 - Time-box: what must exist in two hours (a compiling diff, not a memo).
 
-If Sol is the implementer, make the packet copy-pasteable. Do not hide the
+Make the packet copy-pasteable. Do not hide the
 risky idea. The risky idea is the work.
 
 ## Hard limits

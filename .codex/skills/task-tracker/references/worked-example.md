@@ -53,7 +53,7 @@ Details, scope, code, evidence: [implementation-offline-notes-2026-08-15.md](./i
 
 ## Now
 
-- Phase `2` - task `2.3` - `Luna`
+- Phase `2` - task `2.3` - `Worker`
 - Blocked: `0` - coverage rows not passing: `3`
 - Next: write `OfflineQueueTests` so phase 2 can close.
 
@@ -81,7 +81,7 @@ D3 proves a named test file exists and really ran and passed. It does not prove 
 
 ## Phase 1 - A note saves and reopens with no network
 
-Status: `[x]` - Owner: `Terra` - Needs: `-` - Done: `2026-08-13` - [details](./implementation-offline-notes-2026-08-15.md#phase-1)
+Status: `[x]` - Owner: `Worker` - Needs: `-` - Done: `2026-08-13` - [details](./implementation-offline-notes-2026-08-15.md#phase-1)
 
 - [x] 1.1 Add a local note store backed by SQLite            2026-08-12
 - [x] 1.2 Route reads and writes through the local store     2026-08-13
@@ -112,7 +112,7 @@ Base: `a3f19c2`
 
 ## Phase 2 - Queued notes reach the server when network returns
 
-Status: `[~]` - Owner: `Luna` - Needs: `1` - Done: `-` - [details](./implementation-offline-notes-2026-08-15.md#phase-2)
+Status: `[~]` - Owner: `Worker` - Needs: `1` - Done: `-` - [details](./implementation-offline-notes-2026-08-15.md#phase-2)
 
 - [x] 2.1 Add a durable write queue                          2026-08-14
 - [x] 2.2 Drain the queue on a network-reachable event        2026-08-15
@@ -146,7 +146,7 @@ Blocked by: D3 fails. `OfflineQueue.swift` and `ConflictResolver.swift` have no 
 
 ## Phase 3 - The user can see which notes are still waiting
 
-Status: `[ ]` - Owner: `Terra` - Needs: `2` - Done: `-` - [details](./implementation-offline-notes-2026-08-15.md#phase-3)
+Status: `[ ]` - Owner: `Worker` - Needs: `2` - Done: `-` - [details](./implementation-offline-notes-2026-08-15.md#phase-3)
 
 - [ ] 3.1 Show a pending badge on any note not yet on the server
 - [ ] 3.2 Show the queue count in the toolbar

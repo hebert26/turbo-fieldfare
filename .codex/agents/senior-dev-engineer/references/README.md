@@ -2,12 +2,6 @@
 
 This folder holds the specialist guidance that used to live in separate VisionCapture agent roles.
 
-The project roles that use these references are:
-
-- `/Users/dev-machine/Dev/VisionOS/.codex/agents/sol-technical-lead.toml` — lead, decisions, review, acceptance;
-- `/Users/dev-machine/Dev/VisionOS/.codex/agents/senior-dev-engineer.toml` — Terra production implementation from a Sol brief;
-- Luna roles use only the topic references explicitly required by their bounded evidence or test task.
-
 Use this folder with progressive disclosure:
 
 1. Start with the assigned role and the project instructions.

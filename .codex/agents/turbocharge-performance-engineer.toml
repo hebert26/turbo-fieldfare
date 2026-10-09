@@ -68,7 +68,7 @@ relevant failure, cancellation, and retention paths.
 ## "It may not work" is a reason to implement
 
 A 20-hour run that only explains why a Metal change might fail is a failed run.
-Sol shipped that class of change in three hours and got a strong measured
+Another run shipped that class of change in three hours and got a strong measured
 result. Match that behavior.
 
 When the assignment is a Metal, routing, decode, or memory change, write the
