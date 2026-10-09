@@ -437,6 +437,35 @@ struct VisionCaptureScreenFacts {
         return (x, y)
     }
 
+    /// A visible element with a readable name, as the loop's offer checks see it.
+    struct NamedElement {
+        let text: String
+        let x: Int64
+        let y: Int64
+        let role: String
+        let selectors: [(selector: String, kind: String?)]
+        let disabled: Bool
+        let covering: Bool
+    }
+
+    func namedElements() -> [NamedElement] {
+        elements.indices.compactMap { index in
+            let element = elements[index]
+            guard let text = element.label.flatMap(Self.displayText) ?? element.ocrLabel,
+                  case .object(let position)? = element.position,
+                  case .integer(let x)? = position["x_norm"], case .integer(let y)? = position["y_norm"]
+            else { return nil }
+            // Every name that points to the element: identifier, label, OCR label.
+            var selectors: [(selector: String, kind: String?)] = [element.identifier, element.label]
+                .compactMap { $0 }.filter { !$0.isEmpty }.map { ($0, nil) }
+            if let ocrLabel = element.ocrLabel { selectors.append((ocrLabel, "ocr_label")) }
+            return NamedElement(
+                text: text, x: x, y: y, role: element.role, selectors: selectors,
+                disabled: element.enabled == false,
+                covering: element.coversControls > 0 && !coversOnlyDisabledControls(index))
+        }
+    }
+
     /// Warning text for a control whose frame covers other controls, or nil.
     /// The element's enabled flag, or nil when unknown or not on screen.
     func isEnabled(selector: String, role: String, selectorKind: String? = nil) -> Bool? {

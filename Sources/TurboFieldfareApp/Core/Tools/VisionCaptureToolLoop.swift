@@ -683,6 +683,8 @@ actor VisionCaptureToolLoop {
         case editable(PublishedEditableField)
         case alert(label: String, digest: String)
         case confirmation(StaleActionConfirmation)
+        /// OCR text from the screenshot read, tapped at its own position.
+        case screenText(x: Int64, y: Int64)
     }
 
     private struct ChoiceBinding {
@@ -1798,6 +1800,10 @@ actor VisionCaptureToolLoop {
                     intent,
                     configuration: configuration,
                     activity: activity)
+            }
+            if intent.selectorKind == Self.screenTextSelectorKind, let selector = intent.selector {
+                return try await performDirectNameTap(
+                    intent, selector: selector, configuration: configuration, activity: activity)
             }
             fallthrough
 
@@ -3342,6 +3348,27 @@ actor VisionCaptureToolLoop {
             throw VisionCaptureAgentError.noProgress(
                 "The screenshot was captured, but its following read could not establish a usable current image and target binding. No input was sent. Agent Mode stopped this unsupported observation path instead of repeating screenshot and observe.")
         }
+        // One more plain screenshot, with OCR. Only its text boxes are used;
+        // the image above stays the model's image.
+        let ocrArguments = makeMCPArguments(
+            request: "take a screenshot", parameters: ["include_ocr": .bool(true)],
+            configuration: configuration, includeFlowSession: false)
+        let screenText: (blocks: [ScreenTextBlock], unavailableReason: String?)
+        do {
+            let ocrResult = try await executeHostRequest(
+                ocrArguments, configuration: configuration, activity: activity)
+            screenText = ocrResult.isError
+                ? ([], Self.screenTextRefusalReason(
+                    code: ocrResult.refusalCode, reason: ocrResult.serverOutcome.reason))
+                : Self.screenTextBlocks(in: ocrResult.value)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch let error as VisionCaptureAgentError where Self.isFatalScreenTextReadError(error) {
+            throw error
+        } catch {
+            screenText = ([], Self.screenTextFailureReason(error))
+        }
+        Self.recordScreenText(screenText, into: &body)
         body["operation"] = .string("screenshot")
         body["outcome"] = .string("succeeded")
         body.removeValue(forKey: "proof")
@@ -3717,7 +3744,10 @@ actor VisionCaptureToolLoop {
         try rejectPreviouslyRejectedProposal(intent)
         try rejectExhaustedIntent(intent)
         let attemptedScreenScope = currentNavigationScreenScope
-        guard let knownPosition = currentScreenFacts?.normalizedPosition(
+        let screenTextClick = Self.screenTextPointerClick(
+            selectorKind: intent.selectorKind, selector: selector, xNorm: intent.xNorm, yNorm: intent.yNorm)
+        guard let knownPosition = screenTextClick.map({ (x: $0.x, y: $0.y) })
+            ?? currentScreenFacts?.normalizedPosition(
             selector: selector, role: intent.role ?? "", selectorKind: intent.selectorKind) else {
             // Not sent: a local rejection that keeps the current choices.
             throw VisionCaptureAgentError.navigationUnavailable(
@@ -3729,7 +3759,8 @@ actor VisionCaptureToolLoop {
         // through the driver's name or coordinate taps.
         let label = resolvedJourneyLabel?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let pointer = try await performFastPointerClick(
-            x: knownPosition.x, y: knownPosition.y, label: label.isEmpty ? selector : label,
+            x: knownPosition.x, y: knownPosition.y,
+            label: screenTextClick?.intent ?? (label.isEmpty ? selector : label),
             configuration: configuration, activity: activity)
         let arguments = pointer.arguments
         let result = pointer.result
@@ -5004,6 +5035,11 @@ actor VisionCaptureToolLoop {
             text = nil
         }
         resolvedJourneyLabel = binding.displayLabel
+        if case .screenText(let x, let y) = binding.route {
+            return NavigationIntent(operation: operation, selector: binding.selector,
+                selectorKind: binding.selectorKind, role: binding.role,
+                desiredState: nil, text: nil, xNorm: Int(x), yNorm: Int(y))
+        }
         return NavigationIntent(operation: operation, selector: binding.selector,
             selectorKind: binding.selectorKind, role: binding.role,
             desiredState: desiredState, text: text)
@@ -5049,6 +5085,8 @@ actor VisionCaptureToolLoop {
         case .confirmation(let confirmation):
             return staleActionConfirmation == confirmation
                 && currentScreenSignature == confirmation.screenSignature
+        case .screenText:
+            return true
         }
     }
 
@@ -5376,6 +5414,45 @@ actor VisionCaptureToolLoop {
                 }
             }
         }
+        if !readOnlyRequired, !unavailable, recovery == nil,
+           currentImageObservation == observationGeneration, currentScreenSignature != nil,
+           case .array(let rawBlocks)? = body["screen_text"] {
+            let blocks = rawBlocks.compactMap { value -> ScreenTextBlock? in
+                guard let object = value.objectValue, case .string(let text)? = object["text"],
+                      case .integer(let x)? = object["x_norm"], case .integer(let y)? = object["y_norm"]
+                else { return nil }
+                return ScreenTextBlock(text: text, xNorm: x, yNorm: y)
+            }
+            // Withheld controls (disabled, covering, selected, done) and the
+            // user's prohibited targets do not come back as screen text.
+            let elements = Self.array(body["available_actions"]) + Self.array(body["available_text_fields"])
+            for block in Self.screenTextBlocksToOffer(
+                blocks, knownElements: choices + elements + withheldScreenElements(),
+                restrictions: userRestrictions, screenContext: restrictionScreenContext)
+            where isEligibleOfferedAction(Self.screenTextTapIntent(block)) {
+                var id: String
+                repeat {
+                    guard nextChoiceNumber < UInt64.max else {
+                        throw VisionCaptureAgentError.noProgress("The conversation exhausted its choice IDs. Start a new chat.")
+                    }
+                    nextChoiceNumber += 1
+                    id = "c\(nextChoiceNumber)"
+                } while id == excludingTargetID
+                let choice = Self.screenTextChoice(block, id: id)
+                currentChoiceBindings[id] = ChoiceBinding(
+                    observation: observationGeneration, targetKey: configuration.targetKey,
+                    session: committedSessionIdentity, screenSignature: currentScreenSignature,
+                    operation: .tap, selector: block.text, selectorKind: Self.screenTextSelectorKind,
+                    role: "text", displayLabel: Self.screenTextLabel(block.text), allowedStates: [],
+                    route: .screenText(x: block.xNorm, y: block.yNorm))
+                choices.append(choice)
+                var semantic = choice.objectValue ?? [:]
+                semantic.removeValue(forKey: "id")
+                semantic["selector"] = .string(block.text)
+                semantic["selector_kind"] = .string(Self.screenTextSelectorKind)
+                semanticChoices.append(.object(semantic))
+            }
+        }
         // A screenshot packet already includes a fresh accessibility read.
         // Offering another read immediately discards the pixels and can trap
         // the model in an observe/screenshot loop around unnamed controls.
@@ -5548,7 +5625,7 @@ actor VisionCaptureToolLoop {
         ]
         if let directions = packet["can_swipe"] { comparison["can_swipe"] = directions }
         if !images.isEmpty { comparison["images"] = .array(images.map { .string($0.sha256) }) }
-        let encoded = try JSONValue.object(packet).encoded()
+        let encoded = try Self.addingScreenTextNote(to: JSONValue.object(packet).encoded(), body: body)
         if packet["journey_hint"] != nil { lastEmittedJourneyHint = currentJourneyHint }
         return DecisionPacket(content: encoded, comparison: .object(comparison))
     }
@@ -6356,6 +6433,71 @@ actor VisionCaptureToolLoop {
                 && body["proof"]?.objectValue?["verdict"] == .string("verified"),
             successfulReadOnlyObservation: false)
     }
+
+    /// Screen elements the loop withholds from the choices: disabled, covering
+    /// other controls, or a target previously rejected or used up.
+    private func withheldScreenElements() -> [JSONValue] {
+        (currentScreenFacts?.namedElements() ?? []).compactMap { element in
+            let intents = element.selectors.flatMap { name -> [NavigationIntent] in
+                let tap = NavigationIntent(operation: .tap, selector: name.selector,
+                    selectorKind: name.kind, role: element.role, desiredState: nil, text: nil)
+                guard element.role == "switch" else { return [tap] }
+                return [tap] + [false, true].map { state in
+                    NavigationIntent(operation: .setBoolean, selector: name.selector,
+                        selectorKind: name.kind, role: element.role, desiredState: state, text: nil)
+                }
+            }
+            guard element.disabled || element.covering
+                || intents.contains(where: { !isEligibleOfferedAction($0) }) else { return nil }
+            return .object([
+                "label": .string(element.text),
+                "position": .object(["x_norm": .integer(element.x), "y_norm": .integer(element.y)]),
+            ])
+        }
+    }
+
+    #if DEBUG
+    /// Test entry: the screenshot packet for `read` (the image's paired
+    /// accessibility read) and `screenTextReply` (the OCR reply), built by the
+    /// loop's own observation record, outcome and decision-packet code. Before the
+    /// packet, `rejectedScreenText` taps are recorded as rejected on this screen and
+    /// `usedUpSwitches` set_boolean actions as sent without effect up to the limit.
+    func screenshotPacketForTesting(
+        read: VisionCaptureMCPResult, screenTextReply: JSONValue,
+        configuration: VisionCaptureAgentConfiguration, images: [AppImageAttachment],
+        rejectedScreenText: [ScreenTextBlock] = [],
+        usedUpSwitches: [(selector: String, desiredState: Bool)] = []
+    ) throws -> String {
+        try recordScreenObservation(from: read.value)
+        for block in rejectedScreenText {
+            rememberRejectedBeforeSubmissionProposal(Self.screenTextTapIntent(block))
+        }
+        for action in usedUpSwitches {
+            let intent = NavigationIntent(operation: .setBoolean, selector: action.selector,
+                selectorKind: nil, role: "switch", desiredState: action.desiredState, text: nil)
+            for _ in 0..<Self.unverifiedAttemptLimit { noteExecuted(intent, result: read) }
+        }
+        let observed = try outcome(
+            for: NavigationIntent(operation: .observe, selector: nil, selectorKind: nil,
+                role: nil, desiredState: nil, text: nil),
+            result: read, arguments: .object([:]), manifest: AuthorityManifest(state: "ready"),
+            systemAlert: nil, progressed: false, observedScreenFacts: Self.returnedScreenFacts(from: read.value))
+        guard var body = try JSONDecoder().decode(JSONValue.self, from: Data(observed.content.utf8)).objectValue else {
+            throw VisionCaptureAgentError.malformedCall("The test read could not be encoded.")
+        }
+        body["observation_outcome"] = .string("succeeded")
+        body["image_observation"] = .object(["state": .string("sequential")])
+        Self.recordScreenText(Self.screenTextBlocks(in: screenTextReply), into: &body)
+        body["operation"] = .string("screenshot")
+        body["outcome"] = .string("succeeded")
+        body["image"] = .object(["mime_type": .string("image/png")])
+        return try decisionPacket(
+            from: JSONValue.object(body).encoded(),
+            call: AppToolCall(id: "screenshot-test", name: "visioncapture_navigate",
+                arguments: .object(["action": .string("screenshot")])),
+            configuration: configuration, images: images).content
+    }
+    #endif
 
     private func isEligibleOfferedAction(_ intent: NavigationIntent) -> Bool {
         // A frame that covers other controls has no reliable tap point: a tap
@@ -7862,6 +8004,170 @@ actor VisionCaptureToolLoop {
         "Coordinate actions need current screenshot evidence. Choose screenshot now, then use positions from that screenshot in the next step."
 
     static let choiceTargetReason = "Targets are choice IDs; for positions use x_norm and y_norm."
+
+    static let screenTextSelectorKind = "screen_text"
+
+    /// One OCR text block of a screenshot: its text and centre on the 0-1000 grid.
+    struct ScreenTextBlock: Equatable, Sendable {
+        let text: String
+        let xNorm: Int64
+        let yNorm: Int64
+    }
+
+    /// The OCR blocks of a plain screenshot reply (pixel frames, top-left origin)
+    /// in the host's order, or the reason there are none.
+    static func screenTextBlocks(in value: JSONValue) -> (blocks: [ScreenTextBlock], unavailableReason: String?) {
+        func number(_ value: JSONValue?) -> Double? {
+            switch value {
+            case .integer(let v)?: Double(v)
+            case .unsignedInteger(let v)?: Double(v)
+            case .decimal(let v)?: NSDecimalNumber(decimal: v).doubleValue
+            case .number(let v)?: v.isFinite ? v : nil
+            default: nil
+            }
+        }
+        guard case .array(let content)? = value.objectValue?["content"] else {
+            return ([], "the screenshot reply had no content")
+        }
+        for item in content {
+            guard let object = item.objectValue, object["type"] == .string("text"),
+                  case .string(let text)? = object["text"],
+                  let metadata = (try? JSONDecoder().decode(JSONValue.self, from: Data(text.utf8)))?.objectValue,
+                  let ocrValue = metadata["ocr"] else { continue }
+            guard let ocr = ocrValue.objectValue else { return ([], "the OCR result was not readable") }
+            if case .string(let error)? = ocr["error"] {
+                return ([], String(error.trimmingCharacters(in: .whitespacesAndNewlines).prefix(160)))
+            }
+            guard let width = number(metadata["width"]), let height = number(metadata["height"]),
+                  width > 0, height > 0 else { return ([], "the screenshot size was missing") }
+            guard case .array(let rawBlocks)? = ocr["blocks"] else { return ([], "the OCR result had no blocks") }
+            var blocks: [ScreenTextBlock] = []
+            for raw in rawBlocks {
+                guard let block = raw.objectValue, case .string(let rawText)? = block["text"],
+                      let frame = block["frame"]?.objectValue,
+                      let x = number(frame["x"]), let y = number(frame["y"]),
+                      let w = number(frame["width"]), let h = number(frame["height"]) else { continue }
+                let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { continue }
+                let xNorm = Int64(min(max(((x + w / 2) / width * 1000).rounded(), 0), 1000))
+                let yNorm = Int64(min(max(((y + h / 2) / height * 1000).rounded(), 0), 1000))
+                blocks.append(ScreenTextBlock(text: text, xNorm: xNorm, yNorm: yNorm))
+            }
+            return blocks.isEmpty ? ([], "no text was found on the screen") : (blocks, nil)
+        }
+        return ([], "the screenshot reply had no OCR result")
+    }
+
+    /// Blocks that no known element (a choice, or a control held back from the
+    /// choices) already names within 15 units on both axes, and that the user
+    /// has not prohibited.
+    static func screenTextBlocksToOffer(
+        _ blocks: [ScreenTextBlock], knownElements: [JSONValue],
+        restrictions: AgentUserRestrictions = AgentUserRestrictions(), screenContext: String? = nil
+    ) -> [ScreenTextBlock] {
+        let named: [(label: String, x: Int64, y: Int64)] = knownElements.compactMap { choice in
+            guard let object = choice.objectValue, case .string(var label)? = object["label"],
+                  let position = object["position"]?.objectValue,
+                  case .integer(let x)? = position["x_norm"], case .integer(let y)? = position["y_norm"]
+            else { return nil }
+            if label.hasSuffix(" (ocr)") { label.removeLast(" (ocr)".count) }
+            return (label, x, y)
+        }
+        return blocks.filter { block in
+            !named.contains { $0.label == block.text && abs($0.x - block.xNorm) <= 15 && abs($0.y - block.yNorm) <= 15 }
+                && !restrictions.prohibits(label: block.text, selector: block.text, screenContext: screenContext)
+        }
+    }
+
+    /// The tap a screen-text choice sends: its own text and position.
+    private static func screenTextTapIntent(_ block: ScreenTextBlock) -> NavigationIntent {
+        NavigationIntent(operation: .tap, selector: block.text, selectorKind: screenTextSelectorKind,
+            role: "text", desiredState: nil, text: nil, xNorm: Int(block.xNorm), yNorm: Int(block.yNorm))
+    }
+
+    static func screenTextLabel(_ text: String) -> String { "\(text) (screen text)" }
+
+    static func screenTextChoice(_ block: ScreenTextBlock, id: String) -> JSONValue {
+        .object([
+            "id": .string(id), "role": .string("text"), "label": .string(screenTextLabel(block.text)),
+            "operations": .array([.string(NavigationOperation.tap.rawValue)]),
+            "position": .object(["x_norm": .integer(block.xNorm), "y_norm": .integer(block.yNorm)]),
+        ])
+    }
+
+    /// A tap on a screen-text choice clicks its own position. The screenshot
+    /// that produced it is the image evidence; no new screenshot is needed.
+    static func screenTextPointerClick(
+        selectorKind: String?, selector: String?, xNorm: Int?, yNorm: Int?
+    ) -> (x: Int64, y: Int64, intent: String)? {
+        guard selectorKind == screenTextSelectorKind, let selector, let xNorm, let yNorm else { return nil }
+        return (Int64(xNorm), Int64(yNorm), "tap \(selector)")
+    }
+
+    /// Errors that end the run in any host read. The extra OCR read never
+    /// turns them into a note.
+    static func isFatalScreenTextReadError(_ error: VisionCaptureAgentError) -> Bool {
+        switch error {
+        case .returnedIdentityMismatch, .sessionIdentityMismatch, .malformedCall, .invalidConfiguration,
+             .unsupportedSystemInteraction: true
+        default: false
+        }
+    }
+
+    /// The host's plain reason for a refused or failed OCR read, never the
+    /// loop's own error text.
+    static func screenTextFailureReason(_ error: Error) -> String {
+        switch error {
+        case VisionCaptureAgentError.mcpOutcome(let outcome):
+            screenTextRefusalReason(code: outcome.reasonCode, reason: outcome.reason)
+        case let refusal as BusyHostReadBeforeDispatch:
+            screenTextRefusalReason(code: refusal.failure.reasonCode, reason: refusal.failure.reason)
+        case let refusal as AmbiguousTargetBeforeDispatch:
+            screenTextRefusalReason(code: refusal.failure.reasonCode, reason: refusal.failure.reason)
+        default:
+            screenTextRefusalReason(code: nil, reason: nil)
+        }
+    }
+
+    /// The refusal code and the first sentence of its reason.
+    static func screenTextRefusalReason(code: String?, reason: String?) -> String {
+        let code = String((code?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "").prefix(160))
+        var short = reason?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if let end = short.range(of: ". ") { short = String(short[..<end.lowerBound]) }
+        if short.count > 160 { short = String(short.prefix(160)) }
+        switch (code.isEmpty, short.isEmpty) {
+        case (false, false): return "\(code): \(short)"
+        case (false, true): return code
+        case (true, false): return short
+        case (true, true): return "the host did not return screen text"
+        }
+    }
+
+    /// Puts the OCR read into the screenshot body: its blocks, or why there are none.
+    static func recordScreenText(
+        _ screenText: (blocks: [ScreenTextBlock], unavailableReason: String?),
+        into body: inout [String: JSONValue]
+    ) {
+        if let reason = screenText.unavailableReason {
+            body["screen_text_unavailable"] = .string(reason)
+        } else {
+            body["screen_text"] = .array(screenText.blocks.map {
+                .object(["text": .string($0.text), "x_norm": .integer($0.xNorm), "y_norm": .integer($0.yNorm)])
+            })
+        }
+    }
+
+    /// The packet says once why screen-text choices are missing.
+    static func addingScreenTextNote(to content: String, body: [String: JSONValue]) throws -> String {
+        guard case .string(let reason)? = body["screen_text_unavailable"] else { return content }
+        return try addingGuidanceNote(to: content, note: screenTextUnavailableNote(reason))
+    }
+
+    static func screenTextUnavailableNote(_ reason: String) -> String {
+        var reason = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        while reason.hasSuffix(".") { reason.removeLast() }
+        return "Screen text positions unavailable: \(reason)."
+    }
 
     static let coordinatesOverTargetNote =
         "Used your coordinates; next time send x_norm and y_norm without a target, or a choice ID alone."
