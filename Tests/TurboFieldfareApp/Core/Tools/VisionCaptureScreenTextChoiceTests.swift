@@ -250,4 +250,174 @@ import TurboFieldfare
         #expect(noted.contains("Use the image."))
         #expect(try VisionCaptureToolLoop.addingScreenTextNote(to: packet, body: ["screen_text": .array([])]) == packet)
     }
+
+    // MARK: Screen text after actions
+
+    private func textChoices(_ packet: String) throws -> [String] {
+        guard case .array(let choices)? = try JSONDecoder().decode(JSONValue.self, from: Data(packet.utf8))
+            .objectValue?["choices"] else { return [] }
+        return choices.compactMap { choice -> String? in
+            guard case .string(let label)? = choice.objectValue?["label"],
+                  label.hasSuffix(" (screen text)") else { return nil }
+            return label
+        }
+    }
+
+    private func packetObject(_ packet: String) throws -> [String: JSONValue] {
+        try JSONDecoder().decode(JSONValue.self, from: Data(packet.utf8)).objectValue ?? [:]
+    }
+
+    @Test
+    func changedScreenAfterATapGetsScreenTextWithoutAnImage() async throws {
+        let ocr = try reply(.object(["blocks": .array([block("2025", 768, 1509, 152, 53)])]))
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "screen-text-test",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr, configuration: Self.configuration)
+        #expect(result.readScreenText)
+        #expect(try textChoices(result.packet) == ["2025 (screen text)"])
+        let packet = try packetObject(result.packet)
+        #expect(packet["image"] == nil)
+        #expect(packet["observation"]?.objectValue?["current_image_evidence"] == .bool(false))
+    }
+
+    @Test
+    func unchangedScreenGetsNoOCRRead() async throws {
+        let ocr = try reply(.object(["blocks": .array([block("2025", 768, 1509, 152, 53)])]))
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "screen-text-test",
+            body: ["screen_changed": .bool(false), "effect": .string("Same elements as before the action.")],
+            screenTextReply: ocr, configuration: Self.configuration)
+        #expect(!result.readScreenText)
+        #expect(try textChoices(result.packet).isEmpty)
+    }
+
+    @Test
+    func effectListOrNewSignatureTriggersTheReadWithoutScreenChanged() async throws {
+        // Exam trace line 16: "New event" opened a sheet; the result had no screen_changed.
+        let ocr = try reply(.object(["blocks": .array([block("2025", 768, 1509, 152, 53)])]))
+        let byEffect = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "screen-text-test",
+            body: ["effect": .string("appeared: Cancel, Add, New Event; disappeared: Calendar")],
+            screenTextReply: ocr, configuration: Self.configuration)
+        #expect(byEffect.readScreenText)
+        #expect(try textChoices(byEffect.packet) == ["2025 (screen text)"])
+        let bySignature = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: [:], screenTextReply: ocr, configuration: Self.configuration)
+        #expect(bySignature.readScreenText)
+    }
+
+    @Test
+    func backGetsTheReadOnlyWithACurrentFollowUpRead() async throws {
+        let ocr = try reply(.object(["blocks": .array([block("2025", 768, 1509, 152, 53)])]))
+        let withRead = try await VisionCaptureToolLoop().actionPacketForTesting(
+            operation: "back", read: read([element("agenda", "Agenda", 393, 941)]),
+            signatureBefore: "an-earlier-screen", body: [:], screenTextReply: ocr, configuration: Self.configuration)
+        #expect(withRead.readScreenText)
+        #expect(try textChoices(withRead.packet) == ["2025 (screen text)"])
+        // Today's back makes no follow-up read: nothing current to bind words to.
+        let withoutRead = try await VisionCaptureToolLoop().actionPacketForTesting(
+            operation: "back", read: nil, signatureBefore: "an-earlier-screen", body: [:],
+            screenTextReply: ocr, configuration: Self.configuration)
+        #expect(!withoutRead.readScreenText)
+    }
+
+    @Test
+    func unknownDeliveryGetsNoOCRRead() async throws {
+        let ocr = try reply(.object(["blocks": .array([block("2025", 768, 1509, 152, 53)])]))
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true), "delivery_unknown": .bool(true)],
+            screenTextReply: ocr, configuration: Self.configuration)
+        #expect(!result.readScreenText)
+        #expect(try textChoices(result.packet).isEmpty)
+    }
+
+    @Test
+    func staticTextIsSkippedAndDuplicateNamedRowsKeepTheirScreenText() async throws {
+        // "Date" is a host static text at (126, 308); two "Edit" rows share one name,
+        // so the host offers neither: both keep their screen text.
+        let date: JSONValue = .object([
+            "element_id": .string("date"), "role": .string("static_text"), "label": .string("Date"),
+            "visible": .bool(true), "x_norm": .integer(126), "y_norm": .integer(308),
+        ])
+        let ocr = try reply(.object(["blocks": .array([
+            block("Date", 95, 785, 114, 46), block("2025", 768, 1509, 152, 53),
+            block("Edit", 1050, 1000, 80, 40), block("Edit", 1050, 1200, 80, 40),
+        ])]))
+        let screen = read([date, element("edit-1", "Edit", 904, 389), element("edit-2", "Edit", 904, 465)])
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: screen, signatureBefore: "an-earlier-screen", body: ["screen_changed": .bool(true)],
+            screenTextReply: ocr, configuration: Self.configuration)
+        #expect(try textChoices(result.packet) == ["2025 (screen text)", "Edit (screen text)", "Edit (screen text)"])
+        // The screenshot path follows the same rule.
+        #expect(try await screenTextLabels(VisionCaptureToolLoop(), read: screen, ocr: ocr)
+            == ["2025 (screen text)", "Edit (screen text)", "Edit (screen text)"])
+    }
+
+    @Test
+    func failedOCRReadAfterAnActionGivesTheNote() async throws {
+        let failed = try reply(.object(["error": .string("Text recognition failed.")]))
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: failed, configuration: Self.configuration)
+        #expect(result.readScreenText)
+        #expect(try textChoices(result.packet).isEmpty)
+        guard case .string(let guidance)? = try packetObject(result.packet)["guidance"] else {
+            Issue.record("the packet has no guidance"); return
+        }
+        #expect(guidance.contains("Screen text positions unavailable: Text recognition failed."))
+    }
+
+    @Test
+    func alertRefusalOnTheAfterActionReadGivesTheNoteButStopsTheScreenshot() async throws {
+        let alert = VisionCaptureAgentError.unsupportedSystemInteraction("SYSTEM_ALERT_PRESENT",
+            outcome: VisionCaptureServerOutcome(verdict: "failed", reason: "A system alert is shown. Handle it first.",
+                reasonCode: "SYSTEM_ALERT_PRESENT", dispatchAttempted: false))
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextError: alert, configuration: Self.configuration)
+        guard case .string(let guidance)? = try packetObject(result.packet)["guidance"] else {
+            Issue.record("the packet has no guidance"); return
+        }
+        #expect(guidance.contains("Screen text positions unavailable: SYSTEM_ALERT_PRESENT: A system alert is shown."))
+        // An identity mismatch still stops the run after an action; the screenshot keeps the alert fatal.
+        #expect(throws: VisionCaptureAgentError.self) {
+            try VisionCaptureToolLoop.screenTextReadFailure(VisionCaptureAgentError.sessionIdentityMismatch, afterAction: true)
+        }
+        #expect(throws: VisionCaptureAgentError.self) {
+            try VisionCaptureToolLoop.screenTextReadFailure(alert, afterAction: false)
+        }
+    }
+
+    @Test
+    func statusBarTextIsNotOffered() async throws {
+        // The clock at y_norm 39 is system UI; a word at y_norm 60 belongs to the app.
+        #expect(VisionCaptureToolLoop.screenTextBlocksToOffer([
+            .init(text: "15:36", xNorm: 133, yNorm: 39), .init(text: "Inbox", xNorm: 500, yNorm: 60),
+            .init(text: "Edge", xNorm: 500, yNorm: 50), .init(text: "Below", xNorm: 500, yNorm: 51),
+        ], knownElements: []) == [.init(text: "Inbox", xNorm: 500, yNorm: 60), .init(text: "Below", xNorm: 500, yNorm: 51)])
+        // The same through the after-action packet.
+        let ocr = try reply(.object(["blocks": .array([block("15:36", 100, 79, 120, 46), block("Inbox", 440, 134, 120, 46)])]))
+        let result = try await VisionCaptureToolLoop().actionPacketForTesting(
+            read: read([element("agenda", "Agenda", 393, 941)]), signatureBefore: "an-earlier-screen",
+            body: ["screen_changed": .bool(true)], screenTextReply: ocr, configuration: Self.configuration)
+        #expect(try textChoices(result.packet) == ["Inbox (screen text)"])
+    }
+
+    @Test
+    func newWordsAreOfferedAgainAfterAScreenTextTapChangedTheScreen() async throws {
+        let loop = VisionCaptureToolLoop()
+        let screen = read([element("agenda", "Agenda", 393, 941)])
+        // The screenshot offers "March"; the tap on it changes the wheels.
+        let before = try reply(.object(["blocks": .array([block("March", 342, 1600, 164, 39)])]))
+        #expect(try await screenTextLabels(loop, read: screen, ocr: before) == ["March (screen text)"])
+        let after = try reply(.object(["blocks": .array([
+            block("March", 319, 1412, 195, 60), block("2025", 768, 1509, 152, 53),
+        ])]))
+        let result = try await loop.actionPacketForTesting(
+            read: screen, signatureBefore: "screen-text-test", body: ["screen_changed": .bool(true)],
+            screenTextReply: after, configuration: Self.configuration)
+        #expect(try textChoices(result.packet) == ["March (screen text)", "2025 (screen text)"])
+    }
 }
