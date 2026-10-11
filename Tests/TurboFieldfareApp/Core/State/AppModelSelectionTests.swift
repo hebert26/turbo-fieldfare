@@ -377,7 +377,7 @@ struct AppModelSelectionTests {
             Issue.record("Agent request did not publish the host tool turn")
             return
         }
-        #expect(developerPrompt?.contains("VisionCapture") == true)
+        #expect(developerPrompt?.contains("iOS QA agent") == true)
         #expect(tools.map(\.name) == ["visioncapture_navigate"])
         let recordedRequests = recorder.requests
         #expect(recordedRequests.count == 1)

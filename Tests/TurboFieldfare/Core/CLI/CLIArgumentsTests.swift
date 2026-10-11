@@ -71,7 +71,7 @@ import TurboFieldfare
             "--model", "--prompt", "--messages-file", "--max-new", "--max-context",
             "--temperature", "--top-k", "--top-p", "--repetition-penalty",
             "--seed", "--stop", "--quiet", "--expert-cache-slots",
-            "--expert-cache-policy", "--prefill", "--prefill-chunk-tokens",
+            "--expert-cache-policy", "--prefill", "--prefill-chunk-tokens", "--source-integrity",
             "--rdadvise", "--help",
             "--chat-prompt", "--image", "--vision-pack", "--vision-residency",
             "--thinking", "--tools-file", "--show-model-identity", "--video",

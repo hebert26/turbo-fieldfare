@@ -999,6 +999,8 @@ actor VisionCaptureToolLoop {
     #if DEBUG
     /// Tests stand in for the vision pack probe (nil: the real probe).
     private var visionPackCompleteForTesting: Bool?
+    /// Test replies at the host boundary; nil keeps the normal transport path.
+    private var hostRequestForTesting: (@Sendable (JSONValue) async throws -> VisionCaptureMCPResult)?
     #endif
     private var taskCheckpoint = AgentTaskCheckpoint()
     private var checkpointRequestIDs: [UUID] = []
@@ -2443,12 +2445,14 @@ actor VisionCaptureToolLoop {
         if clickResult.isPointerPreCaptureFailureBeforeSubmission {
             return try pointerPreCaptureFailureOutcome(for: intent)
         }
+        let returnedAlert = try Self.optionalReturnedSystemAlert(from: clickResult.value)
+        if let returnedAlert { currentSystemAlert = returnedAlert }
         return try outcome(
             for: intent,
             result: clickResult,
             arguments: clickArguments,
             manifest: AuthorityManifest(),
-            systemAlert: nil,
+            systemAlert: returnedAlert,
             progressed: !clickResult.isError)
     }
 
@@ -2617,6 +2621,7 @@ actor VisionCaptureToolLoop {
     ) async throws -> NavigationOutcome {
         let factsBeforeAction = currentScreenFacts ?? lastInvalidatedScreenFacts
         let signatureBeforeAction = currentScreenSignature ?? lastInvalidatedScreenSignature
+        let returnedAlert = try Self.optionalReturnedSystemAlert(from: result.value)
         let proof = try Self.sanitizedNamedObject(
             "proof", allowedKeys: ["verdict", "verdict_source", "reason_code", "action"],
             in: result.value)
@@ -2636,13 +2641,20 @@ actor VisionCaptureToolLoop {
         }
         let isTap = intent.operation == .tap || intent.operation == .tapCoordinates
         currentManifest = AuthorityManifest()
-        currentSystemAlert = nil
+        currentSystemAlert = returnedAlert
         staleActionConfirmation = nil
         invalidateScreenObservation()
         var afterScreens: [[String: JSONValue]] = []
         try? Self.collectStructuredObjects(named: "after_screen", in: result.value) { afterScreens.append($0) }
         let refreshed: PreparedNavigation
-        if Self.fastHostPath, !result.isError, !afterScreens.isEmpty {
+        if let returnedAlert {
+            // The click reply already observed the native alert. Retain its
+            // strict facts and publish only its existing button actions.
+            refreshed = PreparedNavigation(
+                result: result, arguments: actionArguments ?? .object([:]),
+                manifest: AuthorityManifest(), systemAlert: returnedAlert,
+                screenFacts: Self.returnedScreenFacts(from: result.value))
+        } else if Self.fastHostPath, !result.isError, !afterScreens.isEmpty {
             // VisionCapture already settled and read the screen after the action.
             do {
                 try recordScreenObservation(from: result.value)
@@ -3873,10 +3885,12 @@ actor VisionCaptureToolLoop {
             configuration: configuration, activity: activity)
         let arguments = pointer.arguments
         let result = pointer.result
+        let returnedAlert = try Self.optionalReturnedSystemAlert(from: result.value)
+        if let returnedAlert { currentSystemAlert = returnedAlert }
         let plainOutcome = { [self] in
             try outcome(
                 for: intent, result: result, arguments: arguments,
-                manifest: AuthorityManifest(), systemAlert: nil, progressed: false)
+                manifest: AuthorityManifest(), systemAlert: returnedAlert, progressed: false)
         }
         if result.isError {
             // Nothing was sent. Remember it so the same proposal is not repeated.
@@ -4171,10 +4185,8 @@ actor VisionCaptureToolLoop {
 
         let arguments = makeMCPArguments(
             request: "press system alert button",
-            parameters: [
-                "system_alert_button": .string(selector),
-                "system_alert_digest": .string(alert.contentDigest),
-            ],
+            parameters: VisionCaptureAlertPress.parameters(
+                button: selector, digest: alert.contentDigest),
             configuration: configuration,
             includeFlowSession: false)
         currentManifest = AuthorityManifest()
@@ -4191,14 +4203,76 @@ actor VisionCaptureToolLoop {
             uncertainAlertPress = (alert.contentDigest, selector)
         }
 
-        let observed = try await describeSystemAlert(
-            configuration: configuration,
-            activity: activity)
+        let observed: PreparedNavigation
+        if let proved = try? Self.afterScreenAlert(
+            in: result.value, pressedDigest: alert.contentDigest, deliveryUnknown: deliveryUnknown) {
+            // VisionCapture read the screen after the press, and its alert fact
+            // proves the state the loop's own read would prove: no second read.
+            invalidateScreenObservation()
+            currentManifest = AuthorityManifest()
+            currentSystemAlert = proved.alert
+            if let uncertainAlertPress,
+               proved.alert?.contentDigest != uncertainAlertPress.digest {
+                self.uncertainAlertPress = nil
+            }
+            observed = PreparedNavigation(
+                result: result,
+                arguments: arguments,
+                manifest: AuthorityManifest(),
+                systemAlert: proved.alert)
+        } else {
+            observed = try await describeSystemAlert(
+                configuration: configuration,
+                activity: activity)
+        }
         return try Self.systemAlertPressOutcome(
             intent: intent,
             pressResult: result,
             observed: observed,
             deliveryUnknown: deliveryUnknown)
+    }
+
+    /// What a press reply's after-screen proves about the alert (ADR 0054
+    /// amendment of 9 October). nil: it proves nothing, and the loop's own
+    /// alert read stays.
+    enum AfterScreenAlertProof: Equatable {
+        case alertGone
+        case sameAlert
+    }
+
+    static func afterScreenAlertProof(
+        in pressReply: JSONValue, pressedDigest: String, deliveryUnknown: Bool
+    ) -> AfterScreenAlertProof? {
+        (try? afterScreenAlert(
+            in: pressReply, pressedDigest: pressedDigest, deliveryUnknown: deliveryUnknown))?.proof
+    }
+
+    /// The after-screen counts only when its one alert fact proves the state the
+    /// loop's own read proves: the pressed alert still there (present, the same
+    /// digest, readable) or no alert (present false, SYSTEM_ALERT_NOT_PRESENT).
+    /// Anything else keeps the read: delivery unknown, no after-screen, no alert
+    /// fact in it (the host of 9 October 2026 puts none in a press after-screen;
+    /// its describe read also leaves it out when the alert probe failed), a
+    /// different alert, or an unreadable one.
+    private static func afterScreenAlert(
+        in pressReply: JSONValue, pressedDigest: String, deliveryUnknown: Bool
+    ) throws -> (proof: AfterScreenAlertProof, alert: SystemAlertObservation?)? {
+        guard !deliveryUnknown else { return nil }
+        var facts: [[String: JSONValue]] = []
+        try collectStructuredObjects(named: "after_screen", in: pressReply) { afterScreen in
+            if case .object(let fact)? = afterScreen["system_alert"], !facts.contains(fact) {
+                facts.append(fact)
+            }
+        }
+        guard facts.count == 1, let fact = facts.first else { return nil }
+        if fact["present"] == .bool(false) {
+            return fact["reason_code"] == .string("SYSTEM_ALERT_NOT_PRESENT") ? (.alertGone, nil) : nil
+        }
+        guard fact["content_digest"] == .string(pressedDigest),
+              let alert = try returnedSystemAlert(from: .object(["system_alert": .object(fact)])) else {
+            return nil
+        }
+        return (.sameAlert, alert)
     }
 
     private func reusableReadyManifest(
@@ -4349,6 +4423,9 @@ actor VisionCaptureToolLoop {
         // A new host observation or action ends the preceding packet's image
         // offer, including when transport fails or cancellation interrupts it.
         currentImageObservation = nil
+        #if DEBUG
+        if let hostRequestForTesting { return try await hostRequestForTesting(arguments) }
+        #endif
         checkpointRequestIDs.append(activityID)
         let activityStart = ContinuousClock.now
         await activity(.outgoingRequest(
@@ -5902,6 +5979,17 @@ actor VisionCaptureToolLoop {
         return try authorityManifest(from: object)
     }
 
+    /// Absence is ordinary for pointer replies. Every present fact, including
+    /// a wrongly typed field, follows the existing strict alert parser.
+    private static func optionalReturnedSystemAlert(
+        from root: JSONValue
+    ) throws -> SystemAlertObservation? {
+        var hasAlert = false
+        try collectStructuredObjects(named: "system_alert", in: root) { _ in hasAlert = true }
+        guard hasAlert else { return nil }
+        return try returnedSystemAlert(from: root)
+    }
+
     private static func returnedSystemAlert(
         from root: JSONValue
     ) throws -> SystemAlertObservation? {
@@ -6606,6 +6694,56 @@ actor VisionCaptureToolLoop {
     }
 
     #if DEBUG
+    /// Tests supply replies and observe every actual host request, with no live I/O.
+    func setHostRequestForTesting(
+        _ request: (@Sendable (JSONValue) async throws -> VisionCaptureMCPResult)?
+    ) {
+        hostRequestForTesting = request
+    }
+
+    /// Exercises the two pointer entry paths and the normal next-packet builder.
+    /// A direct tap uses its supplied screen-text position, or an OCR/name position
+    /// from `read` when a selector kind is supplied.
+    func pointerClickPacketForTesting(
+        visual: Bool, selector: String, selectorKind: String? = nil,
+        xNorm: Int, yNorm: Int, read: VisionCaptureMCPResult? = nil,
+        configuration: VisionCaptureAgentConfiguration
+    ) async throws -> (outcome: String, packet: String) {
+        if let read { try recordScreenObservation(from: read.value) }
+        visionPackCompleteForTesting = false
+        let intent = NavigationIntent(
+            operation: visual ? .computerUseClick : .tap, selector: visual ? nil : selector,
+            selectorKind: visual ? nil : selectorKind ?? Self.screenTextSelectorKind,
+            role: visual ? nil : "button", desiredState: nil, text: nil,
+            xNorm: xNorm, yNorm: yNorm, visualIntent: visual ? selector : nil)
+        let result: NavigationOutcome
+        if visual {
+            result = try await performComputerUseClick(intent, configuration: configuration, activity: { _ in })
+        } else {
+            result = try await performDirectNameTap(
+                intent, selector: selector, configuration: configuration, activity: { _ in })
+        }
+        let packet = try decisionPacket(
+            from: result.content,
+            call: AppToolCall(id: "pointer-test", name: "visioncapture_navigate",
+                arguments: .object(["action": .string(intent.operation.rawValue)])),
+            configuration: configuration, images: [])
+        return (result.content, packet.content)
+    }
+
+    /// Executes a choice from the last test packet through the existing intent
+    /// binding and action routing (including the current alert digest).
+    func navigationPacketForTesting(
+        _ arguments: JSONValue, configuration: VisionCaptureAgentConfiguration
+    ) async throws -> (outcome: String, packet: String) {
+        let call = AppToolCall(id: "navigation-test", name: "visioncapture_navigate", arguments: arguments)
+        let intent = try navigationIntent(from: call, configuration: configuration)
+        let result = try await perform(intent, readyOffer: nil, configuration: configuration, activity: { _ in })
+        let packet = try decisionPacket(
+            from: result.content, call: call, configuration: configuration, images: [])
+        return (result.content, packet.content)
+    }
+
     /// Test entry: the screenshot packet for `read` (the image's paired
     /// accessibility read) and `screenTextReply` (the OCR reply), built by the
     /// loop's own observation record, outcome and decision-packet code. Before the

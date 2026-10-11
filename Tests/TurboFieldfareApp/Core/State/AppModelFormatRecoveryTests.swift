@@ -72,13 +72,13 @@ struct AppModelFormatRecoveryTests {
     }
 
     @MainActor
-    @Test func repeatedMalformedOutputStopsAfterOneCorrection() async throws {
-        let client = FormatClient(failures: 2)
+    @Test func repeatedMalformedOutputStopsAfterTwoCorrections() async throws {
+        let client = FormatClient(failures: 3)
         let model = readyModel(client)
         model.run()
         try await finish(model)
-        #expect(client.requests.count == 2)
-        #expect(model.error?.userMessage.contains("after one format correction") == true)
+        #expect(client.requests.count == 3)
+        #expect(model.error?.userMessage.contains("after two format corrections") == true)
         #expect(model.conversation.committedTurns == 0)
         #expect(!model.outputAgentActivities.contains { $0.kind == .mcpRequest })
     }

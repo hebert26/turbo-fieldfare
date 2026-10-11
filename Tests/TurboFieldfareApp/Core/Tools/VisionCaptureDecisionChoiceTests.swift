@@ -547,6 +547,102 @@ import TurboFieldfare
             result(code: "TARGET_UNAVAILABLE", dispatch: rejected)))
     }
 
+    @Test
+    func bothPointerEntryPathsPublishOnlyTheReturnedAlertButtons() async throws {
+        for visual in [false, true] {
+            let recorder = RequestRecorder()
+            let loop = VisionCaptureToolLoop()
+            await loop.setHostRequestForTesting(Self.hostReplies(recorder: recorder, alert: Self.alert()))
+            let result = try await loop.pointerClickPacketForTesting(
+                visual: visual, selector: visual ? "Allow" : "OCR choice", xNorm: 500, yNorm: 400,
+                configuration: Self.configuration)
+            let packet = try Self.object(result.packet)
+            let choices = Self.array(packet["choices"])
+            #expect(choices.count == 2)
+            #expect(choices.allSatisfy { $0.objectValue?["role"] == .string("system_alert_button") })
+            #expect(Set(choices.compactMap { Self.string($0.objectValue?["label"]) }) == ["Allow", "Don't Allow"])
+            #expect(packet["observation"]?.objectValue?["system_alert"]?.objectValue?["title"]
+                == .string("Allow notifications?"))
+            #expect(try Self.object(result.outcome)["proof"]?.objectValue?["verdict"] == .string("verified"))
+            #expect(recorder.requests.filter { $0 == "describe screen" || $0 == "describe system alert" }.isEmpty)
+            #expect(recorder.requests.contains("click pointer"))
+        }
+    }
+
+    @Test
+    func alertButtonUsesThePublishedDigestAndPreservesClickProof() async throws {
+        let recorder = RequestRecorder()
+        let loop = VisionCaptureToolLoop()
+        await loop.setHostRequestForTesting(Self.hostReplies(recorder: recorder, alert: Self.alert()))
+        let click = try await loop.pointerClickPacketForTesting(
+            visual: false, selector: "OCR choice", xNorm: 500, yNorm: 400, configuration: Self.configuration)
+        let clickPacket = try Self.object(click.packet)
+        let allowChoice = try #require(Self.array(clickPacket["choices"]).first {
+            $0.objectValue?["label"] == .string("Allow")
+        })
+        let allowID = try #require(Self.string(allowChoice.objectValue?["id"]))
+        let pressed = try await loop.navigationPacketForTesting(
+            .object(["action": .string("tap"), "target": .string(allowID)]), configuration: Self.configuration)
+        let request = recorder.requests.last
+        #expect(request == "press system alert button")
+        #expect(recorder.digests.last == "digest-task-34")
+        let clickBody = try Self.object(click.outcome)
+        #expect(clickBody["proof"]?.objectValue?["verdict"] == .string("verified"))
+        #expect(clickBody["proof"]?.objectValue?["reason_code"] == .string("CLICK_EFFECT_VERIFIED"))
+        #expect(clickBody["delivery_acknowledged"] == .bool(true))
+        #expect(try Self.object(pressed.outcome)["proof"]?.objectValue?["verdict"] == .string("verified"))
+    }
+
+    @Test
+    func noReturnedAlertKeepsTheExistingOutcomeAndDoesNotReadAgain() async throws {
+        let recorder = RequestRecorder()
+        let loop = VisionCaptureToolLoop()
+        await loop.setHostRequestForTesting(Self.hostReplies(recorder: recorder, alert: nil, includeAfterScreen: true))
+        let result = try await loop.pointerClickPacketForTesting(
+            visual: false, selector: "OCR choice", xNorm: 500, yNorm: 400, configuration: Self.configuration)
+        let packet = try Self.object(result.packet)
+        #expect(packet["observation"]?.objectValue?["system_alert"] == nil)
+        #expect(try Self.object(result.outcome)["system_alert"] == nil)
+        #expect(Self.array(packet["choices"]).isEmpty)
+        #expect(try Self.object(result.outcome)["proof"]?.objectValue?["verdict"] == .string("verified"))
+        #expect(recorder.requests.filter { $0 == "describe screen" || $0 == "describe system alert" }.isEmpty)
+    }
+
+    @Test
+    func malformedConflictingOwnedAmbiguousAndUnreadableAlertsRemainErrors() async throws {
+        let malformed: [JSONValue] = [
+            .object(["present": .bool(true), "title": .string("Incomplete")]),
+            .object(["present": .bool(true), "title": .string("Owned"), "owner_is_app_under_test": .bool(true)]),
+            .object(["present": .bool(false), "reason_code": .string("SYSTEM_ALERT_AMBIGUOUS")]),
+            .object(["present": .bool(false), "reason_code": .string("SYSTEM_ALERT_UNREADABLE")]),
+            .object(["present": .bool(true), "title": .string("Unreadable"),
+                     "content_digest": .string("d"), "buttons": .array([])]),
+            .object(["present": .string("true")]),
+            .string("not-an-object"),
+        ]
+        for alert in malformed {
+            let loop = VisionCaptureToolLoop()
+            await loop.setHostRequestForTesting(Self.hostReplies(recorder: RequestRecorder(), alert: alert))
+            await #expect(throws: VisionCaptureAgentError.self) {
+                _ = try await loop.pointerClickPacketForTesting(
+                    visual: true, selector: "Tap", xNorm: 500, yNorm: 400, configuration: Self.configuration)
+            }
+        }
+    }
+
+    @Test
+    func conflictingReturnedAlertFactsAreNotSilentlyDiscarded() async throws {
+        let recorder = RequestRecorder()
+        let loop = VisionCaptureToolLoop()
+        await loop.setHostRequestForTesting(Self.hostReplies(
+            recorder: recorder, alert: Self.alert(), secondAlert: Self.alert(digest: "other-digest")))
+        await #expect(throws: VisionCaptureAgentError.self) {
+            _ = try await loop.pointerClickPacketForTesting(
+                visual: false, selector: "OCR choice", xNorm: 500, yNorm: 400, configuration: Self.configuration)
+        }
+        #expect(recorder.requests.contains("click pointer"))
+    }
+
     private static func field(
         id: String?, label: String, identifier: String, x: Int, y: Int
     ) -> JSONValue {
@@ -584,5 +680,101 @@ import TurboFieldfare
 
     private static func position(x: Int, y: Int) -> JSONValue {
         .object(["x_norm": .integer(Int64(x)), "y_norm": .integer(Int64(y))])
+    }
+
+    private static let configuration = VisionCaptureAgentConfiguration(
+        bundleIdentifier: "com.example.app", simulatorUDID: "00000000-0000-0000-0000-000000000001",
+        modelDirectory: URL(fileURLWithPath: "/tmp/visioncapture-test-model.gturbo"))
+
+    private static func alert(digest: String = "digest-task-34") -> JSONValue {
+        .object([
+            "present": .bool(true), "title": .string("Allow notifications?"),
+            "content_digest": .string(digest),
+            "buttons": .array([
+                .object(["label": .string("Allow"), "enabled": .bool(true), "visible": .bool(true)]),
+                .object(["label": .string("Don't Allow"), "enabled": .bool(true), "visible": .bool(true)]),
+                .object(["label": .string("Disabled"), "enabled": .bool(false), "visible": .bool(true)]),
+                .object(["label": .string("Hidden"), "enabled": .bool(true), "visible": .bool(false)]),
+                .object(["label": .string("Duplicate"), "enabled": .bool(true), "visible": .bool(true)]),
+                .object(["label": .string("Duplicate"), "enabled": .bool(true), "visible": .bool(true)]),
+            ]),
+        ])
+    }
+
+    private static func hostReplies(
+        recorder: RequestRecorder, alert: JSONValue?, secondAlert: JSONValue? = nil,
+        includeAfterScreen: Bool = false
+    ) -> @Sendable (JSONValue) async throws -> VisionCaptureMCPResult {
+        { arguments in
+            let request = Self.string(arguments.objectValue?["request"]) ?? ""
+            recorder.record(request: request, arguments: arguments)
+            if request == "activate computer use" {
+                return Self.result(.object([
+                    "computer_use_task_id": .string("00000000-0000-0000-0000-000000000034"),
+                    "computer_use_generation": .integer(1),
+                ]))
+            }
+            if request == "hide pointer" { return Self.result(.object([:])) }
+            var value: [String: JSONValue] = [
+                "proof": .object([
+                    "verdict": .string("verified"), "reason_code": .string("CLICK_EFFECT_VERIFIED"),
+                    "action": .string("click"),
+                ]),
+                "dispatch": .object([
+                    "submission_started": .bool(true), "delivery_acknowledged": .bool(true),
+                ]),
+            ]
+            if request == "click pointer", includeAfterScreen {
+                value["after_screen"] = .object([:])
+            }
+            if let alert {
+                value["system_alert"] = alert
+                if let secondAlert { value["payload"] = .object(["system_alert": secondAlert]) }
+            }
+            if request == "press system alert button" {
+                value["system_alert_tap"] = .object(["submission": .string("submitted_once")])
+                if let alert { value["after_screen"] = .object(["system_alert": alert]) }
+            }
+            return Self.result(.object(value))
+        }
+    }
+
+    private static func result(_ value: JSONValue) -> VisionCaptureMCPResult {
+        VisionCaptureMCPResult(
+            value: value, isError: false, refusalCode: nil, dispatchAttempted: true,
+            hasConflictingDispatchAttemptEvidence: false, isGuardedTargetRejectedBeforeSubmission: false,
+            isStaleActionCapabilityBeforeDispatch: false, isSourceLayoutChangedBeforeRevalidation: false,
+            isActionAuthorizationExpiredBeforeDispatch: false, isObservedTapTargetUnavailableBeforeDispatch: false,
+            isDeliveredTransitionContinuation: false, isPointerPreCaptureFailureBeforeSubmission: false)
+    }
+
+    private static func object(_ value: String) throws -> [String: JSONValue] {
+        try JSONDecoder().decode(JSONValue.self, from: Data(value.utf8)).objectValue ?? [:]
+    }
+
+    private static func array(_ value: JSONValue?) -> [JSONValue] {
+        guard case .array(let values)? = value else { return [] }
+        return values
+    }
+
+    private static func string(_ value: JSONValue?) -> String? {
+        guard case .string(let text)? = value else { return nil }
+        return text
+    }
+
+    private final class RequestRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private(set) var requests: [String] = []
+        private(set) var digests: [String] = []
+
+        func record(request: String, arguments: JSONValue) {
+            lock.lock(); defer { lock.unlock() }
+            requests.append(request)
+            if request == "press system alert button",
+               let digest = VisionCaptureDecisionChoiceTests.string(
+                   arguments.objectValue?["parameters"]?.objectValue?["system_alert_digest"]) {
+                digests.append(digest)
+            }
+        }
     }
 }

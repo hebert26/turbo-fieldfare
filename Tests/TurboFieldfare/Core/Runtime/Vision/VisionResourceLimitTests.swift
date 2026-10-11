@@ -214,11 +214,12 @@ import Testing
             let candidate = directory
                 .appendingPathComponent("scratch")
                 .appendingPathComponent("gemma4.gturbo")
+            let resolvedCandidate = candidate.resolvingSymlinksInPath()
             if let companion = try? VisionPackLocation.companionURL(
-                forTextModel: candidate),
-               manager.fileExists(atPath: candidate.path),
+                forTextModel: resolvedCandidate),
+               manager.fileExists(atPath: resolvedCandidate.path),
                manager.fileExists(atPath: companion.path) {
-                return candidate
+                return resolvedCandidate
             }
             directory = directory.deletingLastPathComponent()
         }

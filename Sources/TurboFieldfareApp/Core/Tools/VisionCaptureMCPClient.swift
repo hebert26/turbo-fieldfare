@@ -195,6 +195,19 @@ enum VisionCapturePointerClick {
     }
 }
 
+/// The loop's `press system alert button` request. It asks VisionCapture for the
+/// screen after the press (ADR 0054 amendment of 9 October): when the reply's
+/// `after_screen` proves the alert state, it replaces the loop's own alert read.
+enum VisionCaptureAlertPress {
+    static func parameters(button: String, digest: String) -> [String: JSONValue] {
+        [
+            "system_alert_button": .string(button),
+            "system_alert_digest": .string(digest),
+            "include_after_screen": .bool(true),
+        ]
+    }
+}
+
 enum VisionCaptureMCPError: Error, CustomStringConvertible {
     case invalidProtocol
     case executeUnavailable
