@@ -612,6 +612,29 @@ actor AgentInferenceTrace {
 
     func currentStep() -> Step? { latestStep }
 
+    func lessonsWritten(family: AgentLessonFamily, status: AgentLessonStatus, count: Int) {
+        append(step: latestStep, event: "lessons_written", body: [
+            "family": .string(family.rawValue), "status": .string(status.rawValue),
+            "count": Self.integer(count),
+        ])
+    }
+
+    func lessonsRetrieved(families: [AgentLessonFamily], tokenCount: Int) {
+        append(step: latestStep, event: "lessons_retrieved", body: [
+            "families": .array(families.map { .string($0.rawValue) }),
+            // UTF-8 bytes bound tokenizer usage conservatively, including the heading.
+            "token_count": Self.integer(tokenCount),
+        ])
+    }
+
+    func lessonsEncoderMissing() {
+        append(step: latestStep, event: "lessons_encoder_missing", body: [:])
+    }
+
+    func lessonsStoreError() {
+        append(step: latestStep, event: "lessons_store_error", body: [:], maximumBytes: 512)
+    }
+
     /// Local one-use diagnostic, available only when an explicit trace opened.
     /// Claim the pathname first, then validate and read that exact descriptor.
     /// Invalid files are restored where possible, never silently discarded.

@@ -1,0 +1,25 @@
+{# Synthetic test framing, not the model template. Keep tool boundaries and image placeholders intact. #}
+{{- bos_token -}}
+{%- for message in messages -%}
+    {%- if message['role'] == 'tool' -%}
+        {{- '<|tool_response>' + message['name'] + ':' -}}
+        {%- if message['content'] is string -%}
+            {{- message['content'] -}}
+        {%- else -%}
+            {%- for part in message['content'] -%}
+                {%- if part['type'] == 'text' -%}{{- part['text'] -}}
+                {%- elif part['type'] == 'image' -%}{{- '<|image|>' -}}
+                {%- endif -%}
+            {%- endfor -%}
+        {%- endif -%}
+        {{- '<tool_response|>' -}}
+        {%- if not loop.last -%}{{- '<|channel>thought\n<channel|>' -}}{%- endif -%}
+    {%- elif message['role'] == 'assistant' -%}
+        {%- for tool_call in message['tool_calls'] -%}
+            {{- '<|tool_call>call:' + tool_call['function']['name'] + '{}<tool_call|>' -}}
+        {%- endfor -%}
+    {%- else -%}
+        {{- '<|turn>' + message['role'] + '\n' + message['content'] + '<turn|>\n' -}}
+        {{- '<|turn>model\n<|channel>thought\n<channel|>' -}}
+    {%- endif -%}
+{%- endfor -%}

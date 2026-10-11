@@ -3225,6 +3225,9 @@ public final class DecodeServiceInferenceClient: AppModelLifecycleClient,
     /// Per-job trial opt-in only. No process-wide or launchd environment writes.
     static func launchEnvironment(environment: [String: String], thinking: Bool) -> [String: String] {
         var result = ["TURBOFIELDFARE_AGENT_THINKING": thinking ? "1" : "0"]
+        if let mode = environment["TURBOFIELDFARE_AGENT_LESSONS"], ["text", "embedding"].contains(mode) {
+            result["TURBOFIELDFARE_AGENT_LESSONS"] = mode
+        }
         if environment["TURBO_QWEN_GPU_LINEAR_PREPARATION"] == "1" {
             result["TURBO_QWEN_GPU_LINEAR_PREPARATION"] = "1"
         }

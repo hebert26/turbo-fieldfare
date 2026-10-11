@@ -1577,15 +1577,20 @@ actor VisionCaptureToolLoop {
                 try taskCheckpoint.appendSettled(call: call, result: settledResult,
                     outcome: executionOutcome, target: historicalTarget, requestIDs: checkpointRequestIDs,
                     session: checkpointSessionReference, origin: executionOrigin)
+                await AgentLessonLoopBridge.shared?.settle(
+                    call: call, result: settledResult, outcome: executionOutcome,
+                    owner: ObjectIdentifier(self), run: conversationEpoch, instruction: userPrompt,
+                    target: configuration.targetKey, session: checkpointSessionReference)
             }
             if executionOrigin == "user_instruction_before_dispatch" {
                 // This race has the same terminal instruction boundary as a
                 // proposal suppressed immediately after model completion.
                 throw CancellationError()
             }
-            next = .results([settledResult])
+            let advisedResult = await AgentLessonLoopBridge.shared?.advising(settledResult) ?? settledResult
+            next = .results([advisedResult])
             retryBoundary = isHistoryRead ? nil : GenerationRetryBoundary(
-                call: call, result: settledResult, outcome: executionOutcome,
+                call: call, result: advisedResult, outcome: executionOutcome,
                 session: committedSessionIdentity)
             if let checkpoint {
                 let force = await forceCheckpoint()

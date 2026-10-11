@@ -203,7 +203,8 @@ let package = Package(
                 "TurboFieldfareAppCore", "TurboFieldfare", "TurboFieldfareRepackCore",
                 "TurboFieldfareDecodeProtocol", "TurboFieldfareOfficialQwenSource",
             ],
-            path: "Tests/TurboFieldfareApp/Core"
+            path: "Tests/TurboFieldfareApp/Core",
+            resources: [.copy("Tools/Fixtures/lesson-tokenizer")]
         ),
         .testTarget(
             name: "TurboFieldfareDecodeServiceTests",

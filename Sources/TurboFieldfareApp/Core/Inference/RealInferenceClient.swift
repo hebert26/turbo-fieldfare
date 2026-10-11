@@ -2097,6 +2097,38 @@ actor RealInferenceSession {
         return created
     }
 
+    /// Shared production handoff; injected environment makes flag forwarding
+    /// testable without loading a model or mutating the process environment.
+    static func sendToolResults(
+        _ results: [AppToolResult], conversation: MultimodalConversation,
+        config: GenerationConfig,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        prefillConfig: PrefillRuntimeConfig = .defaultChunked,
+        checkCancellation: @escaping @Sendable () throws -> Void = {},
+        shouldStop: (@Sendable () -> Bool)? = nil,
+        acceptsUnknownToolNames: Bool = false,
+        captureToolFailureEvidence: Bool = false,
+        maximumConsecutiveInvisibleTokens: Int? = nil,
+        captureThoughtPreview: Bool = false,
+        detectThoughtRepetition: Bool = false,
+        onProgress: (@Sendable (RawDecodeProgress) -> Void)? = nil,
+        onStructuredProgress: (@Sendable (StructuredAssistantProgress) -> Void)? = nil
+    ) async throws -> StructuredConversationTurnResult {
+        try await conversation.sendToolResults(
+            results.map {
+                ConversationToolResult(callID: $0.callID, name: $0.name, content: $0.content,
+                    images: $0.imageAttachments.map(\.fileURL))
+            },
+            config: config,
+            replacingToolResultFields: AgentLessonLoopBridge.contextReplacementFields(environment: environment),
+            prefillConfig: prefillConfig, checkCancellation: checkCancellation, shouldStop: shouldStop,
+            acceptsUnknownToolNames: acceptsUnknownToolNames,
+            captureToolFailureEvidence: captureToolFailureEvidence,
+            maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
+            captureThoughtPreview: captureThoughtPreview, detectThoughtRepetition: detectThoughtRepetition,
+            onProgress: onProgress, onStructuredProgress: onStructuredProgress)
+    }
+
     private func runConversationTurn(
         request: AppGenerationRequest,
         prefillConfig: PrefillRuntimeConfig,
@@ -2168,14 +2200,8 @@ actor RealInferenceSession {
                 turn = completion.turn
                 toolCalls = completion.toolCalls
             case .results(let results):
-                let completion = try await conversation.sendToolResults(
-                    results.map {
-                        ConversationToolResult(
-                            callID: $0.callID,
-                            name: $0.name,
-                            content: $0.content,
-                            images: $0.imageAttachments.map(\.fileURL))
-                    },
+                let completion = try await Self.sendToolResults(
+                    results, conversation: conversation,
                     config: config,
                     prefillConfig: prefillConfig,
                     checkCancellation: { try Task.checkCancellation() },
