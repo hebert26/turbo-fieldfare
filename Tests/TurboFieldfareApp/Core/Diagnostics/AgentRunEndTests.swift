@@ -89,6 +89,35 @@ import TurboFieldfareDecodeProtocol
     }
 
     @Test
+    func traceRecordsRenewedPreviousProposalRefusedOnSwitchWhileOn() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("thinking-refusal-renewal-" + UUID().uuidString + ".jsonl").path
+        defer { try? FileManager.default.removeItem(atPath: path) }
+        let trace = try #require(AgentInferenceTrace.forTesting(path: path))
+        let epoch = UUID()
+        func request(turnIndex: Int) -> AppGenerationRequest {
+            AppGenerationRequest(
+                modelDirectory: URL(fileURLWithPath: "/tmp/fixture-model"), prompt: "fixture",
+                runtimeOptions: AppRuntimeOptions(toolThinkingEnabled: true),
+                continuesConversation: turnIndex > 0, conversationTokens: 1,
+                conversationEpoch: epoch, turnIndex: turnIndex,
+                toolTurn: turnIndex == 0
+                    ? .user(developerPrompt: nil, tools: [])
+                    : .results([]))
+        }
+        _ = await trace.begin(request(turnIndex: 0), thinkingReason: "tool_result_error")
+        _ = await trace.begin(request(turnIndex: 1), thinkingReason: "previous_proposal_refused")
+        let lines = try String(contentsOfFile: path, encoding: .utf8).split(separator: "\n")
+        let switches = lines.compactMap { line -> JSONValue? in
+            try? JSONDecoder().decode(JSONValue.self, from: Data(line.utf8))
+        }.filter { $0.objectValue?["event"] == .string("thinking_switch") }
+        #expect(switches.count == 2)
+        #expect(switches[0].objectValue?["reason"] == .string("tool_result_error"))
+        #expect(switches[1].objectValue?["enabled"] == .bool(true))
+        #expect(switches[1].objectValue?["reason"] == .string("previous_proposal_refused"))
+    }
+
+    @Test
     func thoughtRecoveryKeepsInternalReasonAndMapsTraceReason() async throws {
         let path = FileManager.default.temporaryDirectory
             .appendingPathComponent("thinking-recovery-" + UUID().uuidString + ".jsonl").path
@@ -312,6 +341,27 @@ import TurboFieldfareDecodeProtocol
         if !source.counterfactual {
             #expect(source.selection.reason == Self.expectedTrigger(for: testCase.entry))
         }
+        if testCase.entry == .unknownToolCorrection {
+            guard case .results(let results) = source.turn, results.count == 1,
+                  let result = results.first else {
+                Issue.record("The unknown-tool correction must retain one settled result turn")
+                return
+            }
+            #expect(source.selection == AgentThinkingSelection(
+                enabled: true, reason: "previous_proposal_refused"))
+            #expect(result.name == "task_future_unknown")
+            #expect(result.imageAttachments.count == 1)
+            let packet: JSONValue
+            do {
+                packet = try JSONDecoder().decode(JSONValue.self, from: Data(result.content.utf8))
+            } catch {
+                Issue.record("The unknown-tool refusal packet must remain valid JSON: \(error)")
+                return
+            }
+            #expect(packet.objectValue?["last_action"]?.objectValue?["verdict"] == .string("not_sent"))
+            #expect(packet.objectValue?["last_action"]?.objectValue?["dispatch_attempted"] != .bool(true))
+            #expect(packet.objectValue?["observation"]?.objectValue?["current_image_evidence"] == .bool(true))
+        }
         if testCase.entry == .navigationResults || testCase.entry == .noVisionPackResult {
             guard case .results(let results) = source.turn, results.count == 1 else {
                 Issue.record("The successful navigation prelude must retain one result packet")
@@ -454,11 +504,24 @@ import TurboFieldfareDecodeProtocol
         default:
             swipeVerdicts = ["failed"]
         }
-        let host = VisionCaptureThinkingPolicyTests.HostFixture(failedSwipeOrdinal: failedOrdinal,
-            deliveryUnknownSwipeOrdinal: unknownOrdinal,
-            swipeVerdicts: swipeVerdicts)
+        let hostReply: @Sendable (JSONValue) async throws -> VisionCaptureMCPResult
+        if entry == .unknownToolCorrection {
+            let host = Task43AgentRunHostFixture()
+            hostReply = { arguments in try await host.reply(arguments) }
+        } else {
+            let host = VisionCaptureThinkingPolicyTests.HostFixture(
+                failedSwipeOrdinal: failedOrdinal,
+                deliveryUnknownSwipeOrdinal: unknownOrdinal,
+                swipeVerdicts: swipeVerdicts)
+            hostReply = { arguments in try await host.reply(arguments) }
+        }
         await loop.setFlowSessionForTesting("flow-35")
-        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        await loop.setHostRequestForTesting { arguments in try await hostReply(arguments) }
+        if entry == .unknownToolCorrection {
+            _ = try await loop.actionPacketForTesting(
+                operation: "observe", read: nil, body: [:], visionPackComplete: true,
+                configuration: VisionCaptureThinkingPolicyTests.configuration, commitTarget: true)
+        }
         let captured = AgentRunMutex<MatrixTurnSource?>(nil)
         let requests = AgentRunMutex(0)
         let forceCheckpoint = AgentRunMutex(false)
@@ -549,9 +612,14 @@ import TurboFieldfareDecodeProtocol
                         }
                         return VisionCaptureThinkingPolicyTests.finalCompletion(thinking: selection.enabled)
                     case .unknownToolCorrection:
-                        if index <= 2 {
+                        if index == 1 {
                             return VisionCaptureThinkingPolicyTests.completion(
-                                call: VisionCaptureThinkingPolicyTests.unknownCall("matrix-unknown-\(index)"),
+                                call: VisionCaptureThinkingPolicyTests.observeCall("matrix-unknown-setup"),
+                                thinking: selection.enabled)
+                        }
+                        if index == 2 {
+                            return VisionCaptureThinkingPolicyTests.completion(
+                                call: VisionCaptureThinkingPolicyTests.unknownCall("matrix-unknown-refusal"),
                                 thinking: selection.enabled)
                         }
                         return VisionCaptureThinkingPolicyTests.finalCompletion(thinking: selection.enabled)
@@ -595,8 +663,10 @@ import TurboFieldfareDecodeProtocol
         case .openingUser: return "no_tool_call"
         case .checkpoint: return "tool_proof_failed"
         case .navigationResults, .noVisionPackResult: return "no_tool_call"
-        case .localHistoryResults, .repeatedObserveResults, .unknownToolCorrection:
+        case .localHistoryResults, .repeatedObserveResults:
             return "repeated_tool_call"
+        case .unknownToolCorrection:
+            return "previous_proposal_refused"
         case .guardedRefusalResult, .deliveryUnknown: return "tool_result_error"
         case .observationRefusal, .staleRecovery, .textContextCapacity, .retainedImageCapacity,
              .supplementaryReadFailure, .supplementaryCaptureFailure:
@@ -766,5 +836,65 @@ private final class AgentRunMutex<Value>: @unchecked Sendable {
     func withLock<Result>(_ body: (inout Value) -> Result) -> Result {
         lock.lock(); defer { lock.unlock() }
         return body(&value)
+    }
+}
+
+private final class Task43AgentRunHostFixture: @unchecked Sendable {
+    func reply(_ arguments: JSONValue) async throws -> VisionCaptureMCPResult {
+        let request: String
+        if case .string(let value)? = arguments.objectValue?["request"] { request = value }
+        else { request = "" }
+        switch request {
+        case "take a screenshot":
+            return try Self.screenshot()
+        case "describe system alert":
+            return Self.result(.object(["system_alert": .object(["present": .bool(false)])]))
+        default:
+            return Self.result(.object([
+                "view": .object([
+                    "signature_coarse": .string("task-43-agent-run-screen-coarse"),
+                    "signature_fine": .string("task-43-agent-run-screen"),
+                ]),
+                "elements": .array([
+                    .object([
+                        "element_id": .string("task-43-visible-button"),
+                        "role": .string("button"),
+                        "type": .string("XCUIElementTypeButton"),
+                        "label": .string("Visible action"),
+                        "visible": .bool(true), "enabled": .bool(true),
+                        "x_norm": .integer(500), "y_norm": .integer(500),
+                    ]),
+                ]),
+            ]))
+        }
+    }
+
+    private static func screenshot() throws -> VisionCaptureMCPResult {
+        let metadata = try JSONValue.object([
+            "udid": .string(VisionCaptureThinkingPolicyTests.configuration.simulatorUDID),
+            "width": .integer(1), "height": .integer(1),
+            "ocr": .object(["blocks": .array([])]),
+        ]).encoded()
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        return Self.result(.object(["content": .array([
+            .object([
+                "type": .string("image"), "mimeType": .string("image/png"),
+                "data": .string(png),
+            ]),
+            .object(["type": .string("text"), "text": .string(metadata)]),
+        ])]))
+    }
+
+    private static func result(_ value: JSONValue) -> VisionCaptureMCPResult {
+        VisionCaptureMCPResult(
+            value: value, isError: false, refusalCode: nil, dispatchAttempted: nil,
+            hasConflictingDispatchAttemptEvidence: false,
+            isGuardedTargetRejectedBeforeSubmission: false,
+            isStaleActionCapabilityBeforeDispatch: false,
+            isSourceLayoutChangedBeforeRevalidation: false,
+            isActionAuthorizationExpiredBeforeDispatch: false,
+            isObservedTapTargetUnavailableBeforeDispatch: false,
+            isDeliveredTransitionContinuation: false,
+            isPointerPreCaptureFailureBeforeSubmission: false)
     }
 }

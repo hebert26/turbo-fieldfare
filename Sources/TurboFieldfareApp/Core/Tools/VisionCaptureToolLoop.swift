@@ -1651,10 +1651,8 @@ actor VisionCaptureToolLoop {
                     let rejectedTarget = Self.expiredProposalTarget(call: call, error: error)
                     // Check before retiring a confirmation. Declining it must
                     // not turn a refusal into eligibility for extra observation.
-                    let maySupportRejectedTarget = rejectedTarget != nil
-                        && canProvideRejectedTargetVisualRecovery(configuration: configuration)
-                    let maySupportCoordinateImage = error == .navigationUnavailable(Self.coordinateEvidenceReason)
-                        && canProvideRejectedTargetVisualRecovery(configuration: configuration)
+                    let maySupportRejectedProposal = canProvideRejectedTargetVisualRecovery(
+                        configuration: configuration, allowCurrentImageRefresh: true)
                     // A correction declines the one confirming offer. Retiring only
                     // its public ID would let a later observation revive the attempt.
                     try retirePendingConfirmation()
@@ -1690,40 +1688,53 @@ actor VisionCaptureToolLoop {
                     if rejectedTarget != nil, rejection.count == 2 {
                         content = try Self.addingRepeatedTargetCorrection(to: content)
                     }
-                    let supportBoundary: VisualRecoveryBoundary? =
-                        rejectedTarget != nil && rejection.count == 2 && maySupportRejectedTarget
+                    let supportBoundary: VisualRecoveryBoundary =
+                        rejectedTarget != nil && rejection.count == 2
                             ? .repeatedTargetRejection
-                            : (maySupportCoordinateImage ? .coordinateWithoutImage : nil)
-                    if let supportBoundary,
+                            : (error == .navigationUnavailable(Self.coordinateEvidenceReason)
+                                ? .coordinateWithoutImage : .proposalRejection)
+                    let originalPacket = content
+                    try Task.checkCancellation()
+                    try configuration.validate()
+                    if let committedTargetKey,
+                       committedTargetKey != configuration.targetKey {
+                        throw VisionCaptureAgentError.identityMismatch
+                    }
+                    if maySupportRejectedProposal,
                        Self.hasVisualRecoveryCapacity(maxContextTokens: maxContextTokens,
-                           retainedTokens: completion.diagnostics.conversationTokens,
-                           packetBytes: content.utf8.count, packetCopies: 2) {
-                        let originalPacket = content
+                            retainedTokens: completion.diagnostics.conversationTokens,
+                            packetBytes: content.utf8.count, packetCopies: 2) {
                         do {
                             let support = try await provideVisualRecovery(
                                 originalPacket: originalPacket, originalOutcome: failure,
                                 call: call, boundary: supportBoundary,
                                 configuration: configuration, maxContextTokens: maxContextTokens,
                                 retainedTokens: completion.diagnostics.conversationTokens,
-                                excludingTargetID: rejectedTarget,
-                                activity: activity)
-                            content = support.content
-                            images = support.images
-                            executionOutcome = support.outcome
-                            executionOrigin = "model_rejected_with_host_read_only_visual_support"
-                            localProposals.preserveRejections(
-                                afterHostObservation: currentScreenContentIdentity)
-                            // This support is not a model observation or progress.
-                            // Neither read-only counter nor its one-use latch resets.
-                        } catch {
-                            try taskCheckpoint.appendSettled(call: call,
-                                result: AppToolResult(callID: call.id, name: call.name,
-                                    content: originalPacket),
-                                outcome: failure, target: historicalTarget,
-                                requestIDs: checkpointRequestIDs, session: checkpointSessionReference,
-                                origin: "model_rejected_before_host_visual_support_stopped")
+                                excludingTargetID: rejectedTarget, activity: activity)
+                            if support.images.count == 1 {
+                                content = support.content
+                                images = support.images
+                                executionOutcome = support.outcome
+                                executionOrigin = "model_rejected_with_host_read_only_visual_support"
+                            }
+                        } catch is CancellationError {
+                            throw CancellationError()
+                        } catch let error as VisionCaptureAgentError
+                            where Self.isVisualRecoverySafetyError(error) {
                             throw error
+                        } catch let error as VisionImageError {
+                            if case .invalidSource(let detail) = error,
+                               detail == "Screenshot belongs to a different simulator device." {
+                                throw error
+                            }
+                            try Task.checkCancellation()
+                        } catch {
+                            try Task.checkCancellation()
                         }
+                        localProposals.preserveRejections(
+                            afterHostObservation: currentScreenContentIdentity)
+                        // Failed support keeps the original text correction. Extra
+                        // observation is not progress and cannot reset refusals.
                     }
                 }
             }
@@ -1749,8 +1760,12 @@ actor VisionCaptureToolLoop {
             // packet projects it into last_action and current choices.
             let resultJSON = (try? JSONDecoder().decode(JSONValue.self,
                 from: Data(executionOutcome.utf8)))?.objectValue
+            let previousProposalRefused = resultJSON?["outcome"] == .string("not_sent")
+                && resultJSON?["recoverable"] == .bool(true)
             let nextThinkingReason: String?
-            if resultJSON?["is_error"] == .bool(true) {
+            if previousProposalRefused {
+                nextThinkingReason = "previous_proposal_refused"
+            } else if resultJSON?["is_error"] == .bool(true) {
                 nextThinkingReason = "tool_result_error"
             } else if resultJSON?["proof"]?.objectValue?["verdict"] == .string("failed") {
                 nextThinkingReason = "tool_proof_failed"
@@ -1761,8 +1776,9 @@ actor VisionCaptureToolLoop {
             }
             let lastThinking = await thinking.selection()
             thinking = AgentThinkingRequest(
-                enabled: !lastThinking.enabled && nextThinkingReason != nil,
-                reason: lastThinking.enabled ? "one_request_complete"
+                enabled: previousProposalRefused || (!lastThinking.enabled && nextThinkingReason != nil),
+                reason: previousProposalRefused ? "previous_proposal_refused"
+                    : lastThinking.enabled ? "one_request_complete"
                     : nextThinkingReason ?? "agent_default")
             next = .results([settledResult])
             retryBoundary = isHistoryRead ? nil : GenerationRetryBoundary(
@@ -3238,16 +3254,20 @@ actor VisionCaptureToolLoop {
         return canProvideVisualRecovery(configuration: configuration)
     }
 
-    private func canProvideVisualRecovery(configuration: VisionCaptureAgentConfiguration) -> Bool {
+    private func canProvideVisualRecovery(
+        configuration: VisionCaptureAgentConfiguration, allowCurrentImageRefresh: Bool = false
+    ) -> Bool {
         guard !requiresReadOnlyRecovery, uncertainAlertPress == nil,
               currentSystemAlert == nil, staleActionConfirmation == nil,
               currentScreenContentIdentity != nil,
-              permittedNextOperations?.contains(.screenshot) == true else { return false }
-        return AppVisionPackInstallationProbe.status(at: configuration.modelDirectory) == .complete
+              permittedNextOperations?.contains(.screenshot) == true
+                || (allowCurrentImageRefresh && currentImageObservation == observationGeneration
+                    && committedSessionIdentity?.kind == "flow") else { return false }
+        return visionPackComplete(configuration)
     }
 
     private func canProvideRejectedTargetVisualRecovery(
-        configuration: VisionCaptureAgentConfiguration
+        configuration: VisionCaptureAgentConfiguration, allowCurrentImageRefresh: Bool = false
     ) -> Bool {
         guard (try? configuration.validate()) != nil,
               committedTargetKey == configuration.targetKey, hasValidatedHostContract,
@@ -3257,12 +3277,14 @@ actor VisionCaptureToolLoop {
               !rejectedBeforeSubmissionProposals.contains(where: { $0.screen == scope }) else {
             return false
         }
-        return canProvideVisualRecovery(configuration: configuration)
+        return canProvideVisualRecovery(configuration: configuration,
+            allowCurrentImageRefresh: allowCurrentImageRefresh)
     }
 
     enum VisualRecoveryBoundary {
         case repeatedRead
         case repeatedTargetRejection
+        case proposalRejection
         case repeatedThought
         case coordinateWithoutImage
 
@@ -3270,6 +3292,7 @@ actor VisionCaptureToolLoop {
             switch self {
             case .repeatedRead: "the repeated-read correction"
             case .repeatedTargetRejection: "the second equivalent expired or unavailable target rejection"
+            case .proposalRejection: "a locally refused proposal"
             case .repeatedThought: "discarding an unfinished model response with sustained exact thought repetition"
             case .coordinateWithoutImage: "a coordinate action without current screenshot evidence"
             }
@@ -3413,6 +3436,15 @@ actor VisionCaptureToolLoop {
         packet["image_attachment_order"] = .string(
             "The single attached image is the current screenshot/read pair from the interrupted decision.")
         return try JSONValue.object(packet).encoded()
+    }
+
+    private static func isVisualRecoverySafetyError(_ error: VisionCaptureAgentError) -> Bool {
+        switch error {
+        case .invalidConfiguration, .identityMismatch, .returnedIdentityMismatch, .sessionIdentityMismatch:
+            true
+        default:
+            false
+        }
     }
 
     private func provideVisualRecovery(
@@ -3576,7 +3608,7 @@ actor VisionCaptureToolLoop {
         configuration: VisionCaptureAgentConfiguration,
         activity: @escaping Activity
     ) async throws -> NavigationOutcome {
-        guard AppVisionPackInstallationProbe.status(at: configuration.modelDirectory) == .complete else {
+        guard visionPackComplete(configuration) else {
             throw VisionCaptureAgentError.navigationUnavailable(
                 "Screenshot image support is unavailable. Install and activate the vision companion, then load the model. No screenshot was requested.")
         }
@@ -3655,6 +3687,8 @@ actor VisionCaptureToolLoop {
             body["instruction"] = .string(Self.screenshotPairInstruction)
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as VisionCaptureAgentError where Self.isVisualRecoverySafetyError(error) {
+            throw error
         } catch {
             currentManifest = AuthorityManifest()
             currentSystemAlert = nil
@@ -6976,12 +7010,17 @@ actor VisionCaptureToolLoop {
     /// for the OCR read when the gate asks for one. `visionPackComplete` stands in
     /// for the vision pack probe (nil: the real probe). `userInstruction` is applied
     /// as the user's restrictions. `image` is the capture the loop adds to the next input.
+    /// `commitTarget` models the successful host identity commit for fake-host runs.
     func actionPacketForTesting(
         operation: String = "tap", read: VisionCaptureMCPResult?, signatureBefore: String? = nil,
         body extra: [String: JSONValue], screenTextReply: JSONValue? = nil, screenTextError: Error? = nil,
         visionPackComplete: Bool? = nil, userInstruction: String? = nil,
-        configuration: VisionCaptureAgentConfiguration
+        configuration: VisionCaptureAgentConfiguration, commitTarget: Bool = false
     ) throws -> (packet: String, readScreenText: Bool, image: AppImageAttachment?) {
+        if commitTarget {
+            try configuration.validate()
+            committedTargetKey = configuration.targetKey
+        }
         autoScreenImage = nil
         if let userInstruction { userRestrictions.apply(userInstruction) }
         visionPackCompleteForTesting = visionPackComplete

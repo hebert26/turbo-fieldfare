@@ -1,4 +1,6 @@
 import Foundation
+import CoreGraphics
+import ImageIO
 import Testing
 import TurboFieldfare
 import TurboFieldfareDecodeProtocol
@@ -697,8 +699,543 @@ struct VisionCaptureThinkingPolicyTests {
         }
     }
 
+    @Test(arguments: Task43Refusal.allCases)
+    func rejectedProposalTurnsThinkingOnWithOneFreshCurrentImage(_ refusal: Task43Refusal) async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43")
+        let host = Task43HostFixture()
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        // The normal screenshot path remains in use; this only admits the
+        // repository-local vision fixture for the fake-host run.
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let turns = Mutex<[AppToolTurn]>([])
+        let result = try await loop.run(
+            configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { turn, request in
+            let selection = await request.selection()
+            modes.withLock { $0.append(selection) }
+            turns.withLock { $0.append(turn) }
+            switch modes.withLock({ $0.count }) {
+            case 1:
+                return Self.completion(call: Self.observeCall("43-setup"), thinking: selection.enabled)
+            case 2:
+                let refusalTarget: String?
+                switch refusal {
+                case .unsupportedTap, .emptyType:
+                    refusalTarget = try Self.choiceID(in: turn, operation: "type")
+                    if refusal == .unsupportedTap {
+                        try Self.expectChoice(refusalTarget!, in: turn, doesNotSupport: "tap")
+                    }
+                default:
+                    refusalTarget = nil
+                }
+                return Self.completion(
+                    call: refusal.call(id: "43-refused", target: refusalTarget), thinking: selection.enabled)
+            case 3:
+                #expect(selection == AgentThinkingSelection(
+                    enabled: true, reason: "previous_proposal_refused"))
+                #expect(host.screenshotCount == 1)
+                #expect(host.ocrScreenshotCount == 1)
+                let target = try Self.choiceID(in: turn, operation: "tap")
+                return Self.completion(call: Self.tapCall("43-valid", target: target), thinking: selection.enabled)
+            default:
+                return Self.finalCompletion(thinking: selection.enabled)
+            }
+        }
+
+        #expect(result.answer == "done")
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: false, reason: "one_request_complete"),
+        ])
+        let capturedTurns = turns.withLock { $0 }
+        guard capturedTurns.count >= 4,
+              case .results(let refusalResults) = capturedTurns[2], refusalResults.count == 1,
+              case .results(let successResults) = capturedTurns[3], successResults.count == 1 else {
+            Issue.record("Task 43 must retain one result packet for the refusal and action")
+            return
+        }
+        let refusalResult = refusalResults[0]
+        #expect(refusalResult.imageAttachments.count == 1)
+        let refusalBody = try Self.object(from: refusalResult.content)
+        #expect(refusalBody["last_action"]?.objectValue?["verdict"] == .string("not_sent"))
+        #expect(refusalBody["last_action"]?.objectValue?["dispatch_attempted"] != .bool(true))
+        #expect(refusalBody["observation"]?.objectValue?["current_image_evidence"] == .bool(true))
+        try Self.expectCurrentChoiceOperations(in: refusalBody)
+        #expect(successResults[0].imageAttachments.isEmpty,
+            "The ON request's valid action must not inherit a second Task 43 image")
+        #expect(host.mutationCount == 1)
+        #expect(host.screenshotCount == 1)
+        #expect(host.ocrScreenshotCount == 2)
+    }
+
+    @Test
+    func consecutiveRejectedProposalsEachGetASeparateOnImageBeforeOneSentAction() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-chain")
+        let host = Task43HostFixture()
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let turns = Mutex<[AppToolTurn]>([])
+        let result = try await loop.run(
+            configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { turn, request in
+            let selection = await request.selection()
+            modes.withLock { $0.append(selection) }
+            turns.withLock { $0.append(turn) }
+            switch modes.withLock({ $0.count }) {
+            case 1:
+                return Self.completion(call: Self.observeCall("43-chain-setup"), thinking: selection.enabled)
+            case 2:
+                return Self.completion(
+                    call: Task43Refusal.expiredChoice.call(id: "43-chain-first"), thinking: selection.enabled)
+            case 3:
+                #expect(host.screenshotCount == 1)
+                #expect(host.ocrScreenshotCount == 1)
+                return Self.completion(
+                    call: Task43Refusal.unknownTarget.call(id: "43-chain-second"), thinking: selection.enabled)
+            case 4:
+                #expect(host.screenshotCount == 2)
+                #expect(host.ocrScreenshotCount == 2)
+                let target = try Self.choiceID(in: turn, operation: "tap")
+                return Self.completion(
+                    call: Self.tapCall("43-chain-valid", target: target), thinking: selection.enabled)
+            default:
+                return Self.finalCompletion(thinking: selection.enabled)
+            }
+        }
+
+        #expect(result.answer == "done")
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: false, reason: "one_request_complete"),
+        ])
+        let capturedTurns = turns.withLock { $0 }
+        guard capturedTurns.count >= 5,
+              case .results(let firstResults) = capturedTurns[2], firstResults.count == 1,
+              case .results(let secondResults) = capturedTurns[3], secondResults.count == 1,
+              case .results(let successResults) = capturedTurns[4], successResults.count == 1 else {
+            Issue.record("The consecutive-refusal chain must retain both correction result packets")
+            return
+        }
+        #expect(firstResults[0].imageAttachments.count == 1)
+        #expect(secondResults[0].imageAttachments.count == 1)
+        #expect(firstResults[0].imageAttachments[0].sha256 != secondResults[0].imageAttachments[0].sha256)
+        #expect(try Self.object(from: firstResults[0].content)["last_action"]?.objectValue?["verdict"]
+            == .string("not_sent"))
+        #expect(try Self.object(from: secondResults[0].content)["last_action"]?.objectValue?["verdict"]
+            == .string("not_sent"))
+        #expect(successResults[0].imageAttachments.isEmpty)
+        #expect(host.mutationCount == 1)
+        #expect(host.screenshotCount == 2)
+        #expect(host.ocrScreenshotCount == 3)
+    }
+
+    @Test
+    func successfulOffActionDoesNotAddTask43ImageOrThinkingTrigger() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-success")
+        let host = Task43HostFixture()
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let turns = Mutex<[AppToolTurn]>([])
+        let result = try await loop.run(
+            configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { turn, request in
+            let selection = await request.selection()
+            modes.withLock { $0.append(selection) }
+            turns.withLock { $0.append(turn) }
+            switch modes.withLock({ $0.count }) {
+            case 1:
+                return Self.completion(call: Self.observeCall("43-success-setup"), thinking: selection.enabled)
+            case 2:
+                let target = try Self.choiceID(in: turn, operation: "tap")
+                return Self.completion(call: Self.tapCall("43-success", target: target), thinking: selection.enabled)
+            default:
+                return Self.finalCompletion(thinking: selection.enabled)
+            }
+        }
+
+        #expect(result.answer == "done")
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+        ])
+        let capturedTurns = turns.withLock { $0 }
+        if capturedTurns.count >= 3, case .results(let finalResults) = capturedTurns[2], finalResults.count == 1 {
+            #expect(finalResults[0].imageAttachments.isEmpty)
+        } else {
+            Issue.record("A successful OFF action must provide a final result without a Task 43 image")
+        }
+        #expect(host.mutationCount == 1)
+    }
+
+    @Test(arguments: [false, true])
+    func unavailableOrUnusableVisualSupportContinuesWithTextOnlyRecovery(_ unusableRead: Bool) async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-fail-closed")
+        let host = Task43HostFixture(failPairedRead: unusableRead)
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: unusableRead,
+            configuration: Self.configuration, commitTarget: true)
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let turns = Mutex<[AppToolTurn]>([])
+        let result = try await loop.run(
+                configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { turn, request in
+                let selection = await request.selection()
+                modes.withLock { $0.append(selection) }
+                turns.withLock { $0.append(turn) }
+                switch modes.withLock({ $0.count }) {
+                case 1:
+                    return Self.completion(call: Self.observeCall("43-fail-closed-setup"), thinking: selection.enabled)
+                case 2:
+                    return Self.completion(
+                        call: Task43Refusal.expiredChoice.call(id: "43-fail-closed-refusal"),
+                        thinking: selection.enabled)
+                case 3 where unusableRead:
+                    return Self.completion(
+                        call: Self.observeCall("43-fail-closed-reobserve"), thinking: selection.enabled)
+                case 3:
+                    #expect(host.screenshotCount == 0)
+                    #expect(host.mutationCount == 0)
+                    let target = try Self.choiceID(in: turn, operation: "tap")
+                    return Self.completion(
+                        call: Self.tapCall("43-fail-closed-valid", target: target), thinking: selection.enabled)
+                default:
+                    return Self.finalCompletion(thinking: selection.enabled)
+                }
+            }
+        #expect(result.answer == "done")
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: false, reason: "one_request_complete"),
+        ])
+        #expect(host.requests.withLock { $0.filter { $0 == "click pointer" }.count } == (unusableRead ? 0 : 1))
+        #expect(host.screenshotCount == (unusableRead ? 1 : 0))
+        #expect(host.ocrScreenshotCount == 0)
+        #expect(host.mutationCount == (unusableRead ? 0 : 1))
+        guard turns.withLock({ $0.count }) >= 3,
+              case .results(let correctionResults) = turns.withLock({ $0 })[2], correctionResults.count == 1 else {
+            Issue.record("Text-only recovery must retain its correction result")
+            return
+        }
+        #expect(correctionResults[0].imageAttachments.isEmpty)
+        #expect(try Self.object(from: correctionResults[0].content)["last_action"]?.objectValue?["verdict"]
+            == .string("not_sent"))
+    }
+
+    @Test
+    func insufficientRecoveryCapacityContinuesWithTextOnlyRecovery() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-capacity")
+        let host = Task43HostFixture()
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let inferenceCount = Mutex(0)
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let turns = Mutex<[AppToolTurn]>([])
+        let result = try await loop.run(
+            configuration: Self.configuration, activity: { _ in }, maxContextTokens: 1) { turn, request in
+                let selection = await request.selection()
+                modes.withLock { $0.append(selection) }
+                turns.withLock { $0.append(turn) }
+                let attempt = inferenceCount.withLock { value in value += 1; return value }
+                if attempt == 1 {
+                    return Self.completion(call: Self.observeCall("43-capacity-setup"), thinking: selection.enabled)
+                }
+                if attempt == 2 {
+                    return Self.completion(
+                        call: Task43Refusal.expiredChoice.call(id: "43-capacity-refusal"), thinking: selection.enabled)
+                }
+                if attempt == 3 {
+                    let target = try Self.choiceID(in: turn, operation: "tap")
+                    return Self.completion(
+                        call: Self.tapCall("43-capacity-valid", target: target), thinking: selection.enabled)
+                }
+                return Self.finalCompletion(thinking: selection.enabled)
+            }
+        #expect(result.answer == "done")
+        #expect(inferenceCount.withLock { $0 } == 4)
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: false, reason: "one_request_complete"),
+        ])
+        #expect(host.screenshotCount == 0)
+        #expect(host.mutationCount == 1)
+        guard turns.withLock({ $0.count }) >= 3,
+              case .results(let correctionResults) = turns.withLock({ $0 })[2], correctionResults.count == 1 else {
+            Issue.record("Capacity recovery must retain its correction result")
+            return
+        }
+        #expect(correctionResults[0].imageAttachments.isEmpty)
+        #expect(try Self.object(from: correctionResults[0].content)["last_action"]?.objectValue?["verdict"]
+            == .string("not_sent"))
+    }
+
+    @Test
+    func primaryCaptureFailureContinuesWithTextOnlyCorrection() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-capture-failure")
+        let host = Task43HostFixture(failPrimaryCapture: true)
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let turns = Mutex<[AppToolTurn]>([])
+        let result = try await loop.run(
+            configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { turn, request in
+            let selection = await request.selection()
+            modes.withLock { $0.append(selection) }
+            turns.withLock { $0.append(turn) }
+            switch modes.withLock({ $0.count }) {
+            case 1:
+                return Self.completion(call: Self.observeCall("43-capture-failure-setup"), thinking: selection.enabled)
+            case 2:
+                return Self.completion(
+                    call: Task43Refusal.expiredChoice.call(id: "43-capture-failure-refusal"),
+                    thinking: selection.enabled)
+            case 3:
+                return Self.completion(
+                    call: Self.observeCall("43-capture-failure-reobserve"), thinking: selection.enabled)
+            default:
+                return Self.finalCompletion(thinking: selection.enabled)
+            }
+        }
+        #expect(result.answer == "done")
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: false, reason: "one_request_complete"),
+        ])
+        #expect(host.screenshotCount == 1)
+        #expect(host.ocrScreenshotCount == 0)
+        #expect(host.mutationCount == 0)
+        guard turns.withLock({ $0.count }) >= 3,
+              case .results(let correctionResults) = turns.withLock({ $0 })[2], correctionResults.count == 1 else {
+            Issue.record("Capture failure recovery must retain its correction result")
+            return
+        }
+        #expect(correctionResults[0].imageAttachments.isEmpty)
+        #expect(try Self.object(from: correctionResults[0].content)["last_action"]?.objectValue?["verdict"]
+            == .string("not_sent"))
+    }
+
+    @Test(arguments: Task43HostFixture.Failure.allCases)
+    func injectedCaptureSafetyFailuresPropagateWithoutCorrection(_ failure: Task43HostFixture.Failure) async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-injected-\(failure.rawValue)")
+        let host = Task43HostFixture(failure: failure)
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let inferenceCount = Mutex(0)
+        var terminal: Error?
+        do {
+            _ = try await loop.run(
+                configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { _, request in
+                inferenceCount.withLock { $0 += 1 }
+                let selection = await request.selection()
+                return inferenceCount.withLock { $0 } == 1
+                    ? Self.completion(call: Self.observeCall("43-safety-setup"), thinking: selection.enabled)
+                    : Self.completion(
+                        call: Task43Refusal.expiredChoice.call(id: "43-safety-refusal"), thinking: selection.enabled)
+            }
+        } catch {
+            terminal = error
+        }
+        #expect(inferenceCount.withLock { $0 } == 2)
+        #expect(host.mutationCount == 0)
+        #expect(host.screenshotCount == (failure == .cancellation ? 0 : 1))
+        #expect(host.ocrScreenshotCount == 0)
+        switch failure {
+        case .cancellation:
+            #expect(terminal is CancellationError)
+        case .returnedIdentity:
+            guard case .returnedIdentityMismatch? = terminal as? VisionCaptureAgentError else {
+                Issue.record("Returned identity failure must propagate unchanged")
+                return
+            }
+        case .sessionIdentity:
+            guard case .sessionIdentityMismatch? = terminal as? VisionCaptureAgentError else {
+                Issue.record("Session identity failure must propagate unchanged")
+                return
+            }
+        }
+    }
+
+    @Test
+    func completedPacketCapacityFallsBackToZeroImageCorrection() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-completed-capacity")
+        let host = Task43HostFixture(largePairedRead: true)
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let turns = Mutex<[AppToolTurn]>([])
+        let modes = Mutex<[AgentThinkingSelection]>([])
+        let result = try await loop.run(
+            configuration: Self.configuration, activity: { _ in }, maxContextTokens: 16_384) { turn, request in
+            let selection = await request.selection()
+            turns.withLock { $0.append(turn) }
+            modes.withLock { $0.append(selection) }
+            switch modes.withLock({ $0.count }) {
+            case 1:
+                return Self.completion(
+                    call: Self.observeCall("43-completed-capacity-setup"), thinking: selection.enabled)
+            case 2:
+                return Self.completion(
+                    call: Task43Refusal.expiredChoice.call(id: "43-completed-capacity-refusal"),
+                    thinking: selection.enabled)
+            case 3:
+                return Self.completion(
+                    call: Self.observeCall("43-completed-capacity-reobserve"), thinking: selection.enabled)
+            default:
+                return Self.finalCompletion(thinking: selection.enabled)
+            }
+        }
+        #expect(result.answer == "done")
+        #expect(modes.withLock { $0 } == [
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: false, reason: "agent_default"),
+            AgentThinkingSelection(enabled: true, reason: "previous_proposal_refused"),
+            AgentThinkingSelection(enabled: false, reason: "one_request_complete"),
+        ])
+        #expect(host.screenshotCount == 1)
+        #expect(host.ocrScreenshotCount == 1)
+        guard turns.withLock({ $0.count }) >= 3,
+              case .results(let correctionResults) = turns.withLock({ $0 })[2], correctionResults.count == 1 else {
+            Issue.record("Completed-packet capacity fallback must retain its correction result")
+            return
+        }
+        #expect(correctionResults[0].imageAttachments.isEmpty)
+        #expect(try Self.object(from: correctionResults[0].content)["last_action"]?.objectValue?["verdict"]
+            == .string("not_sent"))
+    }
+
+    @Test
+    func invalidConfigurationStopsAtFirstToolBeforeHostOrCorrectionInference() async throws {
+        let loop = VisionCaptureToolLoop()
+        let host = Task43HostFixture()
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        let invalid = VisionCaptureAgentConfiguration(
+            bundleIdentifier: "",
+            simulatorUDID: "not-a-udid",
+            modelDirectory: Self.configuration.modelDirectory)
+        let inferenceCount = Mutex(0)
+        var terminal: VisionCaptureAgentError?
+        do {
+            _ = try await loop.run(configuration: invalid, activity: { _ in }) { _, request in
+                let selection = await request.selection()
+                inferenceCount.withLock { $0 += 1 }
+                return Self.completion(call: Self.observeCall("43-invalid-config"), thinking: selection.enabled)
+            }
+        } catch let error as VisionCaptureAgentError {
+            terminal = error
+        }
+        guard case .invalidConfiguration? = terminal else {
+            Issue.record("Invalid configuration must stop at the first ordinary tool proposal")
+            return
+        }
+        #expect(inferenceCount.withLock { $0 } == 1)
+        #expect(host.requests.withLock { $0.isEmpty })
+    }
+
+    @Test
+    func returnedIdentityMismatchStopsBeforeVisualCorrectionInferenceOrAction() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-identity-mismatch")
+        let host = Task43HostFixture(returnedUDID: "00000000-0000-0000-0000-000000000099")
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let inferenceCount = Mutex(0)
+        var terminal: VisionImageError?
+        do {
+            _ = try await loop.run(
+                configuration: Self.configuration, activity: { _ in }, maxContextTokens: 32_768) { _, request in
+                let selection = await request.selection()
+                let attempt = inferenceCount.withLock { value in value += 1; return value }
+                if attempt == 1 {
+                    return Self.completion(call: Self.observeCall("43-identity-setup"), thinking: selection.enabled)
+                }
+                return Self.completion(
+                    call: Task43Refusal.expiredChoice.call(id: "43-identity-refusal"), thinking: selection.enabled)
+            }
+        } catch let error as VisionImageError {
+            terminal = error
+        }
+        guard case .invalidSource(let detail)? = terminal else {
+            Issue.record("Returned device identity must fail with VisionImageError.invalidSource")
+            return
+        }
+        #expect(detail == "Screenshot belongs to a different simulator device.")
+        #expect(inferenceCount.withLock { $0 } == 2)
+        #expect(host.screenshotCount == 1)
+        #expect(host.ocrScreenshotCount == 0)
+        #expect(host.mutationCount == 0)
+    }
+
+    @Test
+    func sixthRefusalStopsBeforeAnotherVisualCorrection() async throws {
+        let loop = VisionCaptureToolLoop()
+        await loop.setFlowSessionForTesting("flow-43-sixth-refusal")
+        let host = Task43HostFixture()
+        await loop.setHostRequestForTesting { arguments in try await host.reply(arguments) }
+        _ = try await loop.actionPacketForTesting(
+            operation: "observe", read: nil, body: [:], visionPackComplete: true,
+            configuration: Self.configuration, commitTarget: true)
+        let inferenceCount = Mutex(0)
+        var terminal: Error?
+        do {
+            _ = try await loop.run(
+                configuration: Self.configuration, activity: { _ in }, maxContextTokens: 65_536) { _, request in
+                let selection = await request.selection()
+                let attempt = inferenceCount.withLock { value in value += 1; return value }
+                if attempt == 1 {
+                    return Self.completion(call: Self.observeCall("43-sixth-setup"), thinking: selection.enabled)
+                }
+                return Self.completion(
+                    call: Self.unknownCall("43-sixth-refusal-\(attempt)"), thinking: selection.enabled)
+            }
+        } catch {
+            terminal = error
+        }
+        #expect(terminal != nil)
+        #expect(inferenceCount.withLock { $0 } == 7)
+        #expect(host.mutationCount == 0)
+        #expect(host.screenshotCount == 5)
+        #expect(host.ocrScreenshotCount == 5)
+        #expect(host.totalScreenshotCount == 10)
+        guard case .proposalCorrectionExhausted? = terminal as? VisionCaptureAgentError else {
+            Issue.record("The sixth refusal must pause with proposalCorrectionExhausted before another capture")
+            return
+        }
+    }
+
     static func diagnostics(stopReason: AppStopReason, thinking: Bool) -> AppDiagnostics {
         AppDiagnostics(generatedTokens: 1, stopReason: stopReason, promptTokenCount: 1,
+            conversationTokens: 1,
             timeToFirstTokenSeconds: nil, decodeSeconds: 0.1, tokensPerSecond: 10,
             peakMemoryBytes: nil, runtimeOptions: AppRuntimeOptions(toolThinkingEnabled: thinking))
     }
@@ -743,6 +1280,77 @@ struct VisionCaptureThinkingPolicyTests {
     static func finalCompletion(thinking: Bool) -> VisionCaptureModelCompletion {
         VisionCaptureModelCompletion(content: "done", toolCalls: [],
             diagnostics: diagnostics(stopReason: .endOfTurn, thinking: thinking))
+    }
+
+    static func tapCall(_ id: String, target: String) -> AppToolCall {
+        AppToolCall(id: id, name: "visioncapture_navigate", arguments: .object([
+            "action": .string("tap"), "target": .string(target),
+        ]))
+    }
+
+    private static func object(from content: String) throws -> [String: JSONValue] {
+        guard let object = try JSONDecoder().decode(JSONValue.self, from: Data(content.utf8)).objectValue else {
+            throw VisionCaptureAgentError.noProgress("Task 43 fixture returned a non-object packet")
+        }
+        return object
+    }
+
+    private static func expectCurrentChoiceOperations(in body: [String: JSONValue]) throws {
+        guard case .array(let choices)? = body["choices"] else {
+            Issue.record("The fresh refusal correction must publish current choices")
+            return
+        }
+        let operations = choices.compactMap { choice -> [String: JSONValue]? in
+            guard case .object(let object) = choice else { return nil }
+            return object
+        }
+        guard let tap = operations.first(where: { object in
+            guard case .array(let values)? = object["operations"] else { return false }
+            return values.contains(.string("tap"))
+        }), let type = operations.first(where: { object in
+            guard case .array(let values)? = object["operations"] else { return false }
+            return values.contains(.string("type"))
+        }) else {
+            Issue.record("The fresh refusal correction must retain tap and type choices")
+            return
+        }
+        guard case .array(let tapOperations)? = tap["operations"],
+              case .array(let typeOperations)? = type["operations"] else {
+            Issue.record("The fresh refusal correction must publish operation lists")
+            return
+        }
+        #expect(tapOperations.contains(.string("tap")))
+        #expect(typeOperations.contains(.string("type")))
+    }
+
+    private static func choiceID(in turn: AppToolTurn, operation: String) throws -> String {
+        guard case .results(let results) = turn, results.count == 1,
+              let packet = try? JSONDecoder().decode(
+                  JSONValue.self, from: Data(results[0].content.utf8)),
+              case .array(let choices)? = packet.objectValue?["choices"] else {
+            throw VisionCaptureAgentError.noProgress("The current result did not publish choices")
+        }
+        guard let choice = choices.compactMap(\.objectValue).first(where: { object in
+            guard case .array(let values)? = object["operations"] else { return false }
+            return values.contains(.string(operation))
+        }), case .string(let id)? = choice["id"] else {
+            throw VisionCaptureAgentError.noProgress("The current result did not publish a \(operation) choice")
+        }
+        return id
+    }
+
+    private static func expectChoice(
+        _ id: String, in turn: AppToolTurn, doesNotSupport operation: String
+    ) throws {
+        guard case .results(let results) = turn, results.count == 1,
+              let packet = try? JSONDecoder().decode(
+                  JSONValue.self, from: Data(results[0].content.utf8)),
+              case .array(let choices)? = packet.objectValue?["choices"],
+              let choice = choices.compactMap(\.objectValue).first(where: { $0["id"] == .string(id) }),
+              case .array(let operations)? = choice["operations"] else {
+            throw VisionCaptureAgentError.noProgress("The current result did not publish choice (id)")
+        }
+        #expect(!operations.contains(.string(operation)))
     }
 
     private static func firstChoiceID(in turn: AppToolTurn) throws -> String {
@@ -799,6 +1407,268 @@ struct VisionCaptureThinkingPolicyTests {
         """
         let value = try JSONDecoder().decode(ThoughtRepetitionRecovery.self, from: Data(json.utf8))
         return .repeatedThought(value)
+    }
+
+    enum Task43Refusal: String, CaseIterable, Sendable {
+        case expiredChoice
+        case unknownTarget
+        case unsupportedTap
+        case emptyType
+        case unknownToolName
+
+        func call(id: String, target: String? = nil) -> AppToolCall {
+            switch self {
+            case .expiredChoice:
+                return VisionCaptureThinkingPolicyTests.tapCall(id, target: "c999")
+            case .unknownTarget:
+                return VisionCaptureThinkingPolicyTests.tapCall(id, target: "unknown-target")
+            case .unsupportedTap:
+                return VisionCaptureThinkingPolicyTests.tapCall(id, target: target ?? "unsupported-target")
+            case .emptyType:
+                return AppToolCall(id: id, name: "visioncapture_navigate", arguments: .object([
+                    "action": .string("type"), "target": .string(target ?? "unsupported-target"), "text": .string(""),
+                ]))
+            case .unknownToolName:
+                return AppToolCall(id: id, name: "task_future_unknown", arguments: .object([
+                    "action": .string("tap"), "target": .string("unknown-target"),
+                ]))
+            }
+        }
+
+    }
+
+    final class Task43HostFixture: @unchecked Sendable {
+        enum Failure: String, CaseIterable, Sendable {
+            case cancellation
+            case returnedIdentity
+            case sessionIdentity
+        }
+
+        fileprivate let requests = Mutex<[String]>([])
+        private let screenshotOrdinal = Mutex(0)
+        private let primaryScreenshotOrdinal = Mutex(0)
+        private let ocrScreenshotOrdinal = Mutex(0)
+        private let mutationOrdinal = Mutex(0)
+        private let failPairedRead: Bool
+        private let failPrimaryCapture: Bool
+        private let largePairedRead: Bool
+        private let returnedUDID: String
+        private let failure: Failure?
+
+        var mutationCount: Int { mutationOrdinal.withLock { $0 } }
+        var screenshotCount: Int { primaryScreenshotOrdinal.withLock { $0 } }
+        var ocrScreenshotCount: Int { ocrScreenshotOrdinal.withLock { $0 } }
+        var totalScreenshotCount: Int { screenshotOrdinal.withLock { $0 } }
+
+        init(
+            failPairedRead: Bool = false,
+            failPrimaryCapture: Bool = false,
+            largePairedRead: Bool = false,
+            returnedUDID: String = VisionCaptureThinkingPolicyTests.configuration.simulatorUDID,
+            failure: Failure? = nil
+        ) {
+            self.failPairedRead = failPairedRead
+            self.failPrimaryCapture = failPrimaryCapture
+            self.largePairedRead = largePairedRead
+            self.returnedUDID = returnedUDID
+            self.failure = failure
+        }
+
+        func reply(_ arguments: JSONValue) async throws -> VisionCaptureMCPResult {
+            let request: String
+            if case .string(let value)? = arguments.objectValue?["request"] { request = value }
+            else { request = "" }
+            requests.withLock { $0.append(request) }
+            switch request {
+            case "take a screenshot":
+                if let failure {
+                    switch failure {
+                    case .cancellation: throw CancellationError()
+                    case .returnedIdentity, .sessionIdentity: break
+                    }
+                }
+                let includeOCR = arguments.objectValue?["parameters"]?.objectValue?["include_ocr"] == .bool(true)
+                let ordinal = screenshotOrdinal.withLock { value in value += 1; return value }
+                if !includeOCR { primaryScreenshotOrdinal.withLock { $0 += 1 } }
+                if failPrimaryCapture && !includeOCR {
+                    return Self.failedReadResult()
+                }
+                if includeOCR {
+                    ocrScreenshotOrdinal.withLock { $0 += 1 }
+                }
+                return try Self.screenshotResult(ordinal: ordinal, returnedUDID: returnedUDID)
+            case "click pointer", "tap cached action":
+                mutationOrdinal.withLock { $0 += 1 }
+                return Self.actionResult()
+            case "activate computer use":
+                return Self.activationResult()
+            case "hide pointer":
+                return Self.alertResult()
+            case "describe system alert":
+                return Self.alertResult()
+            default:
+                if let failure, screenshotOrdinal.withLock({ $0 }) > 0, request == "describe screen" {
+                    switch failure {
+                    case .cancellation: throw CancellationError()
+                    case .returnedIdentity: throw VisionCaptureAgentError.returnedIdentityMismatch(
+                        fieldPath: "session_id", refusalCode: nil)
+                    case .sessionIdentity: throw VisionCaptureAgentError.sessionIdentityMismatch
+                    }
+                }
+                if failPairedRead, screenshotOrdinal.withLock({ $0 }) > 0, request == "describe screen" {
+                    return Self.failedReadResult()
+                }
+                return Self.screenResult(
+                    signature: "task-43-screen-\(screenshotOrdinal.withLock { $0 })",
+                    largeLabel: largePairedRead && screenshotOrdinal.withLock({ $0 }) > 0
+                        && request == "describe screen")
+            }
+        }
+
+        private static func screenResult(signature: String, largeLabel: Bool = false) -> VisionCaptureMCPResult {
+            let label = largeLabel
+                ? String(repeating: "Current generic action ", count: 1_000)
+                : "Primary action"
+            return VisionCaptureMCPResult(
+                value: .object([
+                    "view": .object([
+                        "signature_coarse": .string("task-43-screen-coarse"),
+                        "signature_fine": .string(signature),
+                    ]),
+                    "elements": .array([
+                        .object([
+                            "element_id": .string("c1"), "role": .string("button"),
+                            "type": .string("XCUIElementTypeButton"), "label": .string(label),
+                            "visible": .bool(true), "enabled": .bool(true),
+                            "x_norm": .integer(240), "y_norm": .integer(420),
+                        ]),
+                        .object([
+                            "element_id": .string("c2"), "role": .string("text_field"),
+                            "type": .string("XCUIElementTypeTextField"), "label": .string("Input field"),
+                            "visible": .bool(true), "enabled": .bool(true),
+                            "x_norm": .integer(720), "y_norm": .integer(420),
+                        ]),
+                    ]),
+                ]),
+                isError: false, refusalCode: nil, dispatchAttempted: nil,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+
+        private static func actionResult() -> VisionCaptureMCPResult {
+            VisionCaptureMCPResult(
+                value: .object([
+                    "proof": .object([
+                        "verdict": .string("verified"), "reason_code": .string("fixture"),
+                        "action": .string("click"),
+                    ]),
+                    "dispatch": .object([
+                        "submission_started": .bool(true), "delivery_acknowledged": .bool(true),
+                    ]),
+                ]),
+                isError: false, refusalCode: nil, dispatchAttempted: true,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+
+        private static func activationResult() -> VisionCaptureMCPResult {
+            VisionCaptureMCPResult(
+                value: .object([
+                    "computer_use_task_id": .string("00000000-0000-0000-0000-000000000043"),
+                    "computer_use_generation": .integer(1),
+                ]),
+                isError: false, refusalCode: nil, dispatchAttempted: nil,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+
+        private static func alertResult() -> VisionCaptureMCPResult {
+            VisionCaptureMCPResult(
+                value: .object(["system_alert": .object(["present": .bool(false)])]),
+                isError: false, refusalCode: nil, dispatchAttempted: nil,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+
+        private static func failedReadResult() -> VisionCaptureMCPResult {
+            VisionCaptureMCPResult(
+                value: .object(["error": .string("paired accessibility read unavailable")]),
+                isError: true, refusalCode: "SCREEN_READ_UNAVAILABLE", dispatchAttempted: false,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+
+        private static func screenshotResult(ordinal: Int, returnedUDID: String) throws -> VisionCaptureMCPResult {
+            let data = try png(variant: ordinal)
+            let metadata = try JSONValue.object([
+                "udid": .string(returnedUDID),
+                "width": .integer(1), "height": .integer(1),
+                "ocr": .object(["blocks": .array([])]),
+            ]).encoded()
+            return VisionCaptureMCPResult(
+                value: .object(["content": .array([
+                    .object([
+                        "type": .string("image"), "mimeType": .string("image/png"),
+                        "data": .string(data.base64EncodedString()),
+                    ]),
+                    .object(["type": .string("text"), "text": .string(metadata)]),
+                ])]),
+                isError: false, refusalCode: nil, dispatchAttempted: nil,
+                hasConflictingDispatchAttemptEvidence: false,
+                isGuardedTargetRejectedBeforeSubmission: false,
+                isStaleActionCapabilityBeforeDispatch: false,
+                isSourceLayoutChangedBeforeRevalidation: false,
+                isActionAuthorizationExpiredBeforeDispatch: false,
+                isObservedTapTargetUnavailableBeforeDispatch: false,
+                isDeliveredTransitionContinuation: false,
+                isPointerPreCaptureFailureBeforeSubmission: false)
+        }
+
+        private static func png(variant: Int) throws -> Data {
+            let context = try #require(CGContext(data: nil, width: 2, height: 2,
+                bitsPerComponent: 8, bytesPerRow: 8, space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            let red = CGFloat((variant * 53).isMultiple(of: 255) ? 0.2 : Double((variant * 53) % 255) / 255)
+            context.setFillColor(CGColor(red: red, green: 0.35, blue: 0.6, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: 2, height: 2))
+            let image = try #require(context.makeImage())
+            let data = NSMutableData()
+            let destination = try #require(CGImageDestinationCreateWithData(
+                data, "public.png" as CFString, 1, nil))
+            CGImageDestinationAddImage(destination, image, nil)
+            #expect(CGImageDestinationFinalize(destination))
+            return data as Data
+        }
     }
 
     final class HostFixture: @unchecked Sendable {

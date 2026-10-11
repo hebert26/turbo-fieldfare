@@ -493,7 +493,7 @@ actor AgentInferenceTrace {
                 initializesRun = thinkingReason == "agent_default"
             } else { initializesRun = false }
             if initializesRun || lastAgentThinking?.conversation != request.conversationEpoch
-                || lastAgentThinking?.enabled != enabled {
+                || lastAgentThinking?.enabled != enabled || thinkingReason == "previous_proposal_refused" {
                 append(step: step, event: "thinking_switch", body: [
                     "enabled": .bool(enabled), "reason": .string(thinkingReason),
                 ], maximumBytes: 2_048)
