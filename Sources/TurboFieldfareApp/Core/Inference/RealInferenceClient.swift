@@ -380,6 +380,14 @@ struct SessionLoadKey: Equatable, Sendable {
             && lhs.forceLogitsHead == rhs.forceLogitsHead
     }
 
+    /// Generation templates may differ from the installed tokenizer mode.
+    /// Loaded-model identity remains strict for load/readiness operations.
+    func acceptsGeneration(_ requested: SessionLoadKey, toolAware: Bool = false) -> Bool {
+        var comparable = requested
+        if toolAware { comparable.options.toolThinkingEnabled = options.toolThinkingEnabled }
+        return self == comparable
+    }
+
     /// Prefill is selected for each request. The runner allocates for the
     /// largest supported chunk, so neither prefill field changes loaded state.
     private var loadTimeOptions: AppRuntimeOptions {
@@ -2132,15 +2140,15 @@ actor RealInferenceSession {
             // KV has room for, so it is passed through unmodified here.
             let config = Self.generationConfig(
                 for: request, maxNewTokens: request.maxNewTokens)
-            // This is the immutable mode configured on the loaded tokenizer.
-            let invisibleTokenLimit: Int? = loadedToolThinkingEnabled == true
+            let invisibleTokenLimit: Int? = request.runtimeOptions.toolThinkingEnabled
                 ? nil : VisionCaptureAgentProfile.maximumConsecutiveInvisibleTokens
             let turn: MultimodalTurnResult
             let toolCalls: [ParsedToolCall]
             switch request.toolTurn {
             case .checkpoint(let id):
                 let completion = try await conversation.resumeCheckpoint(id: id,
-                    config: config, prefillConfig: prefillConfig,
+                    config: config, toolThinkingEnabled: request.runtimeOptions.toolThinkingEnabled,
+                    prefillConfig: prefillConfig,
                     checkCancellation: { try Task.checkCancellation() }, shouldStop: stopFlagReader(),
                     captureToolFailureEvidence: request.captureToolFailureEvidence,
                     maximumConsecutiveInvisibleTokens: invisibleTokenLimit, captureThoughtPreview: true,
@@ -2155,6 +2163,7 @@ actor RealInferenceSession {
                     developerPrompt: developerPrompt,
                     tools: tools.map(\.tokenizerDefinition),
                     config: config,
+                    toolThinkingEnabled: request.runtimeOptions.toolThinkingEnabled,
                     prefillConfig: prefillConfig,
                     checkCancellation: { try Task.checkCancellation() },
                     shouldStop: stopFlagReader(),
@@ -2177,6 +2186,7 @@ actor RealInferenceSession {
                             images: $0.imageAttachments.map(\.fileURL))
                     },
                     config: config,
+                    toolThinkingEnabled: request.runtimeOptions.toolThinkingEnabled,
                     prefillConfig: prefillConfig,
                     checkCancellation: { try Task.checkCancellation() },
                     shouldStop: stopFlagReader(),
@@ -2199,7 +2209,11 @@ actor RealInferenceSession {
                     onProgress: report)
                 toolCalls = []
             }
-            if !request.imageAttachments.isEmpty {
+            let retainsEmptyToolBoundary = request.toolTurn != nil
+                && toolCalls.isEmpty && turn.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                && (turn.reason == .eos || turn.reason == .endOfTurn
+                    || turn.reason == .stopString || turn.reason == .maxTokens)
+            if !request.imageAttachments.isEmpty, !retainsEmptyToolBoundary {
                 let source: String
                 if case .results(let results) = request.toolTurn {
                     source = "tool result " + results.map(\.callID).joined(separator: ", ")
@@ -2478,7 +2492,9 @@ actor RealInferenceSession {
                 continuation.finish()
                 return
             case .gemma:
-                guard loadedKey == requestKey else { throw AppInferenceError.reloadRequired }
+                guard loadedKey.acceptsGeneration(requestKey, toolAware: request.toolTurn != nil) else {
+                    throw AppInferenceError.reloadRequired
+                }
             case nil:
                 throw AppInferenceError.modelNotLoaded
             }

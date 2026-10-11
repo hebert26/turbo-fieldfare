@@ -2888,12 +2888,12 @@ public final class AppModel {
                             await self.hasPendingAgentInstruction(
                                 generation: generation)
                         }
-                    ) { toolTurn in
+                    ) { toolTurn, thinking in
                         try await self.generateAgentStep(
                             client: client,
                             baseRequest: request,
                             toolTurn: toolTurn,
-                            generation: generation)
+                            generation: generation, thinking: thinking)
                     }
                     try Task.checkCancellation()
                     await self.recordAgentRunEnd(Self.agentRunEndReason(result), detail: nil)
@@ -3235,18 +3235,22 @@ public final class AppModel {
         return request
     }
 
-    private nonisolated func generateAgentStep(
+    nonisolated func generateAgentStep(
         client: any AppInferenceClient,
         baseRequest: AppGenerationRequest,
         toolTurn: AppToolTurn,
         generation: Int,
+        thinking: AgentThinkingRequest? = nil,
         malformedRegenerationsRemaining: Int = 2
     ) async throws -> VisionCaptureModelCompletion {
         let allowsMalformedRegeneration = malformedRegenerationsRemaining > 0
         await beginAgentStep(generation: generation)
         var request = try await agentRequest(baseRequest, toolTurn: toolTurn, generation: generation)
+        let thinking = thinking ?? AgentThinkingRequest()
+        let selection = await thinking.selection()
+        request.runtimeOptions.toolThinkingEnabled = selection.enabled
         let trace = AgentInferenceTrace.shared
-        let traceStep = await trace?.begin(request)
+        let traceStep = await trace?.begin(request, thinkingReason: selection.traceReason)
         request.captureToolFailureEvidence = traceStep != nil
         request.captureGPUCompletionTiming = traceStep != nil
         request.runtimeMeasurementCapture = await trace?.runtimeMeasurementRequest(for: traceStep)
@@ -3358,6 +3362,11 @@ public final class AppModel {
                 throw AppInferenceError.invalidRequest(
                     "The repetition receipt conflicted with completed tool-call output. No recovery or action was admitted.")
             }
+            if await thinking.isThoughtRecovery(), calls.isEmpty,
+               let failure = error as? AppInferenceError,
+               case .structuredToolFailure(_, true, _) = failure {
+                throw failure
+            }
             if allowsMalformedRegeneration, calls.isEmpty,
                let failure = error as? AppInferenceError,
                case .structuredToolFailure(_, true, _) = failure {
@@ -3371,10 +3380,11 @@ public final class AppModel {
                     correctedRequest.prompt += AppToolTurn.formatCorrectionInstruction
                 }
                 do {
+                    await thinking.correctMalformed()
                     let corrected = try await generateAgentStep(
                         client: client, baseRequest: correctedRequest,
                         toolTurn: toolTurn.correctingMalformedResponse(), generation: generation,
-                        malformedRegenerationsRemaining: malformedRegenerationsRemaining - 1)
+                        thinking: thinking, malformedRegenerationsRemaining: malformedRegenerationsRemaining - 1)
                     await applyAgentActivity(.generationRecovery(id: recoveryID,
                         text: "Model response regenerated after a format correction.",
                         status: .succeeded), generation: generation)

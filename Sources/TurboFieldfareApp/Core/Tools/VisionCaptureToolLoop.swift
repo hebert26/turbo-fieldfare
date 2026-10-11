@@ -362,8 +362,62 @@ struct AgentUserRestrictions: Equatable, Sendable {
     }
 }
 
+struct AgentThinkingSelection: Equatable, Sendable {
+    let enabled: Bool
+    let reason: String
+
+    var traceReason: String {
+        reason == "thought_repetition_recovery" ? "repetition_retry" : reason
+    }
+}
+
+/// Shared by the loop and its physical format retries; scoped to one logical step.
+actor AgentThinkingRequest {
+    private var current: AgentThinkingSelection
+    private var triggerConsumed: Bool
+    private var corrected = false
+    private var retriedNoCall = false
+    private var recoveringThought = false
+
+    init(enabled: Bool = false, reason: String = "agent_default") {
+        current = AgentThinkingSelection(enabled: enabled, reason: reason)
+        triggerConsumed = enabled
+    }
+
+    func selection() -> AgentThinkingSelection { current }
+
+    func correctMalformed() {
+        corrected = true
+        let enable = !current.enabled && !triggerConsumed && !recoveringThought
+        if enable { triggerConsumed = true }
+        current = AgentThinkingSelection(enabled: enable,
+            reason: enable ? "unparseable_tool_call" : "one_request_complete")
+    }
+
+    func retryNoCall(unparseable: Bool) -> Bool {
+        guard !retriedNoCall, !corrected, !recoveringThought else { return false }
+        retriedNoCall = true
+        let enable = !current.enabled && !triggerConsumed
+        if enable { triggerConsumed = true }
+        current = AgentThinkingSelection(enabled: enable,
+            reason: enable ? (unparseable ? "unparseable_tool_call" : "no_tool_call")
+                : "one_request_complete")
+        return true
+    }
+
+    func isThoughtRecovery() -> Bool { recoveringThought }
+
+    func recoverThought() {
+        recoveringThought = true
+        triggerConsumed = true
+        current = AgentThinkingSelection(enabled: false, reason: "thought_repetition_recovery")
+    }
+}
+
 actor VisionCaptureToolLoop {
     typealias Inference = @Sendable (AppToolTurn) async throws
+        -> VisionCaptureModelCompletion
+    typealias ThinkingInference = @Sendable (AppToolTurn, AgentThinkingRequest) async throws
         -> VisionCaptureModelCompletion
     typealias Activity = @Sendable (VisionCaptureActivityEvent) async -> Void
     typealias Checkpoint = @Sendable (AgentContextCheckpointProposal) async throws
@@ -1028,6 +1082,74 @@ actor VisionCaptureToolLoop {
         return observation.facts
     }
 
+    func generateModelDecision(
+        turn: AppToolTurn, thinking: AgentThinkingRequest,
+        activity: @escaping Activity, inference: @escaping ThinkingInference
+    ) async throws -> VisionCaptureModelCompletion {
+        do {
+            try Task.checkCancellation()
+            let completion = try await inference(turn, thinking)
+            try Task.checkCancellation()
+            return completion
+        } catch {
+            guard let failure = error as? AppInferenceError,
+                  case .repeatedThought(let receipt) = failure else { throw error }
+            let selection = await thinking.selection()
+            guard selection.enabled else { throw error }
+            taskCheckpoint.recordInterruptedGeneration(receipt)
+            let activityID = UUID()
+            do {
+                try Task.checkCancellation()
+                let matches: Bool
+                switch turn {
+                case .user, .checkpoint:
+                    matches = !receipt.canRetryToolResult
+                        && receipt.pendingCallID == nil && receipt.pendingToolName == nil
+                case .results(let results):
+                    matches = results.count == 1 && receipt.canRetryToolResult
+                        && receipt.pendingCallID == results[0].callID
+                        && receipt.pendingToolName == results[0].name
+                }
+                guard matches else {
+                    throw VisionCaptureAgentError.noProgress(
+                        "Repeated thinking cannot be recovered at this mismatched retained model boundary. "
+                            + "No action was replayed.")
+                }
+                thoughtRecoveryUsed = true
+                thoughtRecoveryFacts = currentScreenContentIdentity?.factsDigest
+                await thinking.recoverThought()
+                try Task.checkCancellation()
+                await activity(.generationRecovery(id: activityID,
+                    text: "Repeated thinking interrupted (\(receipt.generatedTokens) generated tokens). "
+                        + "Retrying the same model decision with thinking off. "
+                        + "No host request was replayed or refreshed.", status: .dispatching))
+                try Task.checkCancellation()
+                let completion = try await inference(turn, thinking)
+                try Task.checkCancellation()
+                await activity(.generationRecovery(id: activityID,
+                    text: "Model decision resumed after repeated thinking. Earlier app actions were not replayed.",
+                    status: .succeeded))
+                return completion
+            } catch {
+                var terminal: any Error = error
+                if let retryFailure = error as? AppInferenceError,
+                   case .repeatedThought(let retryReceipt) = retryFailure {
+                    taskCheckpoint.recordInterruptedGeneration(retryReceipt)
+                    terminal = VisionCaptureAgentError.noProgress(
+                        "The model repeated its thinking again after one recovery without verified progress "
+                            + "or changed app facts. Generation stopped. No action was replayed.")
+                    if Task.isCancelled { terminal = CancellationError() }
+                }
+                await activity(.generationRecovery(id: activityID,
+                    text: terminal is CancellationError ? "Thinking recovery cancelled. No action was replayed."
+                        : "Thinking recovery stopped: \(terminal)",
+                    status: terminal is CancellationError ? .cancelled
+                        : .localFailure(reason: String(describing: terminal))))
+                throw terminal
+            }
+        }
+    }
+
     func run(
         configuration: VisionCaptureAgentConfiguration,
         activity: @escaping Activity,
@@ -1039,6 +1161,25 @@ actor VisionCaptureToolLoop {
         forceCheckpoint: @escaping @Sendable () async -> Bool = { false },
         hasPendingUserInstruction: @escaping HasPendingUserInstruction = { false },
         inference: @escaping Inference
+    ) async throws -> VisionCaptureAgentRunResult {
+        try await run(configuration: configuration, activity: activity,
+            userPrompt: userPrompt, userImages: userImages, conversationEpoch: conversationEpoch,
+            maxContextTokens: maxContextTokens, checkpoint: checkpoint, forceCheckpoint: forceCheckpoint,
+            hasPendingUserInstruction: hasPendingUserInstruction,
+            inference: { turn, _ in try await inference(turn) })
+    }
+
+    func run(
+        configuration: VisionCaptureAgentConfiguration,
+        activity: @escaping Activity,
+        userPrompt: String = "",
+        userImages: [AppImageAttachment] = [],
+        conversationEpoch: UUID? = nil,
+        maxContextTokens: Int? = nil,
+        checkpoint: Checkpoint? = nil,
+        forceCheckpoint: @escaping @Sendable () async -> Bool = { false },
+        hasPendingUserInstruction: @escaping HasPendingUserInstruction = { false },
+        inference: @escaping ThinkingInference
     ) async throws -> VisionCaptureAgentRunResult {
         try Task.checkCancellation()
         activePendingUserInstructionCheck = hasPendingUserInstruction
@@ -1108,15 +1249,16 @@ actor VisionCaptureToolLoop {
         var nextReadyOffer: ReadyActionOffer?
         var retryBoundary: GenerationRetryBoundary?
         var activeThoughtRecovery: UUID?
+        var thinking = AgentThinkingRequest()
+        var previousProposal: (name: String, arguments: String)?
 
         while true {
             let readyOffer = nextReadyOffer
             nextReadyOffer = nil
             let completion: VisionCaptureModelCompletion
             do {
-                try Task.checkCancellation()
-                completion = try await inference(next)
-                try Task.checkCancellation()
+                completion = try await generateModelDecision(
+                    turn: next, thinking: thinking, activity: activity, inference: inference)
             } catch {
                 if let appError = error as? AppInferenceError,
                    case .repeatedThought(let receipt) = appError {
@@ -1124,7 +1266,9 @@ actor VisionCaptureToolLoop {
                     let activityID = activeThoughtRecovery ?? UUID()
                     do {
                         try Task.checkCancellation()
-                        guard !thoughtRecoveryUsed else {
+                        let isRecoveryRetry = await thinking.isThoughtRecovery()
+                        try Task.checkCancellation()
+                        guard !isRecoveryRetry, !thoughtRecoveryUsed else {
                             throw VisionCaptureAgentError.noProgress(
                                 "The model repeated its thinking again after one recovery without verified progress or changed app facts. Generation stopped. No action was replayed.")
                         }
@@ -1159,6 +1303,7 @@ actor VisionCaptureToolLoop {
                         retryBoundary = refreshed
                         next = .results([refreshed.result])
                         activeThoughtRecovery = activityID
+                        await thinking.recoverThought()
                         await activity(.generationRecovery(id: activityID,
                             text: "Current visual evidence prepared. Retrying the interrupted decision\(receipt.requiresRebuild ? " and rebuilding model context" : "")… Earlier app actions were not replayed.",
                             status: .dispatching))
@@ -1187,9 +1332,6 @@ actor VisionCaptureToolLoop {
                     status: .succeeded))
                 activeThoughtRecovery = nil
             }
-            // Inference (including its bounded model-only regeneration) has
-            // consumed this step. Past pixels remain only in the model KV.
-            screenshotStore.removeAll()
             for call in completion.toolCalls {
                 guard !call.id.isEmpty, knownCallIDs.insert(call.id).inserted else {
                     let reason = "the tool call ID was empty or repeated"
@@ -1238,6 +1380,10 @@ actor VisionCaptureToolLoop {
             }
             if completion.toolCalls.isEmpty {
                 guard completion.diagnostics.stopReason != .toolCalls else {
+                    if await thinking.retryNoCall(unparseable: true) {
+                        nextReadyOffer = readyOffer
+                        continue
+                    }
                     throw VisionCaptureAgentError.malformedCall(
                         "the model stopped for a tool call without returning one")
                 }
@@ -1250,6 +1396,10 @@ actor VisionCaptureToolLoop {
                         diagnostics: completion.diagnostics)
                 }
                 guard !answer.isEmpty else {
+                    if await thinking.retryNoCall(unparseable: false) {
+                        nextReadyOffer = readyOffer
+                        continue
+                    }
                     throw VisionCaptureAgentError.incompleteAnswer
                 }
                 if completion.diagnostics.stopReason == .endOfTurn,
@@ -1264,6 +1414,9 @@ actor VisionCaptureToolLoop {
                     diagnostics: completion.diagnostics)
             }
 
+            // A usable decision consumed this step. A no-call retry above
+            // retains the exact input images and the current ready offer.
+            screenshotStore.removeAll()
             guard completion.diagnostics.stopReason == .toolCalls else {
                 let reason = "the model returned a tool call without a tool-call stop"
                 for call in completion.toolCalls {
@@ -1285,6 +1438,13 @@ actor VisionCaptureToolLoop {
                 }
                 throw error
             }
+
+            let canonicalEncoder = JSONEncoder()
+            canonicalEncoder.outputFormatting = [.sortedKeys]
+            let proposalArguments = String(decoding: try canonicalEncoder.encode(call.arguments), as: UTF8.self)
+            let repeatedProposal = previousProposal?.name == call.name
+                && previousProposal?.arguments == proposalArguments
+            previousProposal = (call.name, proposalArguments)
 
             var content: String
             var executionOutcome: String
@@ -1585,6 +1745,25 @@ actor VisionCaptureToolLoop {
                 // proposal suppressed immediately after model completion.
                 throw CancellationError()
             }
+            // The settled ledger retains generic error/proof truth; the display
+            // packet projects it into last_action and current choices.
+            let resultJSON = (try? JSONDecoder().decode(JSONValue.self,
+                from: Data(executionOutcome.utf8)))?.objectValue
+            let nextThinkingReason: String?
+            if resultJSON?["is_error"] == .bool(true) {
+                nextThinkingReason = "tool_result_error"
+            } else if resultJSON?["proof"]?.objectValue?["verdict"] == .string("failed") {
+                nextThinkingReason = "tool_proof_failed"
+            } else if repeatedProposal {
+                nextThinkingReason = "repeated_tool_call"
+            } else {
+                nextThinkingReason = nil
+            }
+            let lastThinking = await thinking.selection()
+            thinking = AgentThinkingRequest(
+                enabled: !lastThinking.enabled && nextThinkingReason != nil,
+                reason: lastThinking.enabled ? "one_request_complete"
+                    : nextThinkingReason ?? "agent_default")
             next = .results([settledResult])
             retryBoundary = isHistoryRead ? nil : GenerationRetryBoundary(
                 call: call, result: settledResult, outcome: executionOutcome,
@@ -6313,6 +6492,7 @@ actor VisionCaptureToolLoop {
                 ? "not_dispatched" : "succeeded"),
             "available_actions": .array(availableActions),
         ]
+        if result.isError { body["is_error"] = .bool(true) }
         if result.isRecoverableColdMiss {
             body["dispatch_attempted"] = .bool(false)
             body["instruction"] = .string(
@@ -6699,6 +6879,10 @@ actor VisionCaptureToolLoop {
         _ request: (@Sendable (JSONValue) async throws -> VisionCaptureMCPResult)?
     ) {
         hostRequestForTesting = request
+    }
+
+    func setFlowSessionForTesting(_ id: String = "flow-test") {
+        committedSessionIdentity = SessionIdentity(id: id, kind: "flow")
     }
 
     /// Exercises the two pointer entry paths and the normal next-packet builder.

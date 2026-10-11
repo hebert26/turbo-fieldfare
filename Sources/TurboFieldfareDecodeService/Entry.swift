@@ -5,6 +5,25 @@ import Synchronization
 import TurboFieldfareAppCore
 import TurboFieldfareDecodeProtocol
 
+enum DecodeServiceGenerationOptions {
+    static func compatible(_ requested: DecodeRuntimeOptions, with loaded: DecodeRuntimeOptions?,
+                           toolAware: Bool = false) -> Bool {
+        guard let loaded else { return false }
+        var comparable = requested
+        comparable.prefillEnabled = loaded.prefillEnabled
+        comparable.prefillChunkTokens = loaded.prefillChunkTokens
+        if toolAware { comparable.toolThinkingEnabled = loaded.toolThinkingEnabled }
+        return comparable == loaded
+    }
+
+    static func retainsEmptyToolBoundary(toolAware: Bool, hasVisibleText: Bool,
+                                         hasToolCalls: Bool, stopReason: AppStopReason?) -> Bool {
+        toolAware && !hasVisibleText && !hasToolCalls
+            && (stopReason == .eos || stopReason == .endOfTurn
+                || stopReason == .stopString || stopReason == .maxTokens)
+    }
+}
+
 enum DecodeServiceError: Error, CustomStringConvertible {
     case attachmentOutsideStore(path: String)
 
@@ -625,15 +644,10 @@ struct DecodeServiceReadyPublisher {
                         to: handles.output)
                     continue
                 }
-                // Prefill is chosen per request, not at load, so it must not be
-                // part of this comparison: toggling it and pressing Generate was
-                // refused as a mismatched session.
-                var comparable = request.runtimeOptions
-                comparable.prefillEnabled = loadedOptions?.prefillEnabled
-                    ?? comparable.prefillEnabled
-                comparable.prefillChunkTokens = loadedOptions?.prefillChunkTokens
-                    ?? comparable.prefillChunkTokens
-                guard comparable == loadedOptions else {
+                // Prefill and the generation-template thinking mode are request scoped.
+                // Forward the original request below; only admission is normalized.
+                guard DecodeServiceGenerationOptions.compatible(request.runtimeOptions, with: loadedOptions,
+                    toolAware: request.toolTurn != nil) else {
                     try? write(Self.event(
                         .failed, id: request.generationID, binding: binding,
                         error: "generation runtime options do not match the loaded session",
@@ -759,11 +773,19 @@ struct DecodeServiceReadyPublisher {
                     generation.captureGPUCompletionTiming = request.captureGPUCompletionTiming == true
                     generation.runtimeMeasurementCapture = request.runtimeMeasurementCapture
                     var terminalStopReason: AppStopReason?
+                    var hasVisibleText = false
+                    var hasToolCalls = false
                     for try await event in client.generate(
                         generation, measurementCapture: measurementCapture,
                         generationStop: generationStop) {
                         if case .finished(let diagnostics) = event {
                             terminalStopReason = diagnostics.stopReason
+                        } else if case .token(let token) = event {
+                            if !token.textDelta.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                hasVisibleText = true
+                            }
+                        } else if case .toolCall = event {
+                            hasToolCalls = true
                         }
                         outbox.publish(event)
                     }
@@ -774,13 +796,17 @@ struct DecodeServiceReadyPublisher {
                     // it either, and a one-sided count rejects every later turn.
                     // A turn stopped by the user does reach here: it ends at a
                     // token boundary with its partial reply committed.
-                    if case .checkpoint = request.toolTurn { conversation.checkpointResumed() }
-                    if request.toolTurn != nil,
-                       terminalStopReason == .toolCalls {
-                        pendingToolAdmission = admission
-                    } else {
-                        conversation.commit(admission)
-                        pendingToolAdmission = nil
+                    let retainsBoundary = DecodeServiceGenerationOptions.retainsEmptyToolBoundary(
+                        toolAware: request.toolTurn != nil, hasVisibleText: hasVisibleText,
+                        hasToolCalls: hasToolCalls, stopReason: terminalStopReason)
+                    if !retainsBoundary {
+                        if case .checkpoint = request.toolTurn { conversation.checkpointResumed() }
+                        if request.toolTurn != nil, terminalStopReason == .toolCalls {
+                            pendingToolAdmission = admission
+                        } else {
+                            conversation.commit(admission)
+                            pendingToolAdmission = nil
+                        }
                     }
                     outbox.finish()
                 } catch {
@@ -867,7 +893,7 @@ struct DecodeServiceReadyPublisher {
         try handle.write(contentsOf: DecodeFrameCodec.encode(event))
     }
 
-    private static func appRuntimeOptions(_ options: DecodeRuntimeOptions) throws
+    static func appRuntimeOptions(_ options: DecodeRuntimeOptions) throws
         -> AppRuntimeOptions {
         guard let cachePolicy = AppExpertCachePolicy(
             rawValue: options.expertCachePolicy) else {

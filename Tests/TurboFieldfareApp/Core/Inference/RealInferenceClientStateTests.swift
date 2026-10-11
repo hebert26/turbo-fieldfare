@@ -11,6 +11,52 @@ import TurboFieldfareFormat
 /// before any network or Metal work, idle cancel is a no-op, and a bad
 /// request fails the stream with a typed error.
 @Suite struct RealInferenceClientStateTests {
+    @Test func generationAdmissionAllowsThinkingOnlyChangeForToolTurn() {
+        let directory = URL(fileURLWithPath: "/tmp/fixture-model")
+        let loaded = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(toolThinkingEnabled: false))
+        let requested = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(toolThinkingEnabled: true))
+        #expect(!loaded.acceptsGeneration(requested))
+        #expect(loaded.acceptsGeneration(requested, toolAware: true))
+    }
+
+    @Test func generationAdmissionKeepsOtherRuntimeOptionsStrict() {
+        let directory = URL(fileURLWithPath: "/tmp/fixture-model")
+        let loaded = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(toolThinkingEnabled: false))
+        let changedOptions = [
+            AppRuntimeOptions(expertCacheSlots: 32, toolThinkingEnabled: true),
+            AppRuntimeOptions(expertCachePolicy: .lru, toolThinkingEnabled: true),
+            AppRuntimeOptions(rdadvisePolicy: .bounded, toolThinkingEnabled: true),
+            AppRuntimeOptions(modelVerification: .trustedInstall, toolThinkingEnabled: true),
+            AppRuntimeOptions(visionResidencyPolicy: .keepReady, toolThinkingEnabled: true),
+        ]
+        for options in changedOptions {
+            let requested = SessionLoadKey(directory: directory, maxContext: 1024, options: options)
+            #expect(!loaded.acceptsGeneration(requested, toolAware: true),
+                "Only tool thinking may differ for tool-aware generation: \(options)")
+        }
+    }
+
+    @Test func generationAdmissionKeepsPerRequestPrefillExceptions() {
+        let directory = URL(fileURLWithPath: "/tmp/fixture-model")
+        let loaded = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(toolThinkingEnabled: false))
+        let prefillEnabledOnly = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(prefillEnabled: false, toolThinkingEnabled: false))
+        let chunkSizeOnly = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(prefillChunkTokens: 256, toolThinkingEnabled: false))
+        let prefillAndThinking = SessionLoadKey(directory: directory, maxContext: 1024,
+            options: AppRuntimeOptions(prefillEnabled: false, prefillChunkTokens: 256,
+                toolThinkingEnabled: true))
+        #expect(loaded.acceptsGeneration(prefillEnabledOnly))
+        #expect(loaded.acceptsGeneration(chunkSizeOnly))
+        #expect(loaded.acceptsGeneration(prefillEnabledOnly, toolAware: true))
+        #expect(loaded.acceptsGeneration(chunkSizeOnly, toolAware: true))
+        #expect(!loaded.acceptsGeneration(prefillAndThinking))
+        #expect(loaded.acceptsGeneration(prefillAndThinking, toolAware: true))
+    }
     @Test func generationRegistryScopesTerminationToOwningID() async {
         let registry = GenerationTaskRegistry()
         let first = UUID()

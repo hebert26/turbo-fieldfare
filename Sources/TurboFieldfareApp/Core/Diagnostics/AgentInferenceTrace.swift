@@ -370,7 +370,9 @@ actor AgentInferenceTrace {
         }
     }
 
-    func begin(_ request: AppGenerationRequest) -> Step {
+    private var lastAgentThinking: (conversation: UUID?, enabled: Bool)?
+
+    func begin(_ request: AppGenerationRequest, thinkingReason: String? = nil) -> Step {
         var step = Step(
             id: UUID(), index: nextStepIndex,
             conversation: request.conversationEpoch, turn: request.turnIndex,
@@ -484,6 +486,20 @@ actor AgentInferenceTrace {
             input["kind"] = .string("user")
         }
         append(step: step, event: "input", body: ["input": .object(input)])
+        if let thinkingReason {
+            let enabled = request.runtimeOptions.toolThinkingEnabled
+            let initializesRun: Bool
+            if case .user = request.toolTurn {
+                initializesRun = thinkingReason == "agent_default"
+            } else { initializesRun = false }
+            if initializesRun || lastAgentThinking?.conversation != request.conversationEpoch
+                || lastAgentThinking?.enabled != enabled {
+                append(step: step, event: "thinking_switch", body: [
+                    "enabled": .bool(enabled), "reason": .string(thinkingReason),
+                ], maximumBytes: 2_048)
+            }
+            lastAgentThinking = (request.conversationEpoch, enabled)
+        }
         return step
     }
 
@@ -809,6 +825,8 @@ actor AgentInferenceTrace {
 
     #if DEBUG
     static func forTesting(path: String) -> AgentInferenceTrace? { AgentInferenceTrace(path: path) }
+
+    func closeWriterForTesting() { try? file.close() }
     #endif
 
     private func append(

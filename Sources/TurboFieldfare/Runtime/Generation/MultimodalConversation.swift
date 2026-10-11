@@ -188,6 +188,31 @@ public struct ConversationCheckpointReceipt: Sendable {
     public let performanceMinimumSavingsTokens: Int?
 }
 
+/// Rendering and cache compatibility for one physical Gemma tool request.
+struct GemmaToolRequestTemplate: Sendable {
+    let tokenizer: GFTokenizer
+
+    init(loadedTokenizer: GFTokenizer, thinkingEnabled: Bool? = nil) {
+        tokenizer = thinkingEnabled.map { loadedTokenizer.withToolThinking(enabled: $0) } ?? loadedTokenizer
+    }
+
+    func canReuse(thinkingEnabled: Bool) -> Bool {
+        thinkingEnabled == tokenizer.enableToolThinking
+    }
+
+    func encodeChat(messages: [GFTokenizer.Message], tools: [GFTokenizer.FunctionDefinition]) throws -> [Int32] {
+        try tokenizer.encodeToolChat(messages: messages, tools: tools)
+    }
+
+    func encodeResultContinuation(
+        cachedMessages: [GFTokenizer.Message], assistant: GFTokenizer.Message,
+        incomingMessages: [GFTokenizer.Message], tools: [GFTokenizer.FunctionDefinition]
+    ) throws -> [Int32] {
+        try tokenizer.encodeToolResultContinuation(cachedMessages: cachedMessages,
+            assistant: assistant, incomingMessages: incomingMessages, tools: tools)
+    }
+}
+
 /// A stateful multi-turn conversation that owns its own KV lineage.
 ///
 /// The server has to *match* a stateless request against a cached prefix and
@@ -209,11 +234,48 @@ public actor GemmaMultimodalConversation {
         let suffix: [Int32]
     }
 
-    private let model: Model
-    private let context: MetalContext
-    private let tokenizer: GFTokenizer
-    private let runner: RealForwardRunner
-    private let scratch: RawCompletionScratch
+    private struct Hardware {
+        let model: Model
+        let context: MetalContext
+        let runner: RealForwardRunner
+        let scratch: RawCompletionScratch
+    }
+
+    private let hardware: Hardware?
+    private var model: Model { hardware!.model }
+    private var context: MetalContext { hardware!.context }
+    private var runner: RealForwardRunner { hardware!.runner }
+    private var scratch: RawCompletionScratch { hardware!.scratch }
+    private let testCompletion: TestCompletion?
+
+    /// Replaces only model execution and KV storage; real conversation paths remain in use.
+    struct TestCompletion: Sendable {
+        let position: @Sendable () -> Int
+        let rewind: @Sendable (Int) throws -> Void
+        let reset: @Sendable () -> Void
+        let run: @Sendable (
+            [Int32], MultimodalPrefillInput?, Int, (RawDecodeProgress) -> Void
+        ) throws -> RawDecodeResult
+    }
+
+    private var continuationPosition: Int { testCompletion?.position() ?? runner.continuationPosition }
+
+    private func rewind(to position: Int) throws {
+        if let testCompletion { try testCompletion.rewind(position) }
+        else { try runner.rewind(to: position) }
+    }
+
+    private func resetRunner() {
+        if let testCompletion { testCompletion.reset() }
+        else { runner.reset() }
+    }
+
+    private let loadedTokenizer: GFTokenizer
+    private var requestTemplate: GemmaToolRequestTemplate?
+    private var toolTemplate: GemmaToolRequestTemplate {
+        requestTemplate ?? GemmaToolRequestTemplate(loadedTokenizer: loadedTokenizer)
+    }
+    private var tokenizer: GFTokenizer { toolTemplate.tokenizer }
     private let visionRuntime: VisionRuntime?
     private let visionRuntimeError: Error?
     private let visionResidency: VisionResidencyPolicy
@@ -246,9 +308,10 @@ public actor GemmaMultimodalConversation {
     private var boundaryNeedsReplay = false
     private var toolState: ToolState?
     private var checkpointOpening: (
-        id: UUID, turn: EncodedTurn, state: ToolState, needsFormatCorrection: Bool)?
+        id: UUID, turn: EncodedTurn, state: ToolState, needsFormatCorrection: Bool,
+        thinkingEnabled: Bool)?
     private var assessedResultBridge: (result: ConversationToolResult,
-        calls: [GFTokenizer.HistoricalToolCall], tokens: [Int32])?
+        calls: [GFTokenizer.HistoricalToolCall], tokens: [Int32], thinkingEnabled: Bool)?
     private var largestCheckpointResultTokens = 0
     private var largestCheckpointGenerationTokens = 0
 
@@ -261,15 +324,51 @@ public actor GemmaMultimodalConversation {
                 visionRuntimeError: Error? = nil,
                 visionResidency: VisionResidencyPolicy = .defaultPolicy,
                 maxContext: Int) {
-        self.model = model
-        self.context = context
-        self.tokenizer = tokenizer
-        self.runner = runner
-        self.scratch = scratch
+        self.hardware = Hardware(model: model, context: context, runner: runner, scratch: scratch)
+        self.testCompletion = nil
+        self.loadedTokenizer = tokenizer
         self.visionRuntime = visionRuntime
         self.visionRuntimeError = visionRuntimeError
         self.visionResidency = visionResidency
         self.maxContext = maxContext
+    }
+
+    init(tokenizer: GFTokenizer, testCompletion: TestCompletion,
+         messages: [GFTokenizer.Message], tools: [GFTokenizer.FunctionDefinition],
+         tokenIDs: [Int32], maxContext: Int) {
+        hardware = nil
+        self.testCompletion = testCompletion
+        loadedTokenizer = tokenizer
+        visionRuntime = nil
+        visionRuntimeError = nil
+        visionResidency = .defaultPolicy
+        self.maxContext = maxContext
+        toolState = ToolState(messages: messages, tools: tools, awaitingResults: true)
+        kvTokenIDs = tokenIDs
+    }
+
+    func seedAssessedResultBridgeForTesting(
+        result: ConversationToolResult, calls: [GFTokenizer.HistoricalToolCall],
+        tokens: [Int32], thinkingEnabled: Bool
+    ) {
+        precondition(testCompletion != nil && !generating && !resetting)
+        assessedResultBridge = (result, calls, tokens, thinkingEnabled)
+    }
+
+    func seedCheckpointOpeningForTesting(
+        id: UUID, messages: [GFTokenizer.Message], tools: [GFTokenizer.FunctionDefinition],
+        tokens: [Int32], thinkingEnabled: Bool
+    ) {
+        precondition(testCompletion != nil && !generating && !resetting && kvTokenIDs.isEmpty)
+        checkpointOpening = (id, EncodedTurn(effectiveTokenIDs: tokens, prefillInput: nil),
+            ToolState(messages: messages, tools: tools, awaitingResults: false), false, thinkingEnabled)
+        toolState = nil
+    }
+
+    func templateStateForTesting() -> (
+        hasAssessedResultBridge: Bool, checkpointID: UUID?, checkpointThinkingEnabled: Bool?
+    ) {
+        (assessedResultBridge != nil, checkpointOpening?.id, checkpointOpening?.thinkingEnabled)
     }
 
     public var kvTokenCount: Int { kvTokenIDs.count }
@@ -318,7 +417,7 @@ public actor GemmaMultimodalConversation {
     private func discardProvisionalToolResultPrefix() {
         guard provisionalToolResultPrefix != nil else { return }
         provisionalToolResultPrefix = nil
-        runner.reset()
+        resetRunner()
         kvNeedsRebuild = !kvTokenIDs.isEmpty
     }
 
@@ -359,10 +458,11 @@ public actor GemmaMultimodalConversation {
         let continuationAssistant = Self.toolCallBoundaryMessage(assistant)
         let bridge: [Int32]
         if let assessed = assessedResultBridge, assessed.result == result,
-           assessed.calls == assistant.toolCalls {
+           assessed.calls == assistant.toolCalls,
+           toolTemplate.canReuse(thinkingEnabled: assessed.thinkingEnabled) {
             bridge = assessed.tokens
         } else {
-            bridge = try tokenizer.encodeToolResultContinuation(
+            bridge = try toolTemplate.encodeResultContinuation(
                 cachedMessages: Array(state.messages.dropLast()),
                 assistant: continuationAssistant,
                 incomingMessages: Array(state.messages.dropLast())
@@ -421,7 +521,7 @@ public actor GemmaMultimodalConversation {
             openingText += record
             var messages = state.messages.filter { $0.role == .system || $0.role == .developer }
             messages.append(GFTokenizer.Message(role: .user, content: openingText))
-            let template = try tokenizer.encodeToolChat(messages: messages, tools: state.tools)
+            let template = try toolTemplate.encodeChat(messages: messages, tools: state.tools)
             guard template.filter({ $0 == MultimodalPromptRenderer.imageTokenID }).count == retainedRowCounts.count else {
                 throw MultimodalPromptRendererError.placeholderMismatch
             }
@@ -475,7 +575,7 @@ public actor GemmaMultimodalConversation {
             try checkCancellation()
             // No await after the final cancellation check or before the new
             // record is installed. Old GPU work is settled by the idle guard.
-            runner.reset()
+            resetRunner()
             kvTokenIDs.removeAll()
             committedImageSpans.removeAll()
             uncommittedBoundary.removeAll()
@@ -485,11 +585,11 @@ public actor GemmaMultimodalConversation {
             assessedResultBridge = nil
             checkpointOpening = (id, turn,
                 ToolState(messages: preparedReplacement.messages, tools: state.tools,
-                          awaitingResults: false), false)
+                          awaitingResults: false), false, tokenizer.enableToolThinking)
         } else {
             // Reuse the exact suffix on ordinary continuation. Capacity assess
             // does not construct or tokenize the growing replacement ledger.
-            assessedResultBridge = (result, assistant.toolCalls, bridge)
+            assessedResultBridge = (result, assistant.toolCalls, bridge, tokenizer.enableToolThinking)
         }
         return ConversationCheckpointReceipt(needed: needed, existingPromptTokens: existingCount,
             replacementPromptTokens: replacementCount, reserveTokens: reserve,
@@ -502,7 +602,8 @@ public actor GemmaMultimodalConversation {
     }
 
     public func resumeCheckpoint(
-        id: UUID, config: GenerationConfig, prefillConfig: PrefillRuntimeConfig,
+        id: UUID, config: GenerationConfig,
+        toolThinkingEnabled: Bool? = nil, prefillConfig: PrefillRuntimeConfig,
         checkCancellation: @escaping @Sendable () throws -> Void,
         shouldStop: (@Sendable () -> Bool)?, captureToolFailureEvidence: Bool,
         maximumConsecutiveInvisibleTokens: Int?, captureThoughtPreview: Bool,
@@ -512,13 +613,21 @@ public actor GemmaMultimodalConversation {
     ) async throws -> StructuredConversationTurnResult {
         guard !closed, !lineageBroken else { throw MultimodalConversationError.lineageBroken }
         guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        generating = true
+        requestTemplate = GemmaToolRequestTemplate(
+            loadedTokenizer: loadedTokenizer, thinkingEnabled: toolThinkingEnabled)
+        defer {
+            requestTemplate = nil
+            finishGeneration()
+        }
         guard var opening = checkpointOpening, opening.id == id, kvTokenIDs.isEmpty else {
             throw MultimodalConversationError.invalidToolContinuation
         }
         try checkCancellation()
-        if opening.needsFormatCorrection {
-            let messages = try Self.correctingCheckpointToolFormat(opening.state.messages)
-            let template = try tokenizer.encodeToolChat(messages: messages, tools: opening.state.tools)
+        if opening.needsFormatCorrection || !toolTemplate.canReuse(thinkingEnabled: opening.thinkingEnabled) {
+            let messages = opening.needsFormatCorrection
+                ? try Self.correctingCheckpointToolFormat(opening.state.messages) : opening.state.messages
+            let template = try toolTemplate.encodeChat(messages: messages, tools: opening.state.tools)
             let features = opening.turn.prefillInput?.imageSpans.map(\.features) ?? []
             let input = features.isEmpty ? nil
                 : try MultimodalPromptRenderer.expandingImageTokens(template, features: features)
@@ -526,10 +635,9 @@ public actor GemmaMultimodalConversation {
                 effectiveTokenIDs: input?.effectiveTokenIDs ?? template, prefillInput: input)
             opening.state.messages = messages
             opening.needsFormatCorrection = false
+            opening.thinkingEnabled = tokenizer.enableToolThinking
             checkpointOpening = opening
         }
-        generating = true
-        defer { finishGeneration() }
         let completion: StructuredConversationTurnResult
         do {
             completion = try await completeEncodedTurn(opening.turn, config: config,
@@ -546,6 +654,10 @@ public actor GemmaMultimodalConversation {
                 checkpointOpening?.needsFormatCorrection = true
             }
             throw error
+        }
+        if Self.isRetryableEmptyToolCompletion(text: completion.turn.text,
+            hasToolCalls: !completion.toolCalls.isEmpty, reason: completion.turn.reason) {
+            return completion
         }
         opening.state.messages.append(Self.assistantMessage(for: completion))
         opening.state.awaitingResults = !completion.toolCalls.isEmpty
@@ -626,7 +738,7 @@ public actor GemmaMultimodalConversation {
             await waitForGeneration()
         }
         guard !closed else { return }
-        runner.reset()
+        resetRunner()
         kvTokenIDs.removeAll(keepingCapacity: true)
         committedImageSpans.removeAll()
         kvNeedsRebuild = false
@@ -652,7 +764,7 @@ public actor GemmaMultimodalConversation {
         // Same hazard as `reset()`: the runner is shared and the decode is still
         // using it.
         await waitForGeneration()
-        runner.reset()
+        resetRunner()
         kvTokenIDs.removeAll(keepingCapacity: false)
         committedImageSpans.removeAll()
         kvNeedsRebuild = false
@@ -745,6 +857,7 @@ public actor GemmaMultimodalConversation {
         developerPrompt: String?,
         tools: [GFTokenizer.FunctionDefinition],
         config: GenerationConfig,
+        toolThinkingEnabled: Bool? = nil,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
         checkCancellation: @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
@@ -759,6 +872,13 @@ public actor GemmaMultimodalConversation {
         guard !closed else { throw MultimodalConversationError.closed }
         guard !lineageBroken else { throw MultimodalConversationError.lineageBroken }
         guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        generating = true
+        requestTemplate = GemmaToolRequestTemplate(
+            loadedTokenizer: loadedTokenizer, thinkingEnabled: toolThinkingEnabled)
+        defer {
+            requestTemplate = nil
+            finishGeneration()
+        }
         discardProvisionalToolResultPrefix()
         guard pending == nil else { throw MultimodalConversationError.busy }
         let imageCount = parts.reduce(into: 0) {
@@ -804,8 +924,6 @@ public actor GemmaMultimodalConversation {
                 checkCancellation: checkCancellation)
         }
 
-        generating = true
-        defer { finishGeneration() }
         let completion = try await completeEncodedTurn(
             turn,
             config: config,
@@ -820,6 +938,10 @@ public actor GemmaMultimodalConversation {
             detectThoughtRepetition: detectThoughtRepetition,
             onProgress: onProgress,
             onStructuredProgress: onStructuredProgress)
+        if Self.isRetryableEmptyToolCompletion(text: completion.turn.text,
+            hasToolCalls: !completion.toolCalls.isEmpty, reason: completion.turn.reason) {
+            return completion
+        }
         state.messages.append(Self.assistantMessage(for: completion))
         state.awaitingResults = !completion.toolCalls.isEmpty
         toolState = state
@@ -831,6 +953,7 @@ public actor GemmaMultimodalConversation {
     public func sendToolResults(
         _ results: [ConversationToolResult],
         config: GenerationConfig,
+        toolThinkingEnabled: Bool? = nil,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
         checkCancellation: @escaping @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
@@ -845,6 +968,13 @@ public actor GemmaMultimodalConversation {
         guard !closed else { throw MultimodalConversationError.closed }
         guard !lineageBroken else { throw MultimodalConversationError.lineageBroken }
         guard !generating, !resetting else { throw MultimodalConversationError.busy }
+        generating = true
+        requestTemplate = GemmaToolRequestTemplate(
+            loadedTokenizer: loadedTokenizer, thinkingEnabled: toolThinkingEnabled)
+        defer {
+            requestTemplate = nil
+            finishGeneration()
+        }
         var handedToCompletion = false
         defer {
             if !handedToCompletion { discardProvisionalToolResultPrefix() }
@@ -872,13 +1002,15 @@ public actor GemmaMultimodalConversation {
         let incoming = cached + [continuationAssistant] + toolMessages
         let bridge: [Int32]
         if let assessed = assessedResultBridge, results == [assessed.result],
-           assessed.calls == assistant.toolCalls {
+           assessed.calls == assistant.toolCalls,
+           toolTemplate.canReuse(thinkingEnabled: assessed.thinkingEnabled) {
             bridge = assessed.tokens
         } else {
-            bridge = try tokenizer.encodeToolResultContinuation(
+            bridge = try toolTemplate.encodeResultContinuation(
                 cachedMessages: cached, assistant: continuationAssistant,
                 incomingMessages: incoming, tools: state.tools)
         }
+        let assessedBridgeBeforeRequest = assessedResultBridge
         assessedResultBridge = nil
         let images = results.flatMap(\.images)
         guard !results.contains(where: { $0.content.contains(MultimodalPromptRenderer.placeholder) }) else {
@@ -890,8 +1022,6 @@ public actor GemmaMultimodalConversation {
             throw MultimodalPromptRendererError.placeholderMismatch
         }
 
-        generating = true
-        defer { finishGeneration() }
         let turn: EncodedTurn
         if images.isEmpty {
             turn = EncodedTurn(effectiveTokenIDs: bridge, prefillInput: nil)
@@ -945,6 +1075,11 @@ public actor GemmaMultimodalConversation {
             detectThoughtRepetition: detectThoughtRepetition,
             onProgress: onProgress,
             onStructuredProgress: onStructuredProgress)
+        if Self.isRetryableEmptyToolCompletion(text: completion.turn.text,
+            hasToolCalls: !completion.toolCalls.isEmpty, reason: completion.turn.reason) {
+            assessedResultBridge = assessedBridgeBeforeRequest
+            return completion
+        }
         state.messages.append(contentsOf: toolMessages)
         state.messages.append(Self.assistantMessage(for: completion))
         state.awaitingResults = !completion.toolCalls.isEmpty
@@ -962,6 +1097,13 @@ public actor GemmaMultimodalConversation {
                 GFTokenizer.HistoricalToolCall(
                     id: $0.id, name: $0.name, arguments: $0.arguments)
             })
+    }
+
+    static func isRetryableEmptyToolCompletion(
+        text: String, hasToolCalls: Bool, reason: StopReason
+    ) -> Bool {
+        !hasToolCalls && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && (reason == .eos || reason == .endOfTurn || reason == .stopString || reason == .maxTokens)
     }
 
     private static func toolCallBoundaryMessage(
@@ -996,7 +1138,7 @@ public actor GemmaMultimodalConversation {
             // Errors before decoding, or a failed retry without a new saved
             // prefix, must not leave uncommitted rows as the next KV lineage.
             if provisionalNeedsCleanup, provisionalToolResultPrefix == nil {
-                runner.reset()
+                resetRunner()
                 kvNeedsRebuild = !kvTokenIDs.isEmpty
             }
         }
@@ -1021,7 +1163,7 @@ public actor GemmaMultimodalConversation {
                       provisional.committedTokenCount == kvTokenIDs.count,
                       let pendingToolCalls,
                       provisional.calls == pendingToolCalls,
-                      runner.continuationPosition == kvTokenIDs.count + provisional.suffix.count else {
+                      continuationPosition == kvTokenIDs.count + provisional.suffix.count else {
                     throw MultimodalConversationError.invalidToolContinuation
                 }
                 var shared = 0
@@ -1040,10 +1182,10 @@ public actor GemmaMultimodalConversation {
                 }
                 // Uses the original high-water mark, including the first
                 // rewind. Two short rewinds cannot bypass ring overwrite.
-                try runner.rewind(to: sharedPosition)
+                try rewind(to: sharedPosition)
                 cached = sharedPosition
             } catch {
-                runner.reset()
+                resetRunner()
                 kvNeedsRebuild = !kvTokenIDs.isEmpty
                 provisionalNeedsCleanup = false
                 cached = 0
@@ -1116,21 +1258,17 @@ public actor GemmaMultimodalConversation {
         // threw — the KV had moved, nothing said so, and every later turn
         // resumed at a position the runner no longer had, failing forever while
         // `isUsable` still said yes.
-        let positionBefore = runner.continuationPosition
+        let positionBefore = continuationPosition
         var kvAdvanced = false
         let result: RawDecodeResult
         var originalStopReason: String?
         do {
-            result = try await runRawCompletion(
-            producer: runner,
-            tokenizer: tokenizer,
-            promptIds: promptIDs,
+            result = try await runCompletion(
+            promptIDs: promptIDs,
             multimodalInput: multimodalInput,
             config: generation,
-            context: context,
-            scratch: scratch,
             prefillConfig: effectivePrefill,
-            start: cached == 0 ? .reset : .resume(cachedPromptTokens: cached),
+            cached: cached,
                 // Cancellation mid-decode ends the turn at a token boundary
                 // and returns the partial result; throwing here instead would
                 // condemn the lineage for a KV that is perfectly resumable.
@@ -1218,7 +1356,7 @@ public actor GemmaMultimodalConversation {
         } catch let generationError {
             decoder?.refreshToolCallPreview()
             if let decoder { onStructuredProgress?(decoder.progress) }
-            if runner.continuationPosition != positionBefore { kvAdvanced = true }
+            if continuationPosition != positionBefore { kvAdvanced = true }
             var preservedPrompt = false
             if let pendingToolCalls, !pendingToolCalls.isEmpty,
                turn.prefillInput == nil, boundary.isEmpty,
@@ -1229,7 +1367,7 @@ public actor GemmaMultimodalConversation {
                     try checkCancellation()
                     // Only a fully fed prompt is reusable. This guarded
                     // rewind drops generated rows, never the pending result.
-                    try runner.rewind(to: promptIDs.count)
+                    try rewind(to: promptIDs.count)
                     provisionalToolResultPrefix = ProvisionalToolResultPrefix(
                         committedTokenCount: kvTokenIDs.count,
                         calls: pendingToolCalls, suffix: turn.effectiveTokenIDs)
@@ -1250,10 +1388,10 @@ public actor GemmaMultimodalConversation {
                     try MultimodalConversationKVRecovery.restoreAfterFailure(
                         positionBefore: positionBefore,
                         generationError: generationError,
-                        rewind: runner.rewind(to:),
-                        reset: runner.reset)
+                        rewind: rewind(to:),
+                        reset: resetRunner)
                 } catch {
-                    runner.reset()
+                    resetRunner()
                     kvNeedsRebuild = !kvTokenIDs.isEmpty
                 }
             }
@@ -1269,11 +1407,11 @@ public actor GemmaMultimodalConversation {
                 // The reusable prefix is the committed record, not a failed
                 // format retry's provisional prompt. Retain every image span.
                 provisionalToolResultPrefix = nil
-                if !kvNeedsRebuild, runner.continuationPosition != kvTokenIDs.count {
-                    do { try runner.rewind(to: kvTokenIDs.count) }
-                    catch { runner.reset(); kvNeedsRebuild = !kvTokenIDs.isEmpty }
+                if !kvNeedsRebuild, continuationPosition != kvTokenIDs.count {
+                    do { try rewind(to: kvTokenIDs.count) }
+                    catch { resetRunner(); kvNeedsRebuild = !kvTokenIDs.isEmpty }
                 }
-                guard kvNeedsRebuild || runner.continuationPosition == kvTokenIDs.count else {
+                guard kvNeedsRebuild || continuationPosition == kvTokenIDs.count else {
                     throw MultimodalConversationError.lineageRecoveryFailed(
                         reason: "The repeated generation did not restore its committed prefix.")
                 }
@@ -1304,6 +1442,23 @@ public actor GemmaMultimodalConversation {
         }
 
         provisionalNeedsCleanup = false
+        if allowedTools != nil, Self.isRetryableEmptyToolCompletion(
+            text: text, hasToolCalls: !calls.isEmpty, reason: result.reason) {
+            try checkCancellation()
+            if kvTokenIDs.isEmpty {
+                resetRunner()
+            } else {
+                do { try rewind(to: kvTokenIDs.count) }
+                catch { resetRunner(); kvNeedsRebuild = true }
+            }
+            return StructuredConversationTurnResult(
+                turn: MultimodalTurnResult(
+                    text: text, promptTokens: promptIDs.count, cachedTokens: cached,
+                    computedPrefillTokens: result.computedPrefillTokens, kvTokens: kvTokenIDs.count,
+                    completionTokens: result.newTokens, reason: result.reason,
+                    prefillSeconds: result.prefillSeconds, decodeSeconds: result.decodeSeconds),
+                toolCalls: [])
+        }
         // The KV now holds exactly what the run reported, including the tokens
         // the model generated; keeping the model's own tokens rather than
         // re-tokenising its text is what makes the next turn resumable.
@@ -1321,8 +1476,8 @@ public actor GemmaMultimodalConversation {
                 kvTokenIDs = try MultimodalConversationKVRecovery.trimHiddenStopTokens(
                     result.kvBackedTokenIDs,
                     withheld: result.withheldTrailingKVTokens,
-                    rewind: runner.rewind(to:),
-                    reset: runner.reset)
+                    rewind: rewind(to:),
+                    reset: resetRunner)
             } catch {
                 let target = result.kvBackedTokenIDs.count - result.withheldTrailingKVTokens
                 guard target >= promptIDs.count else {
@@ -1330,7 +1485,7 @@ public actor GemmaMultimodalConversation {
                     throw error
                 }
                 kvTokenIDs = Array(result.kvBackedTokenIDs.prefix(target))
-                runner.reset()
+                resetRunner()
                 kvNeedsRebuild = !kvTokenIDs.isEmpty
             }
         }
@@ -1354,6 +1509,22 @@ public actor GemmaMultimodalConversation {
         return StructuredConversationTurnResult(
             turn: turnResult,
             toolCalls: calls)
+    }
+
+    private func runCompletion(
+        promptIDs: [Int32], multimodalInput: MultimodalPrefillInput?,
+        config: GenerationConfig, prefillConfig: PrefillRuntimeConfig, cached: Int,
+        shouldStop: sending () -> Bool, onProgress: sending (RawDecodeProgress) -> Void
+    ) async throws -> RawDecodeResult {
+        if let testCompletion {
+            return try testCompletion.run(promptIDs, multimodalInput, cached, onProgress)
+        }
+        return try await runRawCompletion(
+            producer: runner, tokenizer: tokenizer, promptIds: promptIDs,
+            multimodalInput: multimodalInput, config: config, context: context,
+            scratch: scratch, prefillConfig: prefillConfig,
+            start: cached == 0 ? .reset : .resume(cachedPromptTokens: cached),
+            shouldStop: shouldStop, onProgress: onProgress)
     }
 
     /// A user stop can land inside a tool span that is valid so far but not
@@ -1388,7 +1559,7 @@ public actor GemmaMultimodalConversation {
         try checkCancellation()
         if shouldStop?() == true { throw CancellationError() }
 
-        let template = try tokenizer.encodeToolChat(messages: messages, tools: tools)
+        let template = try toolTemplate.encodeChat(messages: messages, tools: tools)
         let oldFeatures = committedImageSpans.map(\.features)
         let placeholderCount = template.reduce(into: 0) {
             if $1 == MultimodalPromptRenderer.imageTokenID { $0 += 1 }
@@ -1445,7 +1616,7 @@ public actor GemmaMultimodalConversation {
         let canonicalIDs = fullInput?.effectiveTokenIDs ?? template
         let imageRanges = fullInput?.imageSpans.map(\.tokenRange) ?? []
         var cached = 0
-        if !kvNeedsRebuild, runner.continuationPosition == kvTokenIDs.count {
+        if !kvNeedsRebuild, continuationPosition == kvTokenIDs.count {
             cached = MultimodalConversationCanonicalization.longestReusablePrefix(
                 cached: kvTokenIDs,
                 canonical: canonicalIDs,
@@ -1466,12 +1637,12 @@ public actor GemmaMultimodalConversation {
 
         var turn = try suffix(at: cached)
         if cached == 0 {
-            runner.reset()
+            resetRunner()
         } else if cached < kvTokenIDs.count {
             do {
-                try runner.rewind(to: cached)
+                try rewind(to: cached)
             } catch {
-                runner.reset()
+                resetRunner()
                 cached = 0
                 turn = try suffix(at: 0)
             }
@@ -1550,7 +1721,7 @@ public actor GemmaMultimodalConversation {
     ) async throws -> EncodedTurn {
         guard !images.isEmpty, let visionRuntime else {
             return EncodedTurn(
-                effectiveTokenIDs: try tokenizer.encodeToolChat(
+                effectiveTokenIDs: try toolTemplate.encodeChat(
                     messages: messages, tools: tools),
                 prefillInput: nil)
         }
@@ -1732,6 +1903,7 @@ public actor MultimodalConversation {
     public func resumeCheckpoint(
         id: UUID,
         config: GenerationConfig,
+        toolThinkingEnabled: Bool? = nil,
         prefillConfig: PrefillRuntimeConfig,
         checkCancellation: @escaping @Sendable () throws -> Void,
         shouldStop: (@Sendable () -> Bool)?,
@@ -1745,7 +1917,7 @@ public actor MultimodalConversation {
         switch backing {
         case .gemma(let conversation):
             try await conversation.resumeCheckpoint(
-                id: id, config: config, prefillConfig: prefillConfig,
+                id: id, config: config, toolThinkingEnabled: toolThinkingEnabled, prefillConfig: prefillConfig,
                 checkCancellation: checkCancellation, shouldStop: shouldStop,
                 captureToolFailureEvidence: captureToolFailureEvidence,
                 maximumConsecutiveInvisibleTokens: maximumConsecutiveInvisibleTokens,
@@ -1837,6 +2009,7 @@ public actor MultimodalConversation {
         developerPrompt: String?,
         tools: [GFTokenizer.FunctionDefinition],
         config: GenerationConfig,
+        toolThinkingEnabled: Bool? = nil,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
         checkCancellation: @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
@@ -1852,7 +2025,7 @@ public actor MultimodalConversation {
         case .gemma(let conversation):
             try await conversation.sendToolUser(
                 parts: parts, images: images, developerPrompt: developerPrompt,
-                tools: tools, config: config, prefillConfig: prefillConfig,
+                tools: tools, config: config, toolThinkingEnabled: toolThinkingEnabled, prefillConfig: prefillConfig,
                 checkCancellation: checkCancellation, shouldStop: shouldStop,
                 acceptsUnknownToolNames: acceptsUnknownToolNames,
                 captureToolFailureEvidence: captureToolFailureEvidence,
@@ -1869,6 +2042,7 @@ public actor MultimodalConversation {
     public func sendToolResults(
         _ results: [ConversationToolResult],
         config: GenerationConfig,
+        toolThinkingEnabled: Bool? = nil,
         prefillConfig: PrefillRuntimeConfig = .defaultChunked,
         checkCancellation: @escaping @Sendable () throws -> Void = {},
         shouldStop: (@Sendable () -> Bool)? = nil,
@@ -1883,7 +2057,7 @@ public actor MultimodalConversation {
         switch backing {
         case .gemma(let conversation):
             try await conversation.sendToolResults(
-                results, config: config, prefillConfig: prefillConfig,
+                results, config: config, toolThinkingEnabled: toolThinkingEnabled, prefillConfig: prefillConfig,
                 checkCancellation: checkCancellation, shouldStop: shouldStop,
                 acceptsUnknownToolNames: acceptsUnknownToolNames,
                 captureToolFailureEvidence: captureToolFailureEvidence,

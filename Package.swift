@@ -177,6 +177,7 @@ let package = Package(
             path: "Tests/TurboFieldfare/Core",
             resources: [
                 .copy("Runtime/Vision/Fixtures/images"),
+                .copy("Runtime/Generation/Fixtures/lesson-tokenizer"),
                 .copy("QwenFixtures/qwen36-tiny-fixtures.json"),
                 .copy("QwenFixtures/qwen36-tiny-text-model-fixtures.json"),
                 .copy("QwenFixtures/official-bf16-reference-cases.json"),
